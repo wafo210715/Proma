@@ -137,7 +137,7 @@ export function MigrationImportDialog(): React.ReactElement {
               {/* 路径检查 */}
               {importPreview.pathCheckResults.length > 0 && (
                 <div className="space-y-2">
-                  <label className="text-sm font-medium text-foreground">附加目录处理</label>
+                  <label className="text-sm font-medium text-foreground">附加路径处理</label>
                   <div className="rounded-lg border border-border/50 divide-y divide-border/30">
                     {importPreview.pathCheckResults.map((r) => (
                       <div key={r.path} className="px-4 py-3 space-y-1.5">

@@ -36,20 +36,20 @@ import {
 } from './config-paths'
 import { listAgentWorkspaces, getAgentWorkspace, getAllWorkspaceSkills, getWorkspaceMcpConfig } from './agent-workspace-manager'
 import { listChannels, decryptApiKey } from './channel-manager'
-import type { AgentWorkspace } from '@proma/shared'
+import { getSettings } from './settings-service'
+import { MAX_ATTACHMENT_SIZE, type AgentWorkspace, type AgentSessionMeta } from '@proma/shared'
+import {
+  externalizeLargeWorkspaceFiles,
+  previewLargeWorkspaceFiles,
+  resolveLargeFileAttachmentDir,
+  type LargeFileExternalizationResult,
+} from './large-file-attachment-service'
+import { MIGRATION_BLOCKED_DIRS } from './workspace-file-policy'
 
 // ─── 常量 ────────────────────────────────────────────────────────────────────
 
-/** 导出时跳过的目录名（复用 agent-fork-workspace-copy 的过滤规则） */
-const MIGRATION_BLOCKED_DIRS = new Set([
-  '.claude', '.DS_Store', '.git', 'node_modules',
-  '.venv', 'venv', 'dist', 'build', 'out',
-  '.next', '.nuxt', '.cache', '.parcel-cache', '.turbo',
-  '__pycache__', 'coverage', 'target',
-])
-
-/** 导出时跳过的最大单文件大小（50MB） */
-const MAX_EXPORT_FILE_SIZE = 50 * 1024 * 1024
+/** 导出时仍作为最后防线跳过的最大单文件大小。 */
+const MAX_EXPORT_FILE_SIZE = MAX_ATTACHMENT_SIZE
 
 // ─── 类型定义 ────────────────────────────────────────────────────────────────
 
@@ -69,6 +69,7 @@ export interface ExportResult {
   success: boolean
   filePath: string
   warnings?: string[]
+  externalization?: LargeFileExternalizationResult
 }
 
 export interface ExportPreview {
@@ -150,12 +151,21 @@ export interface ExportOptionsV2 {
   workspaceSelections?: WorkspaceSelection[]
   /** 是否导出会话工作目录文件（默认 false，因可能包含大量项目文件） */
   includeWorkspaceData?: boolean
+  /** 渲染进程预览并经用户确认可迁出的超大文件绝对路径。 */
+  confirmedLargeFilePaths?: string[]
 }
 
 export interface WorkspaceSelection {
   workspaceId: string
   skillSlugs?: string[]
   mcpServerNames?: string[]
+}
+
+export interface LargeFileExportPreview {
+  attachmentRoot: string
+  candidateCount: number
+  totalBytes: number
+  candidatePaths: string[]
 }
 
 export interface ShareExportPreview {
@@ -249,6 +259,20 @@ export async function getExportPreview(workspaceId: string): Promise<ExportPrevi
   }
 }
 
+export async function getLargeFileExportPreview(options: Pick<ExportOptionsV2, 'sessionIds' | 'workspaceSelections'> = {}): Promise<LargeFileExportPreview> {
+  const selectedWorkspaceIds = getSelectedWorkspaceIds(options.workspaceSelections)
+  const candidates = previewLargeWorkspaceFiles().candidates.filter((candidate) => {
+    if (selectedWorkspaceIds && !selectedWorkspaceIds.has(candidate.workspaceId)) return false
+    return !options.sessionIds || candidate.scope === 'workspace' || options.sessionIds.includes(candidate.sessionId ?? '')
+  })
+  return {
+    attachmentRoot: resolveLargeFileAttachmentDir(getSettings().largeFileAttachmentDir),
+    candidateCount: candidates.length,
+    totalBytes: candidates.reduce((total, candidate) => total + candidate.size, 0),
+    candidatePaths: candidates.map((candidate) => candidate.path),
+  }
+}
+
 export async function getShareExportPreview(): Promise<ShareExportPreview> {
   const allWorkspaces = listAgentWorkspaces()
 
@@ -313,7 +337,7 @@ export async function exportData(options: ExportOptions): Promise<ExportResult> 
 }
 
 export async function exportDataV2(options: ExportOptionsV2): Promise<ExportResult> {
-  const { mode, components, sessionIds, outputPath, workspaceSelections, includeWorkspaceData } = options
+  const { mode, components, sessionIds, outputPath, workspaceSelections, includeWorkspaceData, confirmedLargeFilePaths } = options
   const warnings: string[] = []
 
   const allWorkspaces = listAgentWorkspaces()
@@ -357,6 +381,25 @@ export async function exportDataV2(options: ExportOptionsV2): Promise<ExportResu
   const zip = _createArchive(outputPath)
   zip.append(Buffer.from(JSON.stringify(manifest, null, 2), 'utf-8'), { name: 'manifest.json' })
 
+  let externalization: LargeFileExternalizationResult | undefined
+  if (components.includes('sessions') && includeWorkspaceData) {
+    const targetWorkspaceIds = new Set(targetWorkspaces.map((target) => target.workspace.id))
+    const candidates = previewLargeWorkspaceFiles().candidates.filter((candidate) => {
+      if (!targetWorkspaceIds.has(candidate.workspaceId)) return false
+      if (confirmedLargeFilePaths !== undefined && !confirmedLargeFilePaths.includes(candidate.path)) return false
+      return !sessionIds || candidate.scope === 'workspace' || sessionIds.includes(candidate.sessionId ?? '')
+    })
+    if (candidates.length > 0) {
+      externalization = await externalizeLargeWorkspaceFiles({
+        attachmentRoot: getSettings().largeFileAttachmentDir,
+        candidates,
+      })
+      for (const failure of externalization.failures) {
+        addExportWarning(warnings, `大文件迁出失败，已保留原文件: ${failure.path} (${failure.error})`)
+      }
+    }
+  }
+
   if (components.includes('sessions')) {
     _addSessionsMultiWorkspace(zip, targetWorkspaces.map((t) => t.workspace), sessionIds, warnings, includeWorkspaceData ?? false)
   }
@@ -382,7 +425,13 @@ export async function exportDataV2(options: ExportOptionsV2): Promise<ExportResu
   if (mode === 'personal') _addPersonalFiles(zip)
 
   await _finalizeArchive(zip)
-  return buildExportResult(outputPath, warnings)
+  const result = buildExportResult(outputPath, warnings)
+  return externalization ? { ...result, externalization } : result
+}
+
+function getSelectedWorkspaceIds(workspaceSelections?: WorkspaceSelection[]): Set<string> | undefined {
+  if (!workspaceSelections || workspaceSelections.length === 0) return undefined
+  return new Set(workspaceSelections.map((selection) => selection.workspaceId))
 }
 
 function _addSessions(zip: archiver.Archiver, workspace: AgentWorkspace, filterIds: string[] | undefined, warnings: string[]) {
@@ -743,56 +792,49 @@ export async function parseImportFile(filePath: string): Promise<ImportPreview |
 
 function _checkAttachedDirectories(tempDir: string, manifest: MigrationManifest): PathCheckResult[] {
   const configPath = join(tempDir, 'config/workspace-config.json')
-  if (!existsSync(configPath)) return []
-
-  const config = readJsonSafe<{ attachedDirectories?: string[]; attachedFiles?: string[] }>(configPath)
-  const attachedPaths = [...(config?.attachedDirectories ?? []), ...(config?.attachedFiles ?? [])]
-  if (attachedPaths.length === 0) return []
-
-  const currentHome = homedir()
-
-  return attachedPaths.map((p) => {
-    let suggested: string | undefined
-    if (manifest.sourceHomeDir && p.startsWith(manifest.sourceHomeDir)) {
-      suggested = join(currentHome, p.slice(manifest.sourceHomeDir.length))
-    }
-
-    const checkPath = suggested ?? p
-    return {
-      path: p,
-      exists: existsSync(checkPath),
-      suggested,
-    }
-  })
+  const config = existsSync(configPath)
+    ? readJsonSafe<{ attachedDirectories?: string[]; attachedFiles?: string[] }>(configPath)
+    : null
+  const sessionPaths = getSessionAttachedPaths(join(tempDir, 'sessions/agent-sessions-index.json'))
+  return buildPathCheckResults([
+    ...(config?.attachedDirectories ?? []),
+    ...(config?.attachedFiles ?? []),
+    ...sessionPaths,
+  ], manifest.sourceHomeDir)
 }
 
 function _checkAttachedDirectoriesV2(tempDir: string, manifest: MigrationManifestV2): PathCheckResult[] {
-  const currentHome = homedir()
-  const allResults: PathCheckResult[] = []
-  const seen = new Set<string>()
-
+  const attachedPaths: string[] = []
   for (const wsEntry of manifest.workspaces) {
     const configPath = join(tempDir, `workspaces/${wsEntry.workspaceSlug}/config/workspace-config.json`)
-    if (!existsSync(configPath)) continue
-
-    const config = readJsonSafe<{ attachedDirectories?: string[]; attachedFiles?: string[] }>(configPath)
-    const attachedPaths = [...(config?.attachedDirectories ?? []), ...(config?.attachedFiles ?? [])]
-    if (attachedPaths.length === 0) continue
-
-    for (const p of attachedPaths) {
-      if (seen.has(p)) continue
-      seen.add(p)
-
-      let suggested: string | undefined
-      if (manifest.sourceHomeDir && p.startsWith(manifest.sourceHomeDir)) {
-        suggested = join(currentHome, p.slice(manifest.sourceHomeDir.length))
-      }
-      const checkPath = suggested ?? p
-      allResults.push({ path: p, exists: existsSync(checkPath), suggested })
-    }
+    const config = existsSync(configPath)
+      ? readJsonSafe<{ attachedDirectories?: string[]; attachedFiles?: string[] }>(configPath)
+      : null
+    attachedPaths.push(...(config?.attachedDirectories ?? []), ...(config?.attachedFiles ?? []))
   }
+  attachedPaths.push(...getSessionAttachedPaths(join(tempDir, 'sessions/agent-sessions-index.json')))
+  return buildPathCheckResults(attachedPaths, manifest.sourceHomeDir)
+}
 
-  return allResults
+function getSessionAttachedPaths(indexPath: string): string[] {
+  const index = readJsonSafe<{ sessions?: AgentSessionMeta[] }>(indexPath)
+  return (index?.sessions ?? []).flatMap((session) => [
+    ...(session.attachedDirectories ?? []),
+    ...(session.attachedFiles ?? []),
+  ])
+}
+
+function buildPathCheckResults(paths: string[], sourceHomeDir: string): PathCheckResult[] {
+  const seen = new Set<string>()
+  const currentHome = homedir()
+  return paths.flatMap((pathValue) => {
+    if (seen.has(pathValue)) return []
+    seen.add(pathValue)
+    const suggested = sourceHomeDir && pathValue.startsWith(sourceHomeDir)
+      ? join(currentHome, pathValue.slice(sourceHomeDir.length))
+      : undefined
+    return [{ path: pathValue, exists: existsSync(suggested ?? pathValue), suggested }]
+  })
 }
 
 // ─── 导入（确认执行）────────────────────────────────────────────────────────
@@ -822,7 +864,7 @@ export async function confirmImport(options: ConfirmImportOptions | ConfirmImpor
     if (!targetWorkspace) throw new Error('无法确定目标工作区')
 
     if (manifest.components.includes('sessions')) {
-      await _importSessions(tempDir, targetWorkspace)
+      await _importSessions(tempDir, targetWorkspace, pathMappings)
     }
     if (manifest.components.includes('skills')) {
       _importSkills(tempDir, targetWorkspace, overwrite)
@@ -907,7 +949,7 @@ async function _confirmImportV2(options: ConfirmImportOptionsV2): Promise<{ succ
       const resolved = resolvedMappings.find((r) => r.sourceSlug === wsEntry.workspaceSlug)
       if (resolved) wsIdMap.set(wsEntry.workspaceId, resolved.target)
     }
-    await _importSessionsV2(tempDir, wsIdMap, resolvedMappings[0]!.target)
+    await _importSessionsV2(tempDir, wsIdMap, resolvedMappings[0]!.target, pathMappings)
   }
   if (v2Manifest.components.includes('channels')) {
     _importChannels(tempDir, v2Manifest.mode)
@@ -922,7 +964,7 @@ async function _confirmImportV2(options: ConfirmImportOptionsV2): Promise<{ succ
   return { success: true }
 }
 
-async function _importSessions(tempDir: string, targetWorkspace: AgentWorkspace) {
+async function _importSessions(tempDir: string, targetWorkspace: AgentWorkspace, pathMappings: Record<string, string | null>) {
   // Agent 会话
   const agentDir = join(tempDir, 'sessions/agent')
   const agentSessionsDir = getAgentSessionsDir()
@@ -940,14 +982,17 @@ async function _importSessions(tempDir: string, targetWorkspace: AgentWorkspace)
   // Agent sessions index 合并
   const importedIndexPath = join(tempDir, 'sessions/agent-sessions-index.json')
   if (existsSync(importedIndexPath)) {
-    const imported = readJsonSafe<{ sessions: Array<{ id: string; workspaceId: string }> }>(importedIndexPath)
+    const imported = readJsonSafe<{ sessions: AgentSessionMeta[] }>(importedIndexPath)
     const currentIndexPath = getAgentSessionsIndexPath()
-    const current = readJsonSafe<{ version: number; sessions: Array<Record<string, unknown>> }>(currentIndexPath) ?? { version: 1, sessions: [] }
-    const currentIds = new Set(current.sessions.map((s) => s['id']))
+    const current = readJsonSafe<{ version: number; sessions: AgentSessionMeta[] }>(currentIndexPath) ?? { version: 1, sessions: [] }
+    const currentIds = new Set(current.sessions.map((session) => session.id))
 
-    for (const s of imported?.sessions ?? []) {
-      if (!currentIds.has(s.id)) {
-        current.sessions.push({ ...s, workspaceId: targetWorkspace.id })
+    for (const session of imported?.sessions ?? []) {
+      if (!currentIds.has(session.id)) {
+        current.sessions.push({
+          ...mapSessionAttachmentPaths(session, pathMappings),
+          workspaceId: targetWorkspace.id,
+        })
       }
     }
     writeFileSync(currentIndexPath, JSON.stringify(current, null, 2), 'utf-8')
@@ -1083,6 +1128,31 @@ function _importChatTools(tempDir: string) {
     customTools: [...(current.customTools ?? []), ...(imported.customTools ?? [])],
   }
   writeFileSync(currentPath, JSON.stringify(merged, null, 2), 'utf-8')
+}
+
+function mapSessionAttachmentPaths(
+  session: AgentSessionMeta,
+  pathMappings: Record<string, string | null>,
+): AgentSessionMeta {
+  return {
+    ...session,
+    attachedDirectories: mapAttachmentPaths(session.attachedDirectories, pathMappings),
+    attachedFiles: mapAttachmentPaths(session.attachedFiles, pathMappings),
+  }
+}
+
+function mapAttachmentPaths(
+  paths: string[] | undefined,
+  pathMappings: Record<string, string | null>,
+): string[] | undefined {
+  if (!paths) return undefined
+  const mappedPaths = paths.flatMap((pathValue) => {
+    const mapped = pathMappings[pathValue]
+    if (mapped === null) return []
+    if (mapped !== undefined) return [mapped]
+    return existsSync(pathValue) ? [pathValue] : []
+  })
+  return mappedPaths.length > 0 ? [...new Set(mappedPaths)] : undefined
 }
 
 function _importWorkspaceConfig(tempDir: string, targetWorkspace: AgentWorkspace, pathMappings: Record<string, string | null>) {
@@ -1244,6 +1314,7 @@ async function _importSessionsV2(
   tempDir: string,
   wsIdMap: Map<string, AgentWorkspace>,
   fallbackWorkspace: AgentWorkspace,
+  pathMappings: Record<string, string | null>,
 ) {
   const agentDir = join(tempDir, 'sessions/agent')
   const agentSessionsDir = getAgentSessionsDir()
@@ -1259,15 +1330,18 @@ async function _importSessionsV2(
 
   const importedIndexPath = join(tempDir, 'sessions/agent-sessions-index.json')
   if (existsSync(importedIndexPath)) {
-    const imported = readJsonSafe<{ sessions: Array<{ id: string; workspaceId: string }> }>(importedIndexPath)
+    const imported = readJsonSafe<{ sessions: AgentSessionMeta[] }>(importedIndexPath)
     const currentIndexPath = getAgentSessionsIndexPath()
-    const current = readJsonSafe<{ version: number; sessions: Array<Record<string, unknown>> }>(currentIndexPath) ?? { version: 1, sessions: [] }
-    const currentIds = new Set(current.sessions.map((s) => s['id']))
+    const current = readJsonSafe<{ version: number; sessions: AgentSessionMeta[] }>(currentIndexPath) ?? { version: 1, sessions: [] }
+    const currentIds = new Set(current.sessions.map((session) => session.id))
 
-    for (const s of imported?.sessions ?? []) {
-      if (currentIds.has(s.id)) continue
-      const target = wsIdMap.get(s.workspaceId) ?? fallbackWorkspace
-      current.sessions.push({ ...s, workspaceId: target.id })
+    for (const session of imported?.sessions ?? []) {
+      if (currentIds.has(session.id)) continue
+      const target = wsIdMap.get(session.workspaceId ?? '') ?? fallbackWorkspace
+      current.sessions.push({
+        ...mapSessionAttachmentPaths(session, pathMappings),
+        workspaceId: target.id,
+      })
     }
     writeFileSync(currentIndexPath, JSON.stringify(current, null, 2), 'utf-8')
   }

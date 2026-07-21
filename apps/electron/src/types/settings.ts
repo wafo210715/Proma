@@ -255,6 +255,8 @@ export interface AppSettings {
   voiceDictation?: VoiceDictationPersistedSettings
   /** 飞书 Session 镜像设置：每个 Proma Session 可创建一个仅包含用户与指定 Bot 的飞书群 */
   feishuSessionMirror?: FeishuSessionMirrorSettings
+  /** 大文件会话附件的全局外部存储目录；未设置时使用 ~/Documents/Proma-attachments。 */
+  largeFileAttachmentDir?: string
   /** 用户手动关闭的 Proma 内置 MCP ID 列表（针对默认开启的内置 MCP） */
   builtinMcpDisabledIds?: string[]
   /** 用户手动开启的 Proma 内置 MCP ID 列表（针对默认关闭的内置 MCP，如 nano-banana、mem） */

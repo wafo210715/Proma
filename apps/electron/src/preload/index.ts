@@ -1026,6 +1026,10 @@ export interface ElectronAPI {
   migrationExport: (options: unknown) => Promise<MigrationExportResult>
   /** 执行 v2 多工作区导出 */
   migrationExportV2: (options: unknown) => Promise<MigrationExportResult>
+  /** 预览导出时将迁出的会话大文件 */
+  migrationGetLargeFileExportPreview: (options: unknown) => Promise<unknown>
+  /** 选择大文件附件的全局外部目录 */
+  migrationSelectLargeFileAttachmentDir: () => Promise<string | null>
   /** 解析导入文件，返回预览信息 */
   migrationParseImportFile: (filePath: string) => Promise<unknown>
   /** 确认导入 */
@@ -2368,6 +2372,14 @@ const electronAPI: ElectronAPI = {
 
   migrationExportV2: (options: unknown) => {
     return ipcRenderer.invoke('migration:exportV2', options)
+  },
+
+  migrationGetLargeFileExportPreview: (options: unknown) => {
+    return ipcRenderer.invoke('migration:getLargeFileExportPreview', options)
+  },
+
+  migrationSelectLargeFileAttachmentDir: () => {
+    return ipcRenderer.invoke('migration:selectLargeFileAttachmentDir')
   },
 
   migrationParseImportFile: (filePath: string) => {

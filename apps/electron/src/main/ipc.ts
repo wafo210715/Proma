@@ -4279,6 +4279,19 @@ export function registerIpcHandlers(): void {
     return exportDataV2(options)
   })
 
+  ipcMain.handle('migration:getLargeFileExportPreview', async (_, options) => {
+    const { getLargeFileExportPreview } = await import('./lib/migration-service')
+    return getLargeFileExportPreview(options)
+  })
+
+  ipcMain.handle('migration:selectLargeFileAttachmentDir', async () => {
+    const result = await dialog.showOpenDialog({
+      title: '选择大文件附件目录',
+      properties: ['openDirectory', 'createDirectory'],
+    })
+    return result.canceled ? null : result.filePaths[0] ?? null
+  })
+
   ipcMain.handle('migration:parseImportFile', async (_, filePath: string) => {
     const { parseImportFile } = await import('./lib/migration-service')
     return parseImportFile(filePath)

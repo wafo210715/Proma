@@ -26,6 +26,16 @@ import { useAtomValue, useSetAtom } from 'jotai'
 import { agentWorkspacesAtom } from '@/atoms/agent-atoms'
 import { migrationImportDialogOpenAtom } from '@/atoms/migration-atoms'
 import { cn } from '@/lib/utils'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 
 type MigrationMode = 'personal' | 'share'
 type MigrationComponent = 'sessions' | 'skills' | 'mcp' | 'channels' | 'chattools'
@@ -48,11 +58,42 @@ interface WsSelection {
   mcpServers: Set<string>
 }
 
+interface LargeFileExportPreview {
+  attachmentRoot: string
+  candidateCount: number
+  totalBytes: number
+  candidatePaths: string[]
+}
+
+interface ExternalizationResult {
+  externalized: Array<{ size: number }>
+  failures: Array<{ path: string; error: string }>
+  freedBytes: number
+}
+
 interface ExportResult {
   success: boolean
   filePath?: string
   error?: string
   warnings?: string[]
+  externalization?: ExternalizationResult
+}
+
+interface ExportRequest {
+  components: MigrationComponent[]
+  workspaceSelections?: Array<{ workspaceId: string; skillSlugs?: string[]; mcpServerNames?: string[] }>
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let value = bytes / 1024
+  let index = 0
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024
+    index++
+  }
+  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[index]}`
 }
 
 const COMPONENT_LABELS: Record<MigrationComponent, string> = {
@@ -72,6 +113,10 @@ export function MigrationSettings(): React.ReactElement {
   const [exporting, setExporting] = React.useState(false)
   const [exportResult, setExportResult] = React.useState<ExportResult | null>(null)
   const [includeWorkspaceData, setIncludeWorkspaceData] = React.useState(false)
+  const [largeFileAttachmentDir, setLargeFileAttachmentDir] = React.useState('~/Documents/Proma-attachments')
+  const [largeFilePreview, setLargeFilePreview] = React.useState<LargeFileExportPreview | null>(null)
+  const [pendingExport, setPendingExport] = React.useState<ExportRequest | null>(null)
+  const [confirmingExternalization, setConfirmingExternalization] = React.useState(false)
 
   // ── 多工作区选择状态 ──────────────────────────────
   const [shareDetailMode, setShareDetailMode] = React.useState<ShareDetailMode>('default')
@@ -113,67 +158,105 @@ export function MigrationSettings(): React.ReactElement {
     }
   }, [exportMode, shareDetailMode, sharePreview, loadSharePreview])
 
+  React.useEffect(() => {
+    window.electronAPI.getSettings().then((settings) => {
+      if (settings.largeFileAttachmentDir) setLargeFileAttachmentDir(settings.largeFileAttachmentDir)
+    }).catch(() => {})
+  }, [])
+
   // ── 导出逻辑 ──────────────────────────────────────
 
-  const handleExport = async (): Promise<void> => {
-    if (!currentWorkspace) return
+  const buildExportRequest = React.useCallback((): ExportRequest => {
+    const components: MigrationComponent[] = exportMode === 'personal'
+      ? ['sessions', 'skills', 'mcp', 'channels', 'chattools']
+      : Array.from(shareComponents)
+    let workspaceSelections: ExportRequest['workspaceSelections']
+
+    if (exportMode === 'share' && shareDetailMode === 'custom' && sharePreview) {
+      workspaceSelections = []
+      for (const ws of sharePreview.workspaces) {
+        const sel = wsSelections.get(ws.workspace.id)
+        if (!sel) continue
+        const hasSkills = sel.skills.size > 0 && shareComponents.has('skills')
+        const hasMcp = sel.mcpServers.size > 0 && shareComponents.has('mcp')
+        if (!hasSkills && !hasMcp) continue
+        workspaceSelections.push({
+          workspaceId: ws.workspace.id,
+          skillSlugs: shareComponents.has('skills') ? Array.from(sel.skills) : undefined,
+          mcpServerNames: shareComponents.has('mcp') ? Array.from(sel.mcpServers) : undefined,
+        })
+      }
+    }
+    return { components, workspaceSelections }
+  }, [exportMode, shareComponents, shareDetailMode, sharePreview, wsSelections])
+
+  const executeExport = React.useCallback(async (request: ExportRequest, confirmedLargeFilePaths?: string[]): Promise<void> => {
     setExporting(true)
     setExportResult(null)
-
     try {
       const outputPath = await window.electronAPI.migrationSaveFileDialog(exportMode)
-      if (!outputPath) {
-        setExporting(false)
-        return
-      }
-
-      const components: MigrationComponent[] =
-        exportMode === 'personal'
-          ? ['sessions', 'skills', 'mcp', 'channels', 'chattools']
-          : Array.from(shareComponents)
-
-      if (exportMode === 'share') {
-        let workspaceSelections: Array<{ workspaceId: string; skillSlugs?: string[]; mcpServerNames?: string[] }> | undefined
-
-        if (shareDetailMode === 'custom' && sharePreview) {
-          workspaceSelections = []
-          for (const ws of sharePreview.workspaces) {
-            const sel = wsSelections.get(ws.workspace.id)
-            if (!sel) continue
-            const hasSkills = sel.skills.size > 0 && shareComponents.has('skills')
-            const hasMcp = sel.mcpServers.size > 0 && shareComponents.has('mcp')
-            if (!hasSkills && !hasMcp) continue
-            workspaceSelections.push({
-              workspaceId: ws.workspace.id,
-              skillSlugs: shareComponents.has('skills') ? Array.from(sel.skills) : undefined,
-              mcpServerNames: shareComponents.has('mcp') ? Array.from(sel.mcpServers) : undefined,
-            })
-          }
-        }
-
-        const result = await window.electronAPI.migrationExportV2({
-          mode: exportMode,
-          components,
-          outputPath,
-          workspaceSelections,
-          includeWorkspaceData,
-        }) as { success: boolean; filePath: string; warnings?: string[] }
-        setExportResult({ success: true, filePath: result.filePath, warnings: result.warnings })
-      } else {
-        // personal 模式：全量备份所有工作区
-        const result = await window.electronAPI.migrationExportV2({
-          mode: exportMode,
-          components,
-          outputPath,
-          includeWorkspaceData,
-        }) as { success: boolean; filePath: string; warnings?: string[] }
-        setExportResult({ success: true, filePath: result.filePath, warnings: result.warnings })
-      }
+      if (!outputPath) return
+      const result = await window.electronAPI.migrationExportV2({
+        mode: exportMode,
+        components: request.components,
+        outputPath,
+        workspaceSelections: request.workspaceSelections,
+        includeWorkspaceData,
+        confirmedLargeFilePaths,
+      }) as ExportResult
+      setExportResult({
+        success: true,
+        filePath: result.filePath,
+        warnings: result.warnings,
+        externalization: result.externalization,
+      })
     } catch (err) {
       setExportResult({ success: false, error: err instanceof Error ? err.message : '导出失败' })
     } finally {
       setExporting(false)
     }
+  }, [exportMode, includeWorkspaceData])
+
+  const handleExport = async (): Promise<void> => {
+    if (!currentWorkspace) return
+    const request = buildExportRequest()
+    if (!includeWorkspaceData || !request.components.includes('sessions')) {
+      await executeExport(request)
+      return
+    }
+
+    setConfirmingExternalization(true)
+    setExportResult(null)
+    try {
+      const preview = await window.electronAPI.migrationGetLargeFileExportPreview({
+        workspaceSelections: request.workspaceSelections,
+      }) as LargeFileExportPreview
+      if (preview.candidateCount === 0) {
+        await executeExport(request, [])
+        return
+      }
+      setLargeFilePreview(preview)
+      setPendingExport(request)
+    } catch (err) {
+      setExportResult({ success: false, error: err instanceof Error ? err.message : '无法扫描会话大文件' })
+    } finally {
+      setConfirmingExternalization(false)
+    }
+  }
+
+  const handleChooseLargeFileAttachmentDir = async (): Promise<void> => {
+    const selected = await window.electronAPI.migrationSelectLargeFileAttachmentDir()
+    if (!selected) return
+    await window.electronAPI.updateSettings({ largeFileAttachmentDir: selected })
+    setLargeFileAttachmentDir(selected)
+  }
+
+  const confirmExternalization = async (): Promise<void> => {
+    const request = pendingExport
+    const confirmedPaths = largeFilePreview?.candidatePaths ?? []
+    setLargeFilePreview(null)
+    setPendingExport(null)
+    if (request) await executeExport(request, confirmedPaths)
   }
 
   const toggleShareComponent = (comp: MigrationComponent): void => {
@@ -424,6 +507,23 @@ export function MigrationSettings(): React.ReactElement {
             </div>
           )}
 
+          <div className="space-y-2 rounded-lg border border-border/50 bg-muted/20 px-4 py-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-foreground">大文件附件目录</p>
+                <p className="mt-0.5 truncate text-xs font-mono text-muted-foreground" title={largeFileAttachmentDir}>{largeFileAttachmentDir}</p>
+              </div>
+              <button
+                type="button"
+                onClick={handleChooseLargeFileAttachmentDir}
+                className="shrink-0 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-muted"
+              >
+                选择目录
+              </button>
+            </div>
+            <p className="text-xs text-muted-foreground">超过 100MB 的历史工作区文件会迁到这里，并作为会话或工作区的外部附件保留。该目录不写入备份包，请自行管理。</p>
+          </div>
+
           {/* 包含工作区文件选项 */}
           <label className="flex items-start gap-2.5 cursor-pointer select-none">
             <input
@@ -435,7 +535,7 @@ export function MigrationSettings(): React.ReactElement {
             <div>
               <span className="text-sm font-medium text-foreground">包含会话工作区文件</span>
               <p className="text-xs text-muted-foreground mt-0.5">
-                导出 Agent 会话期间产生的工作文件（代码、下载等）。数据量可能很大，跳过大文件（&gt;50MB）和系统目录。
+                导出 Agent 会话期间产生的工作文件（代码、下载等）。超过 100MB 的文件会在确认后迁为外部附件，以回收 ~/.proma 空间；系统目录会跳过。
               </p>
             </div>
           </label>
@@ -444,7 +544,7 @@ export function MigrationSettings(): React.ReactElement {
           <div className="flex items-center gap-3">
             <button
               onClick={handleExport}
-              disabled={exporting || !currentWorkspace || (exportMode === 'share' && shareComponents.size === 0)}
+              disabled={exporting || confirmingExternalization || !currentWorkspace || (exportMode === 'share' && shareComponents.size === 0)}
               className={cn(
                 'flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors',
                 'bg-primary text-primary-foreground hover:bg-primary/90',
@@ -456,7 +556,7 @@ export function MigrationSettings(): React.ReactElement {
               ) : (
                 <Download size={16} />
               )}
-              {exporting ? '导出中...' : '选择保存位置并导出'}
+              {exporting ? '导出中...' : confirmingExternalization ? '扫描会话大文件...' : '选择保存位置并导出'}
             </button>
 
             {exportResult && (
@@ -468,6 +568,15 @@ export function MigrationSettings(): React.ReactElement {
               </div>
             )}
           </div>
+
+          {exportResult?.success && exportResult.externalization && (
+            <div className="flex items-start gap-2 rounded-md border border-green-200/70 bg-green-50 px-3 py-2 text-sm text-green-700 dark:border-green-900/50 dark:bg-green-950/30 dark:text-green-300">
+              <CheckCircle2 size={15} className="mt-0.5 flex-shrink-0" />
+              <div>
+                已迁出 {exportResult.externalization.externalized.length} 个大文件，释放 {formatBytes(exportResult.externalization.freedBytes)}。{exportResult.externalization.failures.length > 0 ? ` ${exportResult.externalization.failures.length} 个文件未迁出。` : ''}
+              </div>
+            </div>
+          )}
 
           {exportResult?.success && exportResult.warnings && exportResult.warnings.length > 0 && (
             <div className="flex items-start gap-2 rounded-md border border-amber-200/70 bg-amber-50 px-3 py-2 text-sm text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-300">
@@ -483,6 +592,27 @@ export function MigrationSettings(): React.ReactElement {
           )}
         </div>
       </SettingsSection>
+
+      <AlertDialog open={largeFilePreview !== null} onOpenChange={(open) => {
+        if (!open) {
+          setLargeFilePreview(null)
+          setPendingExport(null)
+        }
+      }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>迁出会话大文件</AlertDialogTitle>
+            <AlertDialogDescription>
+              将迁出 {largeFilePreview?.candidateCount ?? 0} 个超过 100MB 的文件（共 {formatBytes(largeFilePreview?.totalBytes ?? 0)}）到 {largeFilePreview?.attachmentRoot ?? largeFileAttachmentDir}。Proma 会校验副本、登记附件路径，再删除 ~/.proma 中的原件。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <p className="text-sm text-amber-700 dark:text-amber-300">这些外部大附件不会写入本次 .proma-backup，需要由你自行保管和备份。</p>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction onClick={() => { void confirmExternalization() }}>迁出并继续导出</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* ── 导入区块 ──────────────────────────────── */}
       <SettingsSection
