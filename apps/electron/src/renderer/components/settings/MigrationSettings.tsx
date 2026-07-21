@@ -71,6 +71,7 @@ export function MigrationSettings(): React.ReactElement {
   )
   const [exporting, setExporting] = React.useState(false)
   const [exportResult, setExportResult] = React.useState<ExportResult | null>(null)
+  const [includeWorkspaceData, setIncludeWorkspaceData] = React.useState(false)
 
   // ── 多工作区选择状态 ──────────────────────────────
   const [shareDetailMode, setShareDetailMode] = React.useState<ShareDetailMode>('default')
@@ -155,6 +156,7 @@ export function MigrationSettings(): React.ReactElement {
           components,
           outputPath,
           workspaceSelections,
+          includeWorkspaceData,
         }) as { success: boolean; filePath: string; warnings?: string[] }
         setExportResult({ success: true, filePath: result.filePath, warnings: result.warnings })
       } else {
@@ -163,6 +165,7 @@ export function MigrationSettings(): React.ReactElement {
           mode: exportMode,
           components,
           outputPath,
+          includeWorkspaceData,
         }) as { success: boolean; filePath: string; warnings?: string[] }
         setExportResult({ success: true, filePath: result.filePath, warnings: result.warnings })
       }
@@ -420,6 +423,22 @@ export function MigrationSettings(): React.ReactElement {
               </p>
             </div>
           )}
+
+          {/* 包含工作区文件选项 */}
+          <label className="flex items-start gap-2.5 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={includeWorkspaceData}
+              onChange={(e) => setIncludeWorkspaceData(e.target.checked)}
+              className="mt-0.5 w-3.5 h-3.5 rounded border-border accent-primary"
+            />
+            <div>
+              <span className="text-sm font-medium text-foreground">包含会话工作区文件</span>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                导出 Agent 会话期间产生的工作文件（代码、下载等）。数据量可能很大，跳过大文件（&gt;50MB）和系统目录。
+              </p>
+            </div>
+          </label>
 
           {/* 导出按钮 */}
           <div className="flex items-center gap-3">
