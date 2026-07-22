@@ -8,6 +8,7 @@
 
 import * as React from 'react'
 import { useAtomValue, useSetAtom, useAtom, useStore } from 'jotai'
+import { toast } from 'sonner'
 import {
   tabsAtom,
   activeTabIdAtom,
@@ -24,6 +25,16 @@ import { closeScratchInSplit } from '@/components/scratch-pad/scratch-pad-opener
 import { useTrackSessionView } from '@/hooks/useTrackSessionView'
 import { TabBar } from './TabBar'
 import { TabContent } from './TabContent'
+import { TabErrorBoundary } from './TabErrorBoundary'
+import { AgentView } from '@/components/agent'
+import { agentSessionsAtom, agentStreamingStatesAtom } from '@/atoms/agent-atoms'
+import {
+  compareBroadcastAtom,
+  comparePairAtom,
+  compareSplitRatioAtom,
+  pendingInheritAtom,
+} from '@/atoms/compare-atoms'
+import { useCompareActions } from '@/hooks/useCompareActions'
 import { AutomationFormView } from '@/components/automation/AutomationFormView'
 import { AutomationsListView } from '@/components/automation/AutomationsListView'
 import { AgentSkillsView } from '@/components/agent-skills/AgentSkillsView'
@@ -56,6 +67,67 @@ export function MainArea(): React.ReactElement {
   const [rightWorkspaceRatio, setRightWorkspaceRatio] = useAtom(rightWorkspaceSplitRatioAtom)
   const previewDragging = React.useRef(false)
   const rightWorkspaceDragging = React.useRef(false)
+
+  // 双开对比：配对非空且当前活跃 tab 正是配对左栏 session 时，右栏放第二个 AgentView。
+  // 对比态优先接管右 slot（与 preview/scratch 互斥）。
+  const [comparePair, setComparePair] = useAtom(comparePairAtom)
+  const [compareSplitRatio, setCompareSplitRatio] = useAtom(compareSplitRatioAtom)
+  const setCompareBroadcast = useSetAtom(compareBroadcastAtom)
+  const [pendingInherit, setPendingInherit] = useAtom(pendingInheritAtom)
+  const agentSessions = useAtomValue(agentSessionsAtom)
+  const streamingStates = useAtomValue(agentStreamingStatesAtom)
+  const { executeInherit } = useCompareActions()
+  const compareDragging = React.useRef(false)
+  const pendingInheritInFlightRef = React.useRef<typeof pendingInherit>(null)
+  const previousComparePairRef = React.useRef(comparePair)
+  const showComparePane =
+    !!comparePair &&
+    activeTab?.type === 'agent' &&
+    activeTab.sessionId === comparePair.left &&
+    activeView === 'conversations'
+
+  // 配对变化时丢弃尚未消费的旧广播，防止解绑/重绑后重放旧 prompt。
+  React.useEffect(() => {
+    if (previousComparePairRef.current === comparePair) return
+    previousComparePairRef.current = comparePair
+    setCompareBroadcast(null)
+  }, [comparePair, setCompareBroadcast])
+
+  // 删除配对中的任一会话后自动退出分屏，避免右栏渲染不存在的 session。
+  React.useEffect(() => {
+    if (!comparePair) return
+    const sessionIds = new Set(agentSessions.map((session) => session.id))
+    if (!sessionIds.has(comparePair.left) || !sessionIds.has(comparePair.right)) {
+      setComparePair(null)
+    }
+  }, [agentSessions, comparePair, setComparePair])
+
+  // 待办继承由常驻 MainArea 观察全局流状态，切换 tab 后也能在源会话完成时执行。
+  React.useEffect(() => {
+    if (!pendingInherit) return
+    const source = agentSessions.find((session) => session.id === pendingInherit.sourceSessionId)
+    if (!source) {
+      setPendingInherit((current) => current === pendingInherit ? null : current)
+      toast.error('待办继承已取消', { description: '源会话已不存在。' })
+      return
+    }
+    if (streamingStates.get(source.id)?.running) return
+    if (pendingInheritInFlightRef.current === pendingInherit) return
+
+    const task = pendingInherit
+    pendingInheritInFlightRef.current = task
+    void executeInherit(source, task.targetChannelId, task.targetModelId)
+      .then((completed) => {
+        if (completed) {
+          setPendingInherit((current) => current === task ? null : current)
+        }
+      })
+      .finally(() => {
+        if (pendingInheritInFlightRef.current === task) {
+          pendingInheritInFlightRef.current = null
+        }
+      })
+  }, [agentSessions, executeInherit, pendingInherit, setPendingInherit, streamingStates])
 
   const previewOpen =
     activeTab?.type === 'agent' && (previewOpenMap.get(activeTab.sessionId) ?? false)
@@ -163,6 +235,42 @@ export function MainArea(): React.ReactElement {
     document.addEventListener('mouseup', onMouseUp)
   }, [rightWorkspaceRatio, setRightWorkspaceRatio])
 
+  const handleCompareDragStart = React.useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    compareDragging.current = true
+    const startX = e.clientX
+    const startRatio = compareSplitRatio
+    const containerEl = (e.currentTarget as HTMLElement).closest('[data-split-container]') as HTMLElement | null
+    const containerWidth = containerEl?.clientWidth ?? 1
+    let rafId = 0
+
+    document.body.style.userSelect = 'none'
+    document.body.style.cursor = 'col-resize'
+    document.querySelectorAll('iframe').forEach((f) => { (f as HTMLElement).style.pointerEvents = 'none' })
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!compareDragging.current) return
+      if (rafId) return
+      rafId = requestAnimationFrame(() => {
+        rafId = 0
+        const delta = ev.clientX - startX
+        const newRatio = Math.max(0.3, Math.min(0.7, startRatio + delta / containerWidth))
+        setCompareSplitRatio(newRatio)
+      })
+    }
+    const onMouseUp = () => {
+      compareDragging.current = false
+      if (rafId) cancelAnimationFrame(rafId)
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+      document.querySelectorAll('iframe').forEach((f) => { (f as HTMLElement).style.pointerEvents = '' })
+      document.removeEventListener('mousemove', onMouseMove)
+      document.removeEventListener('mouseup', onMouseUp)
+    }
+    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('mouseup', onMouseUp)
+  }, [compareSplitRatio, setCompareSplitRatio])
+
   const handleCloseScratchPanel = React.useCallback(() => {
     closeScratchInSplit(store)
   }, [store])
@@ -195,10 +303,13 @@ export function MainArea(): React.ReactElement {
 
   // 左侧容器宽度：右侧工作区打开时固定占 splitRatio；其他情况（含 closing 动画期间）
   // 直接 1 1 auto 占满——closing 时右侧 absolute 脱离 flex 流，所以左侧自然占 100%。
-  const showRightPanel = showScratchPanel || showPreviewPane
-  const leftFlexStyle: React.CSSProperties = showRightPanel
-    ? { flex: `0 0 calc(${splitRatio * 100}% - 6px)` }
-    : { flex: '1 1 auto' }
+  // 对比态优先接管右 slot：此时不显示 preview/scratch 右面板
+  const showRightPanel = !showComparePane && (showScratchPanel || showPreviewPane)
+  const leftFlexStyle: React.CSSProperties = showComparePane
+    ? { flex: `0 0 calc(${compareSplitRatio * 100}% - 6px)` }
+    : showRightPanel
+      ? { flex: `0 0 calc(${splitRatio * 100}% - 6px)` }
+      : { flex: '1 1 auto' }
   const previewPaneStyle: React.CSSProperties = showBothRightPanels
     ? { flex: `0 0 calc(${rightWorkspaceRatio * 100}% - 4px)` }
     : { flex: '1 1 auto' }
@@ -248,6 +359,25 @@ export function MainArea(): React.ReactElement {
               </>
             )}
           </div>
+
+          {/* 右侧：双开对比栏（第二个 AgentView）。对比态接管右 slot，优先于 preview/scratch。 */}
+          {showComparePane && comparePair && (
+            <>
+              <div
+                className="w-[8px] cursor-col-resize bg-border/40 hover:bg-primary/30 active:bg-primary/50 transition-colors flex-shrink-0 self-stretch"
+                onMouseDown={handleCompareDragStart}
+              />
+              <div className="flex flex-col min-w-[260px] h-full overflow-hidden" style={{ flex: '1 1 auto' }}>
+                {/* 补一条与左栏 TabBar 等高（34px）的顶栏，使右栏 AgentHeader 与左栏对齐 */}
+                <div className="h-[34px] tabbar-bg flex-shrink-0" />
+                <div className="flex-1 min-h-0">
+                  <TabErrorBoundary key={comparePair.right} sessionId={comparePair.right}>
+                    <AgentView sessionId={comparePair.right} sharedModelSelectorOpen={false} />
+                  </TabErrorBoundary>
+                </div>
+              </div>
+            </>
+          )}
 
           {/* 右侧：预览/草稿工作区。Preview 和草稿可在同一右侧槽位内并排显示。 */}
           {showRightPanel && (

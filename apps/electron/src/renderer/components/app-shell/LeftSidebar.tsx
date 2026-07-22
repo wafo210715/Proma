@@ -11,13 +11,14 @@
 import * as React from 'react'
 import { useAtom, useSetAtom, useAtomValue, useStore } from 'jotai'
 import { toast } from 'sonner'
-import { Pin, PinOff, Settings, Plus, Trash2, Pencil, PanelLeftClose, PanelLeftOpen, ArrowRightLeft, Search, Archive, ArchiveRestore, ArrowLeft, Bot, MessageSquare, MoreHorizontal, FolderOpen, GripVertical, Clock, AlarmClock, ChevronRight, Blocks, GitBranch, Download, Loader2, RotateCw } from 'lucide-react'
+import { Pin, PinOff, Settings, Plus, Trash2, Pencil, PanelLeftClose, PanelLeftOpen, ArrowRightLeft, Search, Archive, ArchiveRestore, ArrowLeft, Bot, MessageSquare, MoreHorizontal, FolderOpen, GripVertical, Clock, AlarmClock, ChevronRight, Blocks, GitBranch, Download, Loader2, RotateCw, Columns2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { ModeSwitcher } from './ModeSwitcher'
 import { SearchDialog } from './SearchDialog'
 import { UserAvatar } from '@/components/chat/UserAvatar'
 import { activeViewAtom, agentSkillsTabAtom } from '@/atoms/active-view'
+import { comparePairAtom, compareLinkedAtom } from '@/atoms/compare-atoms'
 import { automationFormAtom, automationsAtom } from '@/atoms/automation-atoms'
 import { appModeAtom, type AppMode } from '@/atoms/app-mode'
 import { settingsOpenAtom, settingsTabAtom } from '@/atoms/settings-tab'
@@ -3600,6 +3601,19 @@ const AgentSessionItem = React.memo(function AgentSessionItem({
   const preview = useSessionMiniMapHover(600, disableMiniMap || menuOpen)
   const interfaceVariant = useAtomValue(interfaceVariantAtom)
   const isClassic = interfaceVariant === 'classic'
+  // 进入分屏（不绑定）：把当前活跃会话与本会话并排，联动关闭
+  const currentAgentSessionId = useAtomValue(currentAgentSessionIdAtom)
+  const setComparePair = useSetAtom(comparePairAtom)
+  const setCompareLinked = useSetAtom(compareLinkedAtom)
+  const handleEnterSplit = React.useCallback((): void => {
+    if (!currentAgentSessionId || currentAgentSessionId === session.id) {
+      // 没有已打开的会话，或右键的就是当前会话：直接打开它，不分屏
+      onSelect(session.id, session.title)
+      return
+    }
+    setComparePair({ left: currentAgentSessionId, right: session.id })
+    setCompareLinked(false)
+  }, [currentAgentSessionId, session.id, session.title, onSelect, setComparePair, setCompareLinked])
 
   const startEdit = (): void => {
     setEditTitle(session.title)
@@ -3672,6 +3686,10 @@ const AgentSessionItem = React.memo(function AgentSessionItem({
       <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => startEdit()}>
         <Pencil size={14} />
         重命名
+      </MenuItem>
+      <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => handleEnterSplit()}>
+        <Columns2 size={14} />
+        进入分屏
       </MenuItem>
       <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => onToggleArchive(session.id)}>
         {session.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />}

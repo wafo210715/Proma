@@ -1804,8 +1804,11 @@ export function registerIpcHandlers(): void {
   // 创建 Agent 会话
   ipcMain.handle(
     AGENT_IPC_CHANNELS.CREATE_SESSION,
-    async (_, title?: string, channelId?: string, workspaceId?: string, modelId?: string): Promise<AgentSessionMeta> => {
-      const session = createAgentSession(title, channelId, workspaceId, modelId, getSettings().agentRuntime ?? 'claude')
+    async (_, title?: string, channelId?: string, workspaceId?: string, modelId?: string, agentRuntime?: AgentRuntime): Promise<AgentSessionMeta> => {
+      if (agentRuntime !== undefined && !isAgentRuntime(agentRuntime)) {
+        throw new Error(`不支持的 Agent Runtime: ${String(agentRuntime)}`)
+      }
+      const session = createAgentSession(title, channelId, workspaceId, modelId, agentRuntime ?? getSettings().agentRuntime ?? 'claude')
       feishuBridgeManager.ensureSessionMirror(session).catch((error) => {
         console.error('[飞书 Session 镜像] 新会话建群失败:', error)
       })

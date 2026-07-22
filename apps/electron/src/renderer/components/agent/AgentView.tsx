@@ -21,6 +21,7 @@ import { Box, CornerDownLeft, Square, Settings, Paperclip, FolderPlus, X, Copy, 
 import { AgentMessages } from './AgentMessages'
 import { AgentHeader } from './AgentHeader'
 import { AgentMessageQueue } from './AgentMessageQueue'
+import { PendingInheritBanner } from './PendingInheritBanner'
 import { ContextUsageBadge } from './ContextUsageBadge'
 import { PermissionBanner } from './PermissionBanner'
 import { PermissionModeSelector } from './PermissionModeSelector'
@@ -109,6 +110,7 @@ import type { AgentContextStatus } from '@/atoms/agent-atoms'
 import { settingsOpenAtom } from '@/atoms/settings-tab'
 import { longTextPasteAsAttachmentEnabledAtom } from '@/atoms/ui-preferences'
 import { channelsAtom, thinkingExpandedAtom } from '@/atoms/chat-atoms'
+import { comparePairAtom, compareLinkedAtom, compareBroadcastAtom, getComparePartner, pendingInheritAtom } from '@/atoms/compare-atoms'
 import { useOpenSession } from '@/hooks/useOpenSession'
 import { AgentSessionProvider } from '@/contexts/session-context'
 import { draftSessionIdsAtom } from '@/atoms/draft-session-atoms'
@@ -505,7 +507,7 @@ function DisplayOptionsPopover({
   )
 }
 
-export function AgentView({ sessionId }: { sessionId: string }): React.ReactElement {
+export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessionId: string; sharedModelSelectorOpen?: boolean }): React.ReactElement {
   const [persistedSDKMessages, setPersistedSDKMessages] = React.useState<SDKMessage[]>([])
   const persistedSDKMessagesRef = React.useRef<SDKMessage[]>([])
   persistedSDKMessagesRef.current = persistedSDKMessages
@@ -559,6 +561,13 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const [pendingFiles, setPendingFiles] = useAtom(agentPendingFilesAtomFamily(sessionId))
   const [queuedMessages, setQueuedMessages] = useAtom(agentMessageQueueAtomFamily(sessionId))
   const workspaces = useAtomValue(agentWorkspacesAtom)
+  // 双开对比：本 session 的配对 partner + 联动开关 + 广播信号
+  const comparePair = useAtomValue(comparePairAtom)
+  const compareLinked = useAtomValue(compareLinkedAtom)
+  const comparePartnerId = getComparePartner(comparePair, sessionId)
+  const [compareBroadcast, setCompareBroadcast] = useAtom(compareBroadcastAtom)
+  const lastBroadcastNonceRef = React.useRef<string | null>(null)
+  const [pendingInherit, setPendingInherit] = useAtom(pendingInheritAtom)
   // 保持 channelId 稳定：初始化前使用上次有效值，避免工具栏抖动
   const stableChannelIdRef = React.useRef(agentChannelId)
   if (agentChannelId) stableChannelIdRef.current = agentChannelId
@@ -1951,13 +1960,24 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   if (computedSelectedModel) stableSelectedModelRef.current = computedSelectedModel
   const externalSelectedModel = computedSelectedModel ?? stableSelectedModelRef.current
 
+  const broadcastComparePrompt = React.useCallback((text: string, fromBroadcast?: boolean): void => {
+    if (fromBroadcast || !compareLinked || !comparePartnerId || !text) return
+    setCompareBroadcast({
+      targetSessionId: comparePartnerId,
+      text,
+      nonce: crypto.randomUUID(),
+    })
+  }, [compareLinked, comparePartnerId, setCompareBroadcast])
+
   /** 发送消息 */
-  const handleSend = React.useCallback(async (overrideText?: string): Promise<void> => {
+  const handleSend = React.useCallback(async (overrideText?: string, opts?: { fromBroadcast?: boolean }): Promise<void> => {
     const text = (overrideText ?? inputContent).trim()
     // 如果输入为空但有建议，使用建议内容
     const effectiveText = text || suggestion || ''
-    const pendingFilesSnapshot = pendingFilesRef.current
+    // 联动广播只发送纯文本，不消费 partner 输入框里尚未发送的附件或引用。
+    const pendingFilesSnapshot = opts?.fromBroadcast ? [] : pendingFilesRef.current
     if (!messagesLoaded || (!effectiveText && pendingFilesSnapshot.length === 0) || !agentChannelId || !hasAvailableModel) return
+
     if (!streaming && messagesRefreshingRef.current) {
       toast.info('上一轮消息正在同步', {
         description: '请稍等片刻再发送；队列会在同步完成后继续。',
@@ -1973,7 +1993,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         : null
       if (pendingFilesSnapshot.length > 0 && !attachmentContext) return
 
-      const quotedSelection = consumeQuotedSelection()
+      const quotedSelection = opts?.fromBroadcast ? undefined : consumeQuotedSelection()
       setQueuedMessages((prev) => [
         ...prev,
         createAgentQueuedMessage(effectiveText, crypto.randomUUID(), Date.now(), quotedSelection, attachmentContext
@@ -1994,6 +2014,8 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         map.delete(sessionId)
         return map
       })
+      // 源会话已成功入队后再广播，避免附件准备失败或早退时只有 partner 收到消息。
+      broadcastComparePrompt(effectiveText, opts?.fromBroadcast)
 
       return
     }
@@ -2005,7 +2027,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         : null
       if (pendingFilesSnapshot.length > 0 && !attachmentContext) return
 
-      const quotedSelection = consumeQuotedSelection()
+      const quotedSelection = opts?.fromBroadcast ? undefined : consumeQuotedSelection()
       const message = createAgentQueuedMessage(effectiveText, crypto.randomUUID(), Date.now(), quotedSelection, attachmentContext
         ? {
             fileReferenceBlock: attachmentContext.referenceBlock,
@@ -2048,6 +2070,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         }
         restoreQueuedAttachmentsToPending(message.attachments)
       })
+      broadcastComparePrompt(effectiveText, opts?.fromBroadcast)
       return
     }
 
@@ -2075,7 +2098,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     let fileReferences = attachmentContext?.referenceBlock ?? ''
 
     // 构建引用选中文本：内联 XML 拼入 prompt，对话框不展示（parseAttachedFiles 剥离）
-    const quotedSelection = consumeQuotedSelection()
+    const quotedSelection = opts?.fromBroadcast ? undefined : consumeQuotedSelection()
     if (quotedSelection) {
       fileReferences = fileReferences + buildQuotedSelectionBlock(quotedSelection)
     }
@@ -2161,7 +2184,24 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         return map
       })
     })
-  }, [inputContent, createBaseAdditionalDirectories, preparePendingFilesForSend, restoreQueuedAttachmentsToPending, sessionId, agentChannelId, agentModelId, sessionAgentRuntime, agentChannelProvider, currentWorkspaceId, streaming, backgroundWaiting, suggestion, hasAvailableModel, store, consumeQuotedSelection, setStreamingStates, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, permissionMode, messagesLoaded, setQueuedMessages, setQuotedSelectionMap, sendPlainTextAgentMessage])
+    broadcastComparePrompt(effectiveText, opts?.fromBroadcast)
+  }, [inputContent, createBaseAdditionalDirectories, preparePendingFilesForSend, restoreQueuedAttachmentsToPending, sessionId, agentChannelId, agentModelId, sessionAgentRuntime, agentChannelProvider, currentWorkspaceId, streaming, backgroundWaiting, suggestion, hasAvailableModel, store, consumeQuotedSelection, setStreamingStates, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, permissionMode, messagesLoaded, setQueuedMessages, setQuotedSelectionMap, sendPlainTextAgentMessage, broadcastComparePrompt])
+
+  // 双开对比·联动接收：监听广播信号，目标为本 session 且 nonce 未消费时，
+  // 走自己的 handleSend（fromBroadcast=true 避免回环）独立发送同一段文本。
+  React.useEffect(() => {
+    if (!compareBroadcast) return
+    if (compareBroadcast.targetSessionId !== sessionId) return
+    if (compareBroadcast.nonce === lastBroadcastNonceRef.current) return
+    // 目标会话尚未可接收时保留广播；状态变化后 effect 会再次尝试。
+    if (!messagesLoaded || !agentChannelId || !hasAvailableModel) return
+    if (!streaming && messagesRefreshing) return
+    lastBroadcastNonceRef.current = compareBroadcast.nonce
+    const event = compareBroadcast
+    // 消费后立即清空，避免 AgentView 解绑重挂时重放旧 prompt。
+    setCompareBroadcast((current) => current === event ? null : current)
+    void handleSend(event.text, { fromBroadcast: true })
+  }, [agentChannelId, compareBroadcast, handleSend, hasAvailableModel, messagesLoaded, messagesRefreshing, sessionId, setCompareBroadcast, streaming])
 
   /** 停止生成 */
   const handleStop = React.useCallback((): void => {
@@ -2604,7 +2644,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
           filterChannelIds={sessionAgentRuntime === 'pi' ? undefined : agentChannelIds}
           externalSelectedModel={externalSelectedModel}
           onModelSelect={handleModelSelect}
-          useSharedOpenState
+          useSharedOpenState={sharedModelSelectorOpen}
         />
       ),
     },
@@ -2910,6 +2950,19 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
               onRemove={handleRemoveQueuedMessage}
               onMove={handleMoveQueuedMessage}
             />
+
+            {/* 待办·继承上下文提示条（源会话在跑时点继承，持续显示直到执行或取消） */}
+            {pendingInherit && pendingInherit.sourceSessionId === sessionId && (() => {
+              const ch = globalChannels.find((c) => c.id === pendingInherit.targetChannelId)
+              const mdl = ch?.models.find((m) => m.id === pendingInherit.targetModelId)
+              const label = `${ch?.name ?? '未知渠道'} · ${mdl?.name ?? '未知模型'}`
+              return (
+                <PendingInheritBanner
+                  targetLabel={label}
+                  onCancel={() => setPendingInherit(null)}
+                />
+              )
+            })()}
 
             {/* Agent 建议提示 */}
             {suggestion && !streaming && (
