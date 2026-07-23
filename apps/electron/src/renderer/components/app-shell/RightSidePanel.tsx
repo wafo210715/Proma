@@ -15,11 +15,20 @@ import {
   agentDiffPanelTabAtom,
 } from '@/atoms/agent-atoms'
 import type { AgentSidePanelTab } from '@/atoms/agent-atoms'
+import { compareFocusedSessionIdAtom, comparePairAtom } from '@/atoms/compare-atoms'
 import { SidePanel } from '@/components/agent/SidePanel'
 
 export function RightSidePanel({ width }: { width?: number }): React.ReactElement | null {
   const appMode = useAtomValue(appModeAtom)
-  const currentSessionId = useAtomValue(currentAgentSessionIdAtom)
+  const primarySessionId = useAtomValue(currentAgentSessionIdAtom)
+  const comparePair = useAtomValue(comparePairAtom)
+  const compareFocusedSessionId = useAtomValue(compareFocusedSessionIdAtom)
+  const currentSessionId = comparePair
+    && primarySessionId === comparePair.left
+    && compareFocusedSessionId
+    && (compareFocusedSessionId === comparePair.left || compareFocusedSessionId === comparePair.right)
+    ? compareFocusedSessionId
+    : primarySessionId
   const sessionPathMap = useAtomValue(agentSessionPathMapAtom)
   const diffPanelTabMap = useAtomValue(agentDiffPanelTabAtom)
   const setDiffPanelTabMap = useSetAtom(agentDiffPanelTabAtom)

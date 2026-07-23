@@ -11,6 +11,7 @@
 
 import { atom } from 'jotai'
 import { atomWithStorage } from 'jotai/utils'
+import type { AgentQueuedAttachment } from '@/lib/agent-message-queue'
 
 /**
  * 当前配对（sessionId 对），null = 未进入分屏对比。
@@ -19,8 +20,11 @@ import { atomWithStorage } from 'jotai/utils'
  */
 export const comparePairAtom = atom<{ left: string; right: string } | null>(null)
 
+/** 当前获得交互焦点的对比 pane；文件侧栏据此决定“添加到聊天”的目标 session。 */
+export const compareFocusedSessionIdAtom = atom<string | null>(null)
+
 /**
- * 联动开关：开启时任一侧发送都会把同一 prompt 广播到另一侧；
+ * 联动开关：开启时任一侧发送都会把同一 prompt 与已准备附件路径广播到另一侧；
  * 关闭时两侧各聊各的（支撑「二选一」「第三模型收敛」等灵活玩法）。
  */
 export const compareLinkedAtom = atom<boolean>(true)
@@ -32,18 +36,39 @@ export const compareLinkedAtom = atom<boolean>(true)
 export const compareSplitRatioAtom = atomWithStorage<number>('proma-compare-split-ratio', 0.5)
 
 /**
- * 联动广播信号：primary 发送时写入 { targetSessionId: partner, text, nonce }，
+ * 联动广播信号：primary 发送时写入目标 session、文本、nonce 与可选附件 payload，
  * partner 的 AgentView 监听到（targetSessionId === 自身 sessionId 且 nonce 未消费）
- * 后走自己的 handleSend(text, { fromBroadcast: true }) 独立发送。
+ * 后走自己的 handleSend 独立发送。
  * nonce 用于去重与触发；单槽位即可（人工发送不会并发）。
  */
+export interface CompareAttachmentPayload {
+  fileReferenceBlock: string
+  attachments: AgentQueuedAttachment[]
+  additionalDirectories: string[]
+  /** 目标 session 中由本次同步创建、发送后应消费掉的附件草稿 ID。 */
+  pendingFileIdsToConsume: string[]
+}
+
 export interface CompareBroadcast {
   targetSessionId: string
   text: string
   nonce: string
+  attachmentPayload?: CompareAttachmentPayload
 }
 
 export const compareBroadcastAtom = atom<CompareBroadcast | null>(null)
+
+/** 联动开启时成对创建的附件草稿 ID 映射；关闭联动时清空，之后两侧独立演化。 */
+export interface ComparePendingFileLink {
+  partnerSessionId: string
+  partnerFileId: string
+}
+
+export const comparePendingFileLinksAtom = atom<Map<string, ComparePendingFileLink>>(new Map())
+
+export function getComparePendingFileLinkKey(sessionId: string, fileId: string): string {
+  return `${sessionId}:${fileId}`
+}
 
 /**
  * 待办·继承上下文：源会话正在跑时点「新建并继承」，先记下意图，

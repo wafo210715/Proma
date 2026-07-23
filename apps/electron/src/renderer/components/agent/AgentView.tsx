@@ -73,7 +73,6 @@ import {
   agentSessionModelMapAtom,
   currentAgentWorkspaceIdAtom,
   agentPendingPromptAtom,
-  agentPendingFilesAtomFamily,
   agentMessageQueueAtomFamily,
   agentWorkspacesAtom,
   agentStreamErrorsAtom,
@@ -110,7 +109,9 @@ import type { AgentContextStatus } from '@/atoms/agent-atoms'
 import { settingsOpenAtom } from '@/atoms/settings-tab'
 import { longTextPasteAsAttachmentEnabledAtom } from '@/atoms/ui-preferences'
 import { channelsAtom, thinkingExpandedAtom } from '@/atoms/chat-atoms'
-import { comparePairAtom, compareLinkedAtom, compareBroadcastAtom, getComparePartner, pendingInheritAtom } from '@/atoms/compare-atoms'
+import { comparePairAtom, compareFocusedSessionIdAtom, compareLinkedAtom, compareBroadcastAtom, getComparePartner, pendingInheritAtom } from '@/atoms/compare-atoms'
+import type { CompareAttachmentPayload } from '@/atoms/compare-atoms'
+import { useComparePendingFiles } from '@/hooks/useComparePendingFiles'
 import { useOpenSession } from '@/hooks/useOpenSession'
 import { AgentSessionProvider } from '@/contexts/session-context'
 import { draftSessionIdsAtom } from '@/atoms/draft-session-atoms'
@@ -144,6 +145,7 @@ interface PreparedAgentAttachment {
   referenceBlock: string
   attachments: AgentQueuedAttachment[]
   additionalDirectories: string[]
+  partnerPendingFileIds: string[]
 }
 
 function createUserSDKMessage(text: string, uuid?: string, createdAt = Date.now()): SDKMessage {
@@ -558,13 +560,21 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     return sessionMeta.workspaceId ?? null     // 数据已加载，以会话自身为准
   }, [sessionMeta, globalWorkspaceId])
   const [pendingPrompt, setPendingPrompt] = useAtom(agentPendingPromptAtom)
-  const [pendingFiles, setPendingFiles] = useAtom(agentPendingFilesAtomFamily(sessionId))
+  const {
+    pendingFiles,
+    setPendingFiles,
+    addPendingFile,
+    removePendingFile,
+    releasePendingFileLinks,
+    removePendingFilesById,
+  } = useComparePendingFiles(sessionId)
   const [queuedMessages, setQueuedMessages] = useAtom(agentMessageQueueAtomFamily(sessionId))
   const workspaces = useAtomValue(agentWorkspacesAtom)
   // 双开对比：本 session 的配对 partner + 联动开关 + 广播信号
   const comparePair = useAtomValue(comparePairAtom)
   const compareLinked = useAtomValue(compareLinkedAtom)
   const comparePartnerId = getComparePartner(comparePair, sessionId)
+  const setCompareFocusedSessionId = useSetAtom(compareFocusedSessionIdAtom)
   const [compareBroadcast, setCompareBroadcast] = useAtom(compareBroadcastAtom)
   const lastBroadcastNonceRef = React.useRef<string | null>(null)
   const [pendingInherit, setPendingInherit] = useAtom(pendingInheritAtom)
@@ -1311,7 +1321,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     additionalDirectoriesForRun: Set<string>,
   ): Promise<PreparedAgentAttachment | null> => {
     if (files.length === 0) {
-      return { referenceBlock: '', attachments: [], additionalDirectories: [] }
+      return { referenceBlock: '', attachments: [], additionalDirectories: [], partnerPendingFileIds: [] }
     }
 
     const workspace = workspaces.find((w) => w.id === currentWorkspaceId)
@@ -1417,7 +1427,17 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       return null
     }
 
+    // 源 session 自己保存的上传文件位于 cwd 内，但对 partner 是兄弟目录；
+    // 所有稳定路径都显式携带父目录，确保跨 session 广播后仍有读取权限。
+    for (const ref of allRefs) {
+      const parentPath = getFileParentPath(ref.targetPath)
+      if (!parentPath) continue
+      additionalDirectoriesForRun.add(parentPath)
+      queuedAdditionalDirectories.add(parentPath)
+    }
+
     const refs = allRefs.map((f) => `- ${f.filename}: ${f.targetPath}`).join('\n')
+    const partnerPendingFileIds = releasePendingFileLinks(files)
 
     for (const f of files) {
       if (f.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(f.previewUrl)
@@ -1434,8 +1454,9 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         targetPath: ref.targetPath,
       })),
       additionalDirectories: Array.from(queuedAdditionalDirectories),
+      partnerPendingFileIds,
     }
-  }, [currentWorkspaceId, sessionId, setPendingFiles, workspaces])
+  }, [currentWorkspaceId, releasePendingFileLinks, sessionId, setPendingFiles, workspaces])
 
   const restoreQueuedAttachmentsToPending = React.useCallback((attachments?: AgentQueuedAttachment[]): void => {
     if (!attachments || attachments.length === 0) return
@@ -1482,7 +1503,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
             sourcePath,
           }
 
-          setPendingFiles((prev) => [...prev, pending])
+          addPendingFile(pending)
           pathBackedFiles.push(uniqueFilename)
           continue
         }
@@ -1505,7 +1526,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         }
         window.__pendingAgentFileData.set(pending.id, base64)
 
-        setPendingFiles((prev) => [...prev, pending])
+        addPendingFile(pending)
       } catch (error) {
         console.error('[AgentView] 添加附件失败:', error)
       }
@@ -1517,7 +1538,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     if (rejectedLargeFiles.length > 0) {
       toast.error(`以下文件超过 100MB 且无法取得本地路径，已跳过：${formatFileNames(rejectedLargeFiles)}`)
     }
-  }, [attachSessionFile, makeUniqueFilename, setPendingFiles])
+  }, [addPendingFile, attachSessionFile, makeUniqueFilename])
 
   const addLargeDialogFilesAsReferences = React.useCallback(async (files: FileDialogLargeFile[]): Promise<void> => {
     if (files.length === 0) return
@@ -1539,7 +1560,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
           sourcePath: file.path,
         }
 
-        setPendingFiles((prev) => [...prev, pending])
+        addPendingFile(pending)
         added.push(uniqueFilename)
       } catch (error) {
         console.error('[AgentView] 附加大文件失败:', error)
@@ -1553,7 +1574,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     if (rejected.length > 0) {
       toast.error(`以下文件附加失败，已跳过：${formatFileNames(rejected)}`)
     }
-  }, [attachSessionFile, makeUniqueFilename, setPendingFiles])
+  }, [addPendingFile, attachSessionFile, makeUniqueFilename])
 
   /** 打开文件选择对话框 */
   const handleOpenFileDialog = React.useCallback(async (): Promise<void> => {
@@ -1587,7 +1608,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         }
         window.__pendingAgentFileData.set(pending.id, fileInfo.data)
 
-        setPendingFiles((prev) => [...prev, pending])
+        addPendingFile(pending)
       }
 
       if (oversized.length > 0) {
@@ -1600,7 +1621,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     } catch (error) {
       console.error('[AgentView] 文件选择对话框失败:', error)
     }
-  }, [addLargeDialogFilesAsReferences, setPendingFiles])
+  }, [addLargeDialogFilesAsReferences, addPendingFile])
 
   /** 附加文件夹（不复制，仅记录路径） */
   const handleAttachFolder = React.useCallback(async (): Promise<void> => {
@@ -1626,17 +1647,10 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     }
   }, [sessionId, setAttachedDirsMap])
 
-  /** 移除待发送文件 */
+  /** 移除待发送文件；联动开启时同步移除 partner 的镜像草稿。 */
   const handleRemoveFile = React.useCallback((id: string): void => {
-    setPendingFiles((prev) => {
-      const file = prev.find((f) => f.id === id)
-      if (file?.previewUrl?.startsWith('blob:')) {
-        URL.revokeObjectURL(file.previewUrl)
-      }
-      window.__pendingAgentFileData?.delete(id)
-      return prev.filter((f) => f.id !== id)
-    })
-  }, [setPendingFiles])
+    removePendingFile(id)
+  }, [removePendingFile])
 
   /** 图片附件编辑完成：用编辑后的图替换该附件（统一转为内存图片走 __pendingAgentFileData） */
   const handleAttachmentEditComplete = React.useCallback((fileId: string, editedDataUrl: string): void => {
@@ -1707,13 +1721,10 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       tmpPath,
       `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     )
-    setPendingFiles((prev) => {
-      const next = [...prev, pending]
-      pendingFilesRef.current = next
-      return next
-    })
+    pendingFilesRef.current = [...pendingFilesRef.current, pending]
+    addPendingFile(pending)
     return pending
-  }, [setPendingFiles])
+  }, [addPendingFile])
 
   /** 粘贴文件处理 */
   const handlePasteFiles = React.useCallback((files: File[]): void => {
@@ -1960,23 +1971,48 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
   if (computedSelectedModel) stableSelectedModelRef.current = computedSelectedModel
   const externalSelectedModel = computedSelectedModel ?? stableSelectedModelRef.current
 
-  const broadcastComparePrompt = React.useCallback((text: string, fromBroadcast?: boolean): void => {
-    if (fromBroadcast || !compareLinked || !comparePartnerId || !text) return
+  const broadcastComparePrompt = React.useCallback((
+    text: string,
+    fromBroadcast?: boolean,
+    attachmentContext?: PreparedAgentAttachment | null,
+  ): void => {
+    if (fromBroadcast || !compareLinked || !comparePartnerId) return
+    const attachmentPayload: CompareAttachmentPayload | undefined = attachmentContext?.attachments.length
+      ? {
+          fileReferenceBlock: attachmentContext.referenceBlock,
+          attachments: attachmentContext.attachments,
+          additionalDirectories: attachmentContext.additionalDirectories,
+          pendingFileIdsToConsume: attachmentContext.partnerPendingFileIds,
+        }
+      : undefined
+    if (!text && !attachmentPayload) return
     setCompareBroadcast({
       targetSessionId: comparePartnerId,
       text,
       nonce: crypto.randomUUID(),
+      attachmentPayload,
     })
   }, [compareLinked, comparePartnerId, setCompareBroadcast])
 
   /** 发送消息 */
-  const handleSend = React.useCallback(async (overrideText?: string, opts?: { fromBroadcast?: boolean }): Promise<void> => {
+  const handleSend = React.useCallback(async (
+    overrideText?: string,
+    opts?: { fromBroadcast?: boolean; attachmentPayload?: CompareAttachmentPayload },
+  ): Promise<void> => {
     const text = (overrideText ?? inputContent).trim()
-    // 如果输入为空但有建议，使用建议内容
-    const effectiveText = text || suggestion || ''
-    // 联动广播只发送纯文本，不消费 partner 输入框里尚未发送的附件或引用。
+    // 本地输入为空时可采用建议；广播为空文本时不能误用 partner 自己的建议。
+    const effectiveText = text || (opts?.fromBroadcast ? '' : suggestion) || ''
+    // 联动广播使用源侧已经稳定化的附件路径，不消费 partner 的私人附件草稿。
+    const incomingAttachmentContext: PreparedAgentAttachment | null = opts?.attachmentPayload
+      ? {
+          referenceBlock: opts.attachmentPayload.fileReferenceBlock,
+          attachments: opts.attachmentPayload.attachments,
+          additionalDirectories: opts.attachmentPayload.additionalDirectories,
+          partnerPendingFileIds: [],
+        }
+      : null
     const pendingFilesSnapshot = opts?.fromBroadcast ? [] : pendingFilesRef.current
-    if (!messagesLoaded || (!effectiveText && pendingFilesSnapshot.length === 0) || !agentChannelId || !hasAvailableModel) return
+    if (!messagesLoaded || (!effectiveText && pendingFilesSnapshot.length === 0 && !incomingAttachmentContext) || !agentChannelId || !hasAvailableModel) return
 
     if (!streaming && messagesRefreshingRef.current) {
       toast.info('上一轮消息正在同步', {
@@ -1985,12 +2021,18 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       return
     }
     const additionalDirectoriesForRun = createBaseAdditionalDirectories()
+    for (const dir of incomingAttachmentContext?.additionalDirectories ?? []) {
+      additionalDirectoriesForRun.add(dir)
+    }
+    const consumeIncomingPendingFiles = (): void => {
+      removePendingFilesById(opts?.attachmentPayload?.pendingFileIdsToConsume ?? [])
+    }
 
     if (streaming) {
       // Agent 正在输出时，用户消息默认进入 Proma 托管队列，不打断当前 turn。
-      const attachmentContext = pendingFilesSnapshot.length > 0
+      const attachmentContext = incomingAttachmentContext ?? (pendingFilesSnapshot.length > 0
         ? await preparePendingFilesForSend(pendingFilesSnapshot, additionalDirectoriesForRun)
-        : null
+        : null)
       if (pendingFilesSnapshot.length > 0 && !attachmentContext) return
 
       const quotedSelection = opts?.fromBroadcast ? undefined : consumeQuotedSelection()
@@ -2014,17 +2056,18 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         map.delete(sessionId)
         return map
       })
+      consumeIncomingPendingFiles()
       // 源会话已成功入队后再广播，避免附件准备失败或早退时只有 partner 收到消息。
-      broadcastComparePrompt(effectiveText, opts?.fromBroadcast)
+      broadcastComparePrompt(effectiveText, opts?.fromBroadcast, attachmentContext)
 
       return
     }
 
     if (backgroundWaiting) {
       // 软空闲态没有活跃输出，直接注入，无需中断。
-      const attachmentContext = pendingFilesSnapshot.length > 0
+      const attachmentContext = incomingAttachmentContext ?? (pendingFilesSnapshot.length > 0
         ? await preparePendingFilesForSend(pendingFilesSnapshot, additionalDirectoriesForRun)
-        : null
+        : null)
       if (pendingFilesSnapshot.length > 0 && !attachmentContext) return
 
       const quotedSelection = opts?.fromBroadcast ? undefined : consumeQuotedSelection()
@@ -2070,7 +2113,8 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         }
         restoreQueuedAttachmentsToPending(message.attachments)
       })
-      broadcastComparePrompt(effectiveText, opts?.fromBroadcast)
+      consumeIncomingPendingFiles()
+      broadcastComparePrompt(effectiveText, opts?.fromBroadcast, attachmentContext)
       return
     }
 
@@ -2091,9 +2135,9 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     })
 
     // 1. 如果有 pending 文件，先保存到 session 目录
-    const attachmentContext = pendingFilesSnapshot.length > 0
+    const attachmentContext = incomingAttachmentContext ?? (pendingFilesSnapshot.length > 0
       ? await preparePendingFilesForSend(pendingFilesSnapshot, additionalDirectoriesForRun)
-      : null
+      : null)
     if (pendingFilesSnapshot.length > 0 && !attachmentContext) return
     let fileReferences = attachmentContext?.referenceBlock ?? ''
 
@@ -2184,8 +2228,9 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         return map
       })
     })
-    broadcastComparePrompt(effectiveText, opts?.fromBroadcast)
-  }, [inputContent, createBaseAdditionalDirectories, preparePendingFilesForSend, restoreQueuedAttachmentsToPending, sessionId, agentChannelId, agentModelId, sessionAgentRuntime, agentChannelProvider, currentWorkspaceId, streaming, backgroundWaiting, suggestion, hasAvailableModel, store, consumeQuotedSelection, setStreamingStates, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, permissionMode, messagesLoaded, setQueuedMessages, setQuotedSelectionMap, sendPlainTextAgentMessage, broadcastComparePrompt])
+    consumeIncomingPendingFiles()
+    broadcastComparePrompt(effectiveText, opts?.fromBroadcast, attachmentContext)
+  }, [inputContent, createBaseAdditionalDirectories, preparePendingFilesForSend, restoreQueuedAttachmentsToPending, sessionId, agentChannelId, agentModelId, sessionAgentRuntime, agentChannelProvider, currentWorkspaceId, streaming, backgroundWaiting, suggestion, hasAvailableModel, store, consumeQuotedSelection, setStreamingStates, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, permissionMode, messagesLoaded, setQueuedMessages, setQuotedSelectionMap, sendPlainTextAgentMessage, broadcastComparePrompt, removePendingFilesById])
 
   // 双开对比·联动接收：监听广播信号，目标为本 session 且 nonce 未消费时，
   // 走自己的 handleSend（fromBroadcast=true 避免回环）独立发送同一段文本。
@@ -2200,7 +2245,10 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     const event = compareBroadcast
     // 消费后立即清空，避免 AgentView 解绑重挂时重放旧 prompt。
     setCompareBroadcast((current) => current === event ? null : current)
-    void handleSend(event.text, { fromBroadcast: true })
+    void handleSend(event.text, {
+      fromBroadcast: true,
+      attachmentPayload: event.attachmentPayload,
+    })
   }, [agentChannelId, compareBroadcast, handleSend, hasAvailableModel, messagesLoaded, messagesRefreshing, sessionId, setCompareBroadcast, streaming])
 
   /** 停止生成 */
@@ -2853,7 +2901,15 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
   return (
     <>
     <AgentSessionProvider sessionId={sessionId}>
-      <div className="flex h-full min-h-0 flex-1 min-w-0 max-w-[min(72rem,100%)] flex-col overflow-hidden mx-auto">
+      <div
+        className="flex h-full min-h-0 flex-1 min-w-0 max-w-[min(72rem,100%)] flex-col overflow-hidden mx-auto"
+        onPointerDownCapture={() => {
+          if (comparePartnerId) setCompareFocusedSessionId(sessionId)
+        }}
+        onFocusCapture={() => {
+          if (comparePartnerId) setCompareFocusedSessionId(sessionId)
+        }}
+      >
         {/* Agent Header */}
         <AgentHeader sessionId={sessionId} />
 

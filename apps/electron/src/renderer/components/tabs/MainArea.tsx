@@ -30,7 +30,10 @@ import { AgentView } from '@/components/agent'
 import { agentSessionsAtom, agentStreamingStatesAtom } from '@/atoms/agent-atoms'
 import {
   compareBroadcastAtom,
+  compareFocusedSessionIdAtom,
+  compareLinkedAtom,
   comparePairAtom,
+  comparePendingFileLinksAtom,
   compareSplitRatioAtom,
   pendingInheritAtom,
 } from '@/atoms/compare-atoms'
@@ -71,8 +74,11 @@ export function MainArea(): React.ReactElement {
   // 双开对比：配对非空且当前活跃 tab 正是配对左栏 session 时，右栏放第二个 AgentView。
   // 对比态优先接管右 slot（与 preview/scratch 互斥）。
   const [comparePair, setComparePair] = useAtom(comparePairAtom)
+  const setCompareFocusedSessionId = useSetAtom(compareFocusedSessionIdAtom)
+  const compareLinked = useAtomValue(compareLinkedAtom)
   const [compareSplitRatio, setCompareSplitRatio] = useAtom(compareSplitRatioAtom)
   const setCompareBroadcast = useSetAtom(compareBroadcastAtom)
+  const setComparePendingFileLinks = useSetAtom(comparePendingFileLinksAtom)
   const [pendingInherit, setPendingInherit] = useAtom(pendingInheritAtom)
   const agentSessions = useAtomValue(agentSessionsAtom)
   const streamingStates = useAtomValue(agentStreamingStatesAtom)
@@ -80,6 +86,7 @@ export function MainArea(): React.ReactElement {
   const compareDragging = React.useRef(false)
   const pendingInheritInFlightRef = React.useRef<typeof pendingInherit>(null)
   const previousComparePairRef = React.useRef(comparePair)
+  const previousCompareLinkedRef = React.useRef(compareLinked)
   const showComparePane =
     !!comparePair &&
     activeTab?.type === 'agent' &&
@@ -90,8 +97,20 @@ export function MainArea(): React.ReactElement {
   React.useEffect(() => {
     if (previousComparePairRef.current === comparePair) return
     previousComparePairRef.current = comparePair
+    setCompareFocusedSessionId(comparePair?.left ?? null)
     setCompareBroadcast(null)
-  }, [comparePair, setCompareBroadcast])
+    setComparePendingFileLinks(new Map())
+  }, [comparePair, setCompareBroadcast, setCompareFocusedSessionId, setComparePendingFileLinks])
+
+  // 关闭联动即切断现有附件镜像关系；草稿保留在两侧，重新开启时不自动合并。
+  React.useEffect(() => {
+    const wasLinked = previousCompareLinkedRef.current
+    previousCompareLinkedRef.current = compareLinked
+    if (wasLinked && !compareLinked) {
+      setCompareBroadcast(null)
+      setComparePendingFileLinks(new Map())
+    }
+  }, [compareLinked, setCompareBroadcast, setComparePendingFileLinks])
 
   // 删除配对中的任一会话后自动退出分屏，避免右栏渲染不存在的 session。
   React.useEffect(() => {

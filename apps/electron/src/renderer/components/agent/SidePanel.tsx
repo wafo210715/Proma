@@ -30,7 +30,6 @@ import {
   agentAttachedFilesMapAtom,
   workspaceAttachedDirectoriesMapAtom,
   workspaceAttachedFilesMapAtom,
-  agentPendingFilesAtomFamily,
   agentDiffRefreshVersionAtom,
   fileBrowserAutoRevealAtom,
   agentSelectedWorktreeAtom,
@@ -41,6 +40,7 @@ import { interfaceVariantAtom } from '@/atoms/theme'
 import { previewFileMapAtom } from '@/atoms/preview-atoms'
 import { useOpenPreview } from '@/components/diff/preview-opener'
 import { detectIsWindows } from '@/lib/platform'
+import { useComparePendingFiles } from '@/hooks/useComparePendingFiles'
 import type { FileEntry, AgentPendingFile } from '@proma/shared'
 
 function getPathBasename(filePath: string): string {
@@ -326,14 +326,13 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
     setFilesVersion((prev) => prev + 1)
   }, [setFilesVersion])
 
-  // 添加文件到聊天
-  const pendingFiles = useAtomValue(agentPendingFilesAtomFamily(sessionId))
-  const setPendingFiles = useSetAtom(agentPendingFilesAtomFamily(sessionId))
+  // 添加文件到聊天；配对且联动开启时，同一路径同步到 partner 的附件草稿。
+  const { pendingFiles, addPendingFile } = useComparePendingFiles(sessionId)
   const handleAddToChat = React.useCallback((entry: FileEntry) => {
-    // 先在 setter 外部检查去重，避免在 updater 函数内执行不可逆副作用
-    if (pendingFiles.some((f) => f.sourcePath === entry.path)) return
-
-    const pending: AgentPendingFile = {
+    // 本地已有同一路径时复用草稿：联动重新开启后再次 attach 可重建 partner 映射，
+    // 同时不在当前输入框制造重复 chip。
+    const existing = pendingFiles.find((file) => file.sourcePath === entry.path)
+    const pending: AgentPendingFile = existing ?? {
       id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       filename: entry.name,
       mediaType: getMediaTypeFromFilename(entry.name),
@@ -342,8 +341,8 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
     }
 
     // 有 sourcePath 的文件发送时直接引用原路径，不需要存 base64
-    setPendingFiles((prev) => [...prev, pending])
-  }, [pendingFiles, setPendingFiles])
+    addPendingFile(pending)
+  }, [addPendingFile, pendingFiles])
 
   // 面包屑：显示根路径最后两段
   const breadcrumb = React.useMemo(() => {
