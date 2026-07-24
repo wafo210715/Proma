@@ -6,7 +6,7 @@ import {
 } from '@/atoms/agent-atoms'
 import {
   compareLinkedAtom,
-  comparePairAtom,
+  comparePairsAtom,
   comparePendingFileLinksAtom,
   getComparePartner,
   getComparePendingFileLinkKey,
@@ -93,9 +93,9 @@ export function useComparePendingFiles(sessionId: string) {
   const store = useStore()
   const pendingFiles = useAtomValue(agentPendingFilesAtomFamily(sessionId))
   const setPendingFiles = useSetAtom(agentPendingFilesAtomFamily(sessionId))
-  const comparePair = useAtomValue(comparePairAtom)
+  const comparePairs = useAtomValue(comparePairsAtom)
   const compareLinked = useAtomValue(compareLinkedAtom)
-  const partnerSessionId = compareLinked ? getComparePartner(comparePair, sessionId) : null
+  const partnerSessionId = compareLinked ? getComparePartner(comparePairs, sessionId) : null
 
   const addPendingFile = React.useCallback((file: AgentPendingFile): void => {
     setPendingFiles((prev) => prev.some((item) => item.id === file.id) ? prev : [...prev, file])

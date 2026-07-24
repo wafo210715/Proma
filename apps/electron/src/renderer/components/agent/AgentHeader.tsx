@@ -11,7 +11,7 @@ import { Pencil, Check, X, Columns2, Link2, Link2Off, Plus } from 'lucide-react'
 import type { ModelOption } from '@proma/shared'
 import { agentSessionsAtom, agentSessionStreamingStateAtomFamily } from '@/atoms/agent-atoms'
 import { tabsAtom, updateTabTitle } from '@/atoms/tab-atoms'
-import { comparePairAtom, compareLinkedAtom, getComparePartner } from '@/atoms/compare-atoms'
+import { comparePairsAtom, compareLinkedAtom, getComparePartner, removePairContaining } from '@/atoms/compare-atoms'
 import { useCompareActions } from '@/hooks/useCompareActions'
 import { ModelSelector } from '@/components/chat/ModelSelector'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -36,11 +36,11 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
   const inputRef = React.useRef<HTMLInputElement>(null)
 
   // 双开对比控件状态
-  const [comparePair, setComparePair] = useAtom(comparePairAtom)
+  const [comparePairs, setComparePairs] = useAtom(comparePairsAtom)
   const [compareLinked, setCompareLinked] = useAtom(compareLinkedAtom)
   const [pickerOpen, setPickerOpen] = React.useState(false)
   const [creatingCompare, setCreatingCompare] = React.useState(false)
-  const comparePartnerId = getComparePartner(comparePair, sessionId)
+  const comparePartnerId = getComparePartner(comparePairs, sessionId)
   const inComparePair = comparePartnerId !== null
   const otherSessions = sessions.filter((s) => s.id !== sessionId)
   const { createBlankCompare, requestInherit } = useCompareActions()
@@ -181,7 +181,7 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
               <TooltipTrigger asChild>
                 <button
                   type="button"
-                  onClick={() => setComparePair(null)}
+                  onClick={() => setComparePairs((prev) => removePairContaining(prev, sessionId))}
                   className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
                   aria-label="解绑分屏对比"
                 >
@@ -240,7 +240,12 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
                       key={s.id}
                       type="button"
                       onClick={() => {
-                        setComparePair({ left: sessionId, right: s.id })
+                        setComparePairs((prev) => {
+                          const filtered = prev.filter(
+                            (p) => p.left !== sessionId && p.left !== s.id && p.right !== sessionId && p.right !== s.id,
+                          )
+                          return [...filtered, { left: sessionId, right: s.id }]
+                        })
                         setCompareLinked(true)
                         setPickerOpen(false)
                       }}

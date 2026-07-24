@@ -109,7 +109,7 @@ import type { AgentContextStatus } from '@/atoms/agent-atoms'
 import { settingsOpenAtom } from '@/atoms/settings-tab'
 import { longTextPasteAsAttachmentEnabledAtom } from '@/atoms/ui-preferences'
 import { channelsAtom, thinkingExpandedAtom } from '@/atoms/chat-atoms'
-import { comparePairAtom, compareFocusedSessionIdAtom, compareLinkedAtom, compareBroadcastAtom, getComparePartner, pendingInheritAtom } from '@/atoms/compare-atoms'
+import { comparePairsAtom, compareFocusedSessionIdAtom, compareLinkedAtom, compareBroadcastAtom, getComparePartner, pendingInheritAtom } from '@/atoms/compare-atoms'
 import type { CompareAttachmentPayload } from '@/atoms/compare-atoms'
 import { useComparePendingFiles } from '@/hooks/useComparePendingFiles'
 import { useOpenSession } from '@/hooks/useOpenSession'
@@ -571,9 +571,9 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
   const [queuedMessages, setQueuedMessages] = useAtom(agentMessageQueueAtomFamily(sessionId))
   const workspaces = useAtomValue(agentWorkspacesAtom)
   // 双开对比：本 session 的配对 partner + 联动开关 + 广播信号
-  const comparePair = useAtomValue(comparePairAtom)
+  const comparePairs = useAtomValue(comparePairsAtom)
   const compareLinked = useAtomValue(compareLinkedAtom)
-  const comparePartnerId = getComparePartner(comparePair, sessionId)
+  const comparePartnerId = getComparePartner(comparePairs, sessionId)
   const setCompareFocusedSessionId = useSetAtom(compareFocusedSessionIdAtom)
   const [compareBroadcast, setCompareBroadcast] = useAtom(compareBroadcastAtom)
   const lastBroadcastNonceRef = React.useRef<string | null>(null)

@@ -18,7 +18,7 @@ import { ModeSwitcher } from './ModeSwitcher'
 import { SearchDialog } from './SearchDialog'
 import { UserAvatar } from '@/components/chat/UserAvatar'
 import { activeViewAtom, agentSkillsTabAtom } from '@/atoms/active-view'
-import { comparePairAtom, compareLinkedAtom } from '@/atoms/compare-atoms'
+import { comparePairsAtom, compareLinkedAtom, addPair, getComparePartner } from '@/atoms/compare-atoms'
 import { automationFormAtom, automationsAtom } from '@/atoms/automation-atoms'
 import { appModeAtom, type AppMode } from '@/atoms/app-mode'
 import { settingsOpenAtom, settingsTabAtom } from '@/atoms/settings-tab'
@@ -3603,17 +3603,20 @@ const AgentSessionItem = React.memo(function AgentSessionItem({
   const isClassic = interfaceVariant === 'classic'
   // 进入分屏（不绑定）：把当前活跃会话与本会话并排，联动关闭
   const currentAgentSessionId = useAtomValue(currentAgentSessionIdAtom)
-  const setComparePair = useSetAtom(comparePairAtom)
+  const setComparePairs = useSetAtom(comparePairsAtom)
   const setCompareLinked = useSetAtom(compareLinkedAtom)
+  const comparePairs = useAtomValue(comparePairsAtom)
+  const comparePartnerId = getComparePartner(comparePairs, session.id)
+  const inComparePair = comparePartnerId !== null
   const handleEnterSplit = React.useCallback((): void => {
     if (!currentAgentSessionId || currentAgentSessionId === session.id) {
       // 没有已打开的会话，或右键的就是当前会话：直接打开它，不分屏
       onSelect(session.id, session.title)
       return
     }
-    setComparePair({ left: currentAgentSessionId, right: session.id })
+    setComparePairs((prev) => addPair(prev, currentAgentSessionId, session.id))
     setCompareLinked(false)
-  }, [currentAgentSessionId, session.id, session.title, onSelect, setComparePair, setCompareLinked])
+  }, [currentAgentSessionId, session.id, session.title, onSelect, setComparePairs, setCompareLinked])
 
   const startEdit = (): void => {
     setEditTitle(session.title)
@@ -3735,6 +3738,13 @@ const AgentSessionItem = React.memo(function AgentSessionItem({
               )}
             />
           )}
+          {/* 分屏对比指示器：左侧紫色竖线 */}
+          {inComparePair && (
+            <span
+              className="absolute inset-y-0 left-0 w-[3px] rounded-l-md pointer-events-none bg-violet-500"
+              style={{ left: leftAccent ? '3px' : undefined }}
+            />
+          )}
           <div className="flex-1 min-w-0">
             {editing ? (
               <input
@@ -3779,6 +3789,9 @@ const AgentSessionItem = React.memo(function AgentSessionItem({
                   <span className="flex-shrink-0 text-[11px] leading-4 text-foreground/45">
                     {delegationSummary.completed}/{delegationSummary.total}
                   </span>
+                )}
+                {inComparePair && (
+                  <Columns2 size={11} className="flex-shrink-0 text-violet-500/70" />
                 )}
               </div>
             )}
