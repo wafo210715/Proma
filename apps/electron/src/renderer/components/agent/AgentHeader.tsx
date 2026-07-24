@@ -11,7 +11,7 @@ import { Pencil, Check, X, Columns2, Link2, Link2Off, Plus } from 'lucide-react'
 import type { ModelOption } from '@proma/shared'
 import { agentSessionsAtom, agentSessionStreamingStateAtomFamily } from '@/atoms/agent-atoms'
 import { tabsAtom, updateTabTitle } from '@/atoms/tab-atoms'
-import { comparePairsAtom, compareLinkedAtom, getComparePartner, removePairContaining } from '@/atoms/compare-atoms'
+import { comparePairsAtom, compareLinkedAtom, getComparePartner, removePairContaining, addPair } from '@/atoms/compare-atoms'
 import { useCompareActions } from '@/hooks/useCompareActions'
 import { ModelSelector } from '@/components/chat/ModelSelector'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -240,12 +240,7 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
                       key={s.id}
                       type="button"
                       onClick={() => {
-                        setComparePairs((prev) => {
-                          const filtered = prev.filter(
-                            (p) => p.left !== sessionId && p.left !== s.id && p.right !== sessionId && p.right !== s.id,
-                          )
-                          return [...filtered, { left: sessionId, right: s.id }]
-                        })
+                        setComparePairs((prev) => addPair(prev, sessionId, s.id))
                         setCompareLinked(true)
                         setPickerOpen(false)
                       }}

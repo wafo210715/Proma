@@ -20,11 +20,13 @@ import type { AgentQueuedAttachment } from '@/lib/agent-message-queue'
  * 一组分屏配对。
  * left = 主 session（左栏，通常是发起配对的当前 session），
  * right = 对比 session（右栏）。
+ * colorIndex = 创建时分配的颜色索引（单调递增，不随数组位置变化）。
  * 内存态，切换/重启不保留。
  */
 export interface ComparePair {
   left: string
   right: string
+  colorIndex: number
 }
 
 export const comparePairsAtom = atom<ComparePair[]>([])
@@ -46,6 +48,7 @@ export function findPairContaining(
 
 /**
  * 向配对数组添加一对。如果任一 session 已在其它配对中，先移除旧配对（一个 session 只能属于一对）。
+ * 颜色索引单调递增：取现有最大 colorIndex + 1，确保新配对不会复用被移除配对的颜色。
  */
 export function addPair(
   pairs: ComparePair[],
@@ -55,7 +58,8 @@ export function addPair(
   const filtered = pairs.filter(
     (p) => p.left !== left && p.left !== right && p.right !== left && p.right !== right,
   )
-  return [...filtered, { left, right }]
+  const maxColorIndex = filtered.reduce((max, p) => Math.max(max, p.colorIndex), -1)
+  return [...filtered, { left, right, colorIndex: maxColorIndex + 1 }]
 }
 
 /**
@@ -161,6 +165,7 @@ const COMPARE_COLOR_PALETTE = [
 
 /**
  * 获取某个 session 所属配对的颜色索引和 tailwind 颜色名。
+ * 颜色由 pair.colorIndex 决定（创建时分配，不会因数组重排而变化）。
  * 不在任何配对中返回 null。
  */
 export function getCompareColor(
@@ -169,6 +174,6 @@ export function getCompareColor(
 ): { index: number; tw: string } | null {
   const found = findPairContaining(pairs, sessionId)
   if (!found) return null
-  const index = pairs.indexOf(found.pair)
-  return { index, tw: COMPARE_COLOR_PALETTE[index % COMPARE_COLOR_PALETTE.length]! }
+  const colorIndex = found.pair.colorIndex
+  return { index: colorIndex, tw: COMPARE_COLOR_PALETTE[colorIndex % COMPARE_COLOR_PALETTE.length]! }
 }
