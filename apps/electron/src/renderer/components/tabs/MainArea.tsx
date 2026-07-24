@@ -32,9 +32,11 @@ import {
   compareBroadcastAtom,
   compareFocusedSessionIdAtom,
   compareLinkedAtom,
-  comparePairAtom,
+  comparePairsAtom,
   comparePendingFileLinksAtom,
   compareSplitRatioAtom,
+  findPairContaining,
+  removePairContaining,
   pendingInheritAtom,
 } from '@/atoms/compare-atoms'
 import { useCompareActions } from '@/hooks/useCompareActions'
@@ -71,9 +73,9 @@ export function MainArea(): React.ReactElement {
   const previewDragging = React.useRef(false)
   const rightWorkspaceDragging = React.useRef(false)
 
-  // 双开对比：配对非空且当前活跃 tab 正是配对左栏 session 时，右栏放第二个 AgentView。
-  // 对比态优先接管右 slot（与 preview/scratch 互斥）。
-  const [comparePair, setComparePair] = useAtom(comparePairAtom)
+  // 双开对比：当前活跃 tab 属于某个配对时，右栏放 partner 的 AgentView。
+  // 点配对中的任一 session 都恢复分屏。对比态优先接管右 slot（与 preview/scratch 互斥）。
+  const [comparePairs, setComparePairs] = useAtom(comparePairsAtom)
   const setCompareFocusedSessionId = useSetAtom(compareFocusedSessionIdAtom)
   const compareLinked = useAtomValue(compareLinkedAtom)
   const [compareSplitRatio, setCompareSplitRatio] = useAtom(compareSplitRatioAtom)
@@ -85,22 +87,32 @@ export function MainArea(): React.ReactElement {
   const { executeInherit } = useCompareActions()
   const compareDragging = React.useRef(false)
   const pendingInheritInFlightRef = React.useRef<typeof pendingInherit>(null)
-  const previousComparePairRef = React.useRef(comparePair)
+  const previousComparePairsRef = React.useRef(comparePairs)
   const previousCompareLinkedRef = React.useRef(compareLinked)
+
+  // 当前活跃 tab 对应的配对信息：activePair = 配对对象，activeCompareRole = 当前 session 是 left 还是 right
+  const activeSessionId = activeTab?.type === 'agent' ? activeTab.sessionId : null
+  const activeCompareMatch = activeSessionId
+    ? findPairContaining(comparePairs, activeSessionId)
+    : null
+  const activeComparePair = activeCompareMatch?.pair ?? null
+  // partner = 当前 tab 的分屏另一侧 session
+  const comparePartnerId = activeCompareMatch
+    ? (activeCompareMatch.role === 'left' ? activeCompareMatch.pair.right : activeCompareMatch.pair.left)
+    : null
   const showComparePane =
-    !!comparePair &&
-    activeTab?.type === 'agent' &&
-    activeTab.sessionId === comparePair.left &&
+    !!activeComparePair &&
+    !!comparePartnerId &&
     activeView === 'conversations'
 
-  // 配对变化时丢弃尚未消费的旧广播，防止解绑/重绑后重放旧 prompt。
+  // 配对数组变化时丢弃尚未消费的旧广播，防止解绑/重绑后重放旧 prompt。
   React.useEffect(() => {
-    if (previousComparePairRef.current === comparePair) return
-    previousComparePairRef.current = comparePair
-    setCompareFocusedSessionId(comparePair?.left ?? null)
+    if (previousComparePairsRef.current === comparePairs) return
+    previousComparePairsRef.current = comparePairs
+    setCompareFocusedSessionId(activeSessionId)
     setCompareBroadcast(null)
     setComparePendingFileLinks(new Map())
-  }, [comparePair, setCompareBroadcast, setCompareFocusedSessionId, setComparePendingFileLinks])
+  }, [comparePairs, activeSessionId, setCompareBroadcast, setCompareFocusedSessionId, setComparePendingFileLinks])
 
   // 关闭联动即切断现有附件镜像关系；草稿保留在两侧，重新开启时不自动合并。
   React.useEffect(() => {
@@ -112,14 +124,19 @@ export function MainArea(): React.ReactElement {
     }
   }, [compareLinked, setCompareBroadcast, setComparePendingFileLinks])
 
-  // 删除配对中的任一会话后自动退出分屏，避免右栏渲染不存在的 session。
+  // 删除配对中的任一会话后自动清理对应配对，避免右栏渲染不存在的 session。
   React.useEffect(() => {
-    if (!comparePair) return
+    if (comparePairs.length === 0) return
     const sessionIds = new Set(agentSessions.map((session) => session.id))
-    if (!sessionIds.has(comparePair.left) || !sessionIds.has(comparePair.right)) {
-      setComparePair(null)
+    const hasStalePair = comparePairs.some(
+      (p) => !sessionIds.has(p.left) || !sessionIds.has(p.right),
+    )
+    if (hasStalePair) {
+      setComparePairs((prev) =>
+        prev.filter((p) => sessionIds.has(p.left) && sessionIds.has(p.right)),
+      )
     }
-  }, [agentSessions, comparePair, setComparePair])
+  }, [agentSessions, comparePairs, setComparePairs])
 
   // 待办继承由常驻 MainArea 观察全局流状态，切换 tab 后也能在源会话完成时执行。
   React.useEffect(() => {
@@ -379,8 +396,8 @@ export function MainArea(): React.ReactElement {
             )}
           </div>
 
-          {/* 右侧：双开对比栏（第二个 AgentView）。对比态接管右 slot，优先于 preview/scratch。 */}
-          {showComparePane && comparePair && (
+          {/* 右侧：双开对比栏（partner 的 AgentView）。对比态接管右 slot，优先于 preview/scratch。 */}
+          {showComparePane && comparePartnerId && (
             <>
               <div
                 className="w-[8px] cursor-col-resize bg-border/40 hover:bg-primary/30 active:bg-primary/50 transition-colors flex-shrink-0 self-stretch"
@@ -390,8 +407,8 @@ export function MainArea(): React.ReactElement {
                 {/* 补一条与左栏 TabBar 等高（34px）的顶栏，使右栏 AgentHeader 与左栏对齐 */}
                 <div className="h-[34px] tabbar-bg flex-shrink-0" />
                 <div className="flex-1 min-h-0">
-                  <TabErrorBoundary key={comparePair.right} sessionId={comparePair.right}>
-                    <AgentView sessionId={comparePair.right} sharedModelSelectorOpen={false} />
+                  <TabErrorBoundary key={comparePartnerId} sessionId={comparePartnerId}>
+                    <AgentView sessionId={comparePartnerId} sharedModelSelectorOpen={false} />
                   </TabErrorBoundary>
                 </div>
               </div>

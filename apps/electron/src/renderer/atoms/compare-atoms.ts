@@ -1,12 +1,15 @@
 /**
  * Compare Atoms — Agent 模式「跨 Provider 双开对比」状态
  *
- * Phase 1：临时配对（内存态，不持久化）。
+ * Phase 2：多对分屏并存（内存态数组）。
  * 把两个独立 Agent session 在 UI 上配成一对并排分屏；
  * 联动开启时，一个 prompt 同时注入两个 session（各自用自己的 channel/model/runtime 独立跑）。
  *
  * 设计要点：不改消息存储、不改后端。两个 session 仍是完全独立的实体，
- * 这里只维护「配对关系 + 联动开关 + 分屏比例 + 广播信号」四类纯 UI 状态。
+ 这里只维护「配对关系 + 联动开关 + 分屏比例 + 广播信号」四类纯 UI 状态。
+ *
+ * v2 变更（2026-07-24）：comparePairAtom 从单值改为数组 comparePairsAtom，
+ * 支持多对分屏并存。点任一 session 都恢复其所属分屏。
  */
 
 import { atom } from 'jotai'
@@ -14,18 +17,64 @@ import { atomWithStorage } from 'jotai/utils'
 import type { AgentQueuedAttachment } from '@/lib/agent-message-queue'
 
 /**
- * 当前配对（sessionId 对），null = 未进入分屏对比。
+ * 一组分屏配对。
  * left = 主 session（左栏，通常是发起配对的当前 session），
- * right = 对比 session（右栏）。内存态，切换/重启不保留（Phase 2 再持久化）。
+ * right = 对比 session（右栏）。
+ * 内存态，切换/重启不保留。
  */
-export const comparePairAtom = atom<{ left: string; right: string } | null>(null)
+export interface ComparePair {
+  left: string
+  right: string
+}
 
-/** 当前获得交互焦点的对比 pane；文件侧栏据此决定“添加到聊天”的目标 session。 */
+export const comparePairsAtom = atom<ComparePair[]>([])
+
+/**
+ * 从配对数组中找出包含某个 session 的配对。
+ * 返回 { pair, role } 方便调用方知道当前 session 是 left 还是 right。
+ */
+export function findPairContaining(
+  pairs: ComparePair[],
+  sessionId: string,
+): { pair: ComparePair; role: 'left' | 'right' } | null {
+  for (const pair of pairs) {
+    if (pair.left === sessionId) return { pair, role: 'left' }
+    if (pair.right === sessionId) return { pair, role: 'right' }
+  }
+  return null
+}
+
+/**
+ * 向配对数组添加一对。如果任一 session 已在其它配对中，先移除旧配对（一个 session 只能属于一对）。
+ */
+export function addPair(
+  pairs: ComparePair[],
+  left: string,
+  right: string,
+): ComparePair[] {
+  const filtered = pairs.filter(
+    (p) => p.left !== left && p.left !== right && p.right !== left && p.right !== right,
+  )
+  return [...filtered, { left, right }]
+}
+
+/**
+ * 从配对数组移除包含某个 session 的配对。
+ */
+export function removePairContaining(
+  pairs: ComparePair[],
+  sessionId: string,
+): ComparePair[] {
+  return pairs.filter((p) => p.left !== sessionId && p.right !== sessionId)
+}
+
+/** 当前获得交互焦点的对比 pane；文件侧栏据此决定"添加到聊天"的目标 session。 */
 export const compareFocusedSessionIdAtom = atom<string | null>(null)
 
 /**
  * 联动开关：开启时任一侧发送都会把同一 prompt 与已准备附件路径广播到另一侧；
  * 关闭时两侧各聊各的（支撑「二选一」「第三模型收敛」等灵活玩法）。
+ * 全局单值：同一时刻只有一组联动（当前活跃分屏的联动状态）。
  */
 export const compareLinkedAtom = atom<boolean>(true)
 
@@ -84,15 +133,14 @@ export interface PendingInherit {
 export const pendingInheritAtom = atom<PendingInherit | null>(null)
 
 /**
- * 派生：某个 session 在当前配对中的 partner sessionId（不在配对中则为 null）。
+ * 派生：某个 session 在配对数组中的 partner sessionId（不在任何配对中则为 null）。
  * 用工厂函数而非 atomFamily，避免为每个 sessionId 缓存 atom 实例。
  */
 export function getComparePartner(
-  pair: { left: string; right: string } | null,
+  pairs: ComparePair[],
   sessionId: string,
 ): string | null {
-  if (!pair) return null
-  if (pair.left === sessionId) return pair.right
-  if (pair.right === sessionId) return pair.left
-  return null
+  const found = findPairContaining(pairs, sessionId)
+  if (!found) return null
+  return found.role === 'left' ? found.pair.right : found.pair.left
 }

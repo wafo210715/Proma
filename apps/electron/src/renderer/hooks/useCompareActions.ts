@@ -16,7 +16,7 @@ import { isAgentCompatibleProvider } from '@proma/shared'
 import type { AgentRuntime, AgentSessionMeta, Channel, SDKMessage } from '@proma/shared'
 import { agentSessionsAtom, agentPendingPromptAtom } from '@/atoms/agent-atoms'
 import { channelsAtom } from '@/atoms/chat-atoms'
-import { comparePairAtom, compareLinkedAtom, pendingInheritAtom } from '@/atoms/compare-atoms'
+import { comparePairsAtom, compareLinkedAtom, addPair, pendingInheritAtom } from '@/atoms/compare-atoms'
 
 /**
  * 从源会话的 SDKMessage 历史提取纯文本，构建可注入新 session 的 <context> 块。
@@ -87,16 +87,16 @@ export function useCompareActions(): {
 } {
   const channels = useAtomValue(channelsAtom)
   const setAgentSessions = useSetAtom(agentSessionsAtom)
-  const setComparePair = useSetAtom(comparePairAtom)
+  const setComparePairs = useSetAtom(comparePairsAtom)
   const setCompareLinked = useSetAtom(compareLinkedAtom)
   const setPendingPrompt = useSetAtom(agentPendingPromptAtom)
   const setPendingInherit = useSetAtom(pendingInheritAtom)
 
   /** 把 source 与 newId 配对分屏并开启联动 */
   const pairWith = React.useCallback((sourceId: string, newId: string): void => {
-    setComparePair({ left: sourceId, right: newId })
+    setComparePairs((prev) => addPair(prev, sourceId, newId))
     setCompareLinked(true)
-  }, [setComparePair, setCompareLinked])
+  }, [setComparePairs, setCompareLinked])
 
   /** 新建空白对比会话：pin 到源会话 channel/model（独立、不浮在全局 default），配对 */
   const createBlankCompare = React.useCallback(async (source: AgentSessionMeta): Promise<void> => {
