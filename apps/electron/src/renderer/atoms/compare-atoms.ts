@@ -144,3 +144,31 @@ export function getComparePartner(
   if (!found) return null
   return found.role === 'left' ? found.pair.right : found.pair.left
 }
+
+/**
+ * 分屏配对颜色板。每对配对按数组顺序分配一种颜色，
+ * 同一对的两个 session 颜色一致，不同对颜色不同。
+ * 返回 tailwind 颜色名（不含 bg-/text- 前缀）。
+ */
+const COMPARE_COLOR_PALETTE = [
+  'violet-500',
+  'sky-500',
+  'amber-500',
+  'emerald-500',
+  'rose-500',
+  'indigo-500',
+] as const
+
+/**
+ * 获取某个 session 所属配对的颜色索引和 tailwind 颜色名。
+ * 不在任何配对中返回 null。
+ */
+export function getCompareColor(
+  pairs: ComparePair[],
+  sessionId: string,
+): { index: number; tw: string } | null {
+  const found = findPairContaining(pairs, sessionId)
+  if (!found) return null
+  const index = pairs.indexOf(found.pair)
+  return { index, tw: COMPARE_COLOR_PALETTE[index % COMPARE_COLOR_PALETTE.length]! }
+}

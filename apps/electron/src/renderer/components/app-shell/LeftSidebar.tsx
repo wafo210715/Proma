@@ -18,7 +18,7 @@ import { ModeSwitcher } from './ModeSwitcher'
 import { SearchDialog } from './SearchDialog'
 import { UserAvatar } from '@/components/chat/UserAvatar'
 import { activeViewAtom, agentSkillsTabAtom } from '@/atoms/active-view'
-import { comparePairsAtom, compareLinkedAtom, addPair, getComparePartner } from '@/atoms/compare-atoms'
+import { comparePairsAtom, compareLinkedAtom, addPair, getComparePartner, findPairContaining, getCompareColor } from '@/atoms/compare-atoms'
 import { automationFormAtom, automationsAtom } from '@/atoms/automation-atoms'
 import { appModeAtom, type AppMode } from '@/atoms/app-mode'
 import { settingsOpenAtom, settingsTabAtom } from '@/atoms/settings-tab'
@@ -3608,6 +3608,26 @@ const AgentSessionItem = React.memo(function AgentSessionItem({
   const comparePairs = useAtomValue(comparePairsAtom)
   const comparePartnerId = getComparePartner(comparePairs, session.id)
   const inComparePair = comparePartnerId !== null
+  const compareColor = getCompareColor(comparePairs, session.id)
+  // tailwind safelist：动态类名必须出现在源码里才会被 JIT 编译
+  const COMPARE_BAR_CLASS: Record<string, string> = {
+    'violet-500': 'bg-violet-500',
+    'sky-500': 'bg-sky-500',
+    'amber-500': 'bg-amber-500',
+    'emerald-500': 'bg-emerald-500',
+    'rose-500': 'bg-rose-500',
+    'indigo-500': 'bg-indigo-500',
+  }
+  const COMPARE_ICON_CLASS: Record<string, string> = {
+    'violet-500': 'text-violet-500/70',
+    'sky-500': 'text-sky-500/70',
+    'amber-500': 'text-amber-500/70',
+    'emerald-500': 'text-emerald-500/70',
+    'rose-500': 'text-rose-500/70',
+    'indigo-500': 'text-indigo-500/70',
+  }
+  const compareBarClass = compareColor ? (COMPARE_BAR_CLASS[compareColor.tw] ?? 'bg-violet-500') : ''
+  const compareIconClass = compareColor ? (COMPARE_ICON_CLASS[compareColor.tw] ?? 'text-violet-500/70') : ''
   const handleEnterSplit = React.useCallback((): void => {
     if (!currentAgentSessionId || currentAgentSessionId === session.id) {
       // 没有已打开的会话，或右键的就是当前会话：直接打开它，不分屏
@@ -3738,10 +3758,10 @@ const AgentSessionItem = React.memo(function AgentSessionItem({
               )}
             />
           )}
-          {/* 分屏对比指示器：左侧紫色竖线 */}
+          {/* 分屏对比指示器：左侧彩色竖线，同对同色 */}
           {inComparePair && (
             <span
-              className="absolute inset-y-0 left-0 w-[3px] rounded-l-md pointer-events-none bg-violet-500"
+              className={cn('absolute inset-y-0 left-0 w-[3px] rounded-l-md pointer-events-none', compareBarClass)}
               style={{ left: leftAccent ? '3px' : undefined }}
             />
           )}
@@ -3791,7 +3811,7 @@ const AgentSessionItem = React.memo(function AgentSessionItem({
                   </span>
                 )}
                 {inComparePair && (
-                  <Columns2 size={11} className="flex-shrink-0 text-violet-500/70" />
+                  <Columns2 size={11} className={cn('flex-shrink-0', compareIconClass)} />
                 )}
               </div>
             )}
