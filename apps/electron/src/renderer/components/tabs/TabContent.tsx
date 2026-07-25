@@ -16,6 +16,7 @@ import { MarkdownRichEditor } from '@/components/diff/MarkdownRichEditor'
 import { MarkdownToc } from '@/components/diff/MarkdownToc'
 import { ScratchPadView } from '@/components/scratch-pad/ScratchPadView'
 import { CanvasView } from '@/components/canvas/CanvasView'
+import { BrowserView } from '@/components/browser/BrowserView'
 import { TabErrorBoundary } from './TabErrorBoundary'
 
 export interface TabContentProps {
@@ -47,6 +48,10 @@ export function TabContent({ tabId }: TabContentProps): React.ReactElement {
 
   if (tab.type === 'canvas') {
     return <CanvasView />
+  }
+
+  if (tab.type === 'browser') {
+    return <BrowserView />
   }
 
   if (tab.type === 'tutorial') {

@@ -333,6 +333,18 @@ export const CANVAS_IPC_CHANNELS = {
   CAPTURE: 'canvas:capture-region',
 } as const
 
+/** 浏览器 IPC 通道 */
+export const BROWSER_IPC_CHANNELS = {
+  /** 从磁盘加载最后访问的 URL */
+  LOAD_URL: 'browser:load-url',
+  /** 保存最后访问的 URL */
+  SAVE_URL: 'browser:save-url',
+  /** 同步保存最后访问的 URL（beforeunload 场景） */
+  SAVE_URL_SYNC: 'browser:save-url-sync',
+  /** 截图当前浏览器区域（复制到剪贴板） */
+  CAPTURE: 'browser:capture-region',
+} as const
+
 /** 应用图标 IPC 通道 */
 export const APP_ICON_IPC_CHANNELS = {
   /** 设置应用图标（variant ID） */

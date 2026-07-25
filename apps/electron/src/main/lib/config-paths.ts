@@ -677,6 +677,15 @@ export function getCanvasPath(): string {
 }
 
 /**
+ * 获取浏览器最后访问 URL 文件路径
+ *
+ * @returns ~/.proma/browser-last-url.txt
+ */
+export function getBrowserUrlPath(): string {
+  return join(getConfigDir(), 'browser-last-url.txt')
+}
+
+/**
  * 获取定时任务（Automation）配置文件路径
  *
  * @returns ~/.proma/automations.json

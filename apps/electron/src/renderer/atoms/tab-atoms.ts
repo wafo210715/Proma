@@ -22,7 +22,7 @@ import type { PreviewFile } from './preview-atoms'
 // ===== 类型定义 =====
 
 /** 标签页类型（Settings 不作为 Tab，保留独立视图） */
-export type TabType = 'chat' | 'agent' | 'scratch' | 'canvas' | 'preview' | 'tutorial'
+export type TabType = 'chat' | 'agent' | 'scratch' | 'canvas' | 'browser' | 'preview' | 'tutorial'
 
 /** Scratch Pad 专用的固定 sessionId */
 export const SCRATCH_PAD_ID = '__scratch-pad__'
@@ -32,6 +32,12 @@ export const CANVAS_ID = '__canvas__'
 
 /** Canvas 标签默认标题 */
 export const CANVAS_TITLE = 'Canvas'
+
+/** 浏览器专用的固定 sessionId */
+export const BROWSER_ID = '__browser__'
+
+/** 浏览器标签默认标题 */
+export const BROWSER_TITLE = 'Browser'
 
 /** 教程 Tab 固定 ID */
 export const TUTORIAL_TAB_ID = '__tutorial__'
@@ -128,6 +134,11 @@ export const scratchPadLoadedAtom = atom<boolean>(false)
 export const canvasContentAtom = atom<string>('')
 /** Canvas 内容是否已从磁盘加载 */
 export const canvasLoadedAtom = atom<boolean>(false)
+
+/** 浏览器最后访问的 URL */
+export const browserUrlAtom = atom<string>('')
+/** 浏览器内容是否已从磁盘加载 */
+export const browserLoadedAtom = atom<boolean>(false)
 /** Scratch Pad 是否固定在 Agent 右侧分屏；通过拖出 Scratch Tab 打开 */
 export const scratchPadPanelOpenAtom = atom<boolean>(false)
 /** 右侧工作区中 Preview 与 Scratch 并排时，Preview 占比 */
@@ -164,7 +175,7 @@ export const tabStreamingMapAtom = atom<Map<string, boolean>>((get) => {
   const agentRunning = get(agentRunningSessionIdsAtom)
   const map = new Map<string, boolean>()
   for (const tab of tabs) {
-    if (tab.type === 'scratch' || tab.type === 'canvas') continue
+    if (tab.type === 'scratch' || tab.type === 'canvas' || tab.type === 'browser') continue
     if (tab.type === 'chat') {
       map.set(tab.id, chatStreaming.has(tab.sessionId))
     } else if (tab.type === 'agent') {
@@ -182,7 +193,7 @@ export const tabIndicatorMapAtom = atom<Map<string, SessionIndicatorStatus>>((ge
   const unviewedCompletedIds = get(unviewedCompletedSessionIdsAtom)
   const map = new Map<string, SessionIndicatorStatus>()
   for (const tab of tabs) {
-    if (tab.type === 'scratch' || tab.type === 'canvas') continue
+    if (tab.type === 'scratch' || tab.type === 'canvas' || tab.type === 'browser') continue
     if (tab.type === 'chat') {
       map.set(tab.id, chatStreaming.has(tab.sessionId) ? 'running' : 'idle')
     } else if (tab.type === 'agent') {
@@ -214,11 +225,21 @@ function createCanvasTab(): TabItem {
   }
 }
 
-/** 获取两个固定入口：Scratch Pad + Canvas（始终位于顶部前两位） */
+function createBrowserTab(): TabItem {
+  return {
+    id: BROWSER_ID,
+    type: 'browser',
+    sessionId: BROWSER_ID,
+    title: BROWSER_TITLE,
+  }
+}
+
+/** 获取固定入口：Scratch Pad + Canvas + Browser（始终位于顶部） */
 function getPinnedTabs(tabs: TabItem[]): TabItem[] {
   const scratchTab = tabs.find((t) => t.id === SCRATCH_PAD_ID) ?? createScratchPadTab()
   const canvasTab = tabs.find((t) => t.id === CANVAS_ID) ?? createCanvasTab()
-  return [scratchTab, canvasTab]
+  const browserTab = tabs.find((t) => t.id === BROWSER_ID) ?? createBrowserTab()
+  return [scratchTab, canvasTab, browserTab]
 }
 
 export function createPreviewTabId(sessionId: string): string {
@@ -242,7 +263,7 @@ function isSessionTab(tab: TabItem): boolean {
 }
 
 function getPersistentTabs(tabs: TabItem[]): TabItem[] {
-  return tabs.filter((tab) => tab.id !== SCRATCH_PAD_ID && tab.id !== CANVAS_ID && tab.id !== TUTORIAL_TAB_ID && !isPreviewTab(tab))
+  return tabs.filter((tab) => tab.id !== SCRATCH_PAD_ID && tab.id !== CANVAS_ID && tab.id !== BROWSER_ID && tab.id !== TUTORIAL_TAB_ID && !isPreviewTab(tab))
 }
 
 export function getPersistableTabState(
@@ -283,6 +304,13 @@ export function openTab(
     return {
       tabs: pinnedTabs,
       activeTabId: CANVAS_ID,
+    }
+  }
+
+  if (item.type === 'browser') {
+    return {
+      tabs: pinnedTabs,
+      activeTabId: BROWSER_ID,
     }
   }
 
@@ -373,8 +401,8 @@ export function closeTab(
   activeTabId: string | null,
   tabId: string,
 ): { tabs: TabItem[]; activeTabId: string | null } {
-  // Scratch Pad 与 Canvas 不可关闭
-  if (tabId === SCRATCH_PAD_ID || tabId === CANVAS_ID) return { tabs, activeTabId }
+  // Scratch Pad / Canvas / Browser 不可关闭
+  if (tabId === SCRATCH_PAD_ID || tabId === CANVAS_ID || tabId === BROWSER_ID) return { tabs, activeTabId }
 
   const tabIndex = tabs.findIndex((t) => t.id === tabId)
   if (tabIndex === -1) return { tabs, activeTabId }
@@ -427,7 +455,7 @@ export function updateTabTitle(
 export function ensureScratchPadTab(tabs: TabItem[]): TabItem[] {
   const pinnedTabs = getPinnedTabs(tabs)
   const sessionTab = tabs
-    .filter((t) => t.id !== SCRATCH_PAD_ID && t.id !== CANVAS_ID && !isPreviewTab(t))
+    .filter((t) => t.id !== SCRATCH_PAD_ID && t.id !== CANVAS_ID && t.id !== BROWSER_ID && !isPreviewTab(t))
     .at(-1)
   return sessionTab ? [...pinnedTabs, sessionTab] : pinnedTabs
 }

@@ -360,6 +360,7 @@ function createWindow(): void {
       preload: join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
+      webviewTag: true,
     },
     ...titleBarOptions,
   })

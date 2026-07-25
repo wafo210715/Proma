@@ -63,7 +63,7 @@ import {
 } from './atoms/markdown-font-size'
 import { useGlobalAgentListeners } from './hooks/useGlobalAgentListeners'
 import { useGlobalChatListeners } from './hooks/useGlobalChatListeners'
-import { tabsAtom, activeTabIdAtom, ensureScratchPadTab, getPersistableTabState, scratchPadContentAtom, scratchPadLoadedAtom, SCRATCH_PAD_ID, canvasContentAtom, canvasLoadedAtom } from './atoms/tab-atoms'
+import { tabsAtom, activeTabIdAtom, ensureScratchPadTab, getPersistableTabState, scratchPadContentAtom, scratchPadLoadedAtom, SCRATCH_PAD_ID, canvasContentAtom, canvasLoadedAtom, browserUrlAtom, browserLoadedAtom } from './atoms/tab-atoms'
 import type { TabItem } from './atoms/tab-atoms'
 import { chatToolsAtom } from './atoms/chat-tool-atoms'
 import { feishuBotStatesAtom } from './atoms/feishu-atoms'
@@ -953,6 +953,75 @@ function CanvasPersistence(): null {
   return null
 }
 
+/**
+ * 浏览器 URL 持久化组件
+ *
+ * 从磁盘加载最后访问的 URL 到 browserUrlAtom，
+ * 监听变化防抖自动保存。固定 Tab 注入由 ScratchPadPersistence 的 ensureScratchPadTab 一并处理。
+ */
+function BrowserPersistence(): null {
+  const store = useStore()
+  const loadedRef = useRef(false)
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout>>()
+
+  // 启动：加载 browser-last-url.txt
+  useEffect(() => {
+    const init = async (): Promise<void> => {
+      try {
+        const loaded = window.electronAPI.loadBrowserUrl
+          ? await window.electronAPI.loadBrowserUrl()
+          : ''
+        store.set(browserUrlAtom, loaded)
+        store.set(browserLoadedAtom, true)
+        console.log('[Browser] 初始化完成，最后 URL:', loaded || '(空)')
+      } catch (err) {
+        console.error('[Browser] 初始化失败:', err)
+        store.set(browserLoadedAtom, true)
+      } finally {
+        loadedRef.current = true
+      }
+    }
+    init()
+  }, [store])
+
+  // 自动保存：监听 browserUrlAtom 变化，防抖写入磁盘
+  useEffect(() => {
+    const save = (): void => {
+      const currentUrl = store.get(browserUrlAtom)
+      if (window.electronAPI.saveBrowserUrl) {
+        window.electronAPI.saveBrowserUrl(currentUrl).then((ok) => {
+          if (!ok) console.error('[Browser] 保存失败')
+        }).catch(console.error)
+      }
+    }
+
+    const debouncedSave = (): void => {
+      if (!loadedRef.current) return
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+      saveTimerRef.current = setTimeout(save, 500)
+    }
+
+    const unsub = store.sub(browserUrlAtom, debouncedSave)
+
+    const handleBeforeUnload = (): void => {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+      const currentUrl = store.get(browserUrlAtom)
+      if (window.electronAPI.saveBrowserUrlSync) {
+        window.electronAPI.saveBrowserUrlSync(currentUrl)
+      }
+    }
+    window.addEventListener('beforeunload', handleBeforeUnload)
+
+    return () => {
+      unsub()
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+      window.removeEventListener('beforeunload', handleBeforeUnload)
+    }
+  }, [store])
+
+  return null
+}
+
 // ===== 快速任务窗口：轻量渲染 =====
 if (isQuickTaskWindow) {
   import('./components/quick-task/QuickTaskApp').then(({ QuickTaskApp }) => {
@@ -1004,6 +1073,7 @@ if (isQuickTaskWindow) {
       <TabStatePersistenceInitializer />
       <ScratchPadPersistence />
       <CanvasPersistence />
+      <BrowserPersistence />
       <GlobalShortcuts />
       <TabSwitcher />
       <App />

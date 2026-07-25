@@ -7,7 +7,7 @@
 
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS } from '@proma/shared'
-import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SCRATCH_PAD_IPC_CHANNELS, CANVAS_IPC_CHANNELS, APP_ICON_IPC_CHANNELS, DOCK_BADGE_IPC_CHANNELS, STORAGE_IPC_CHANNELS } from '../types'
+import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SCRATCH_PAD_IPC_CHANNELS, CANVAS_IPC_CHANNELS, BROWSER_IPC_CHANNELS, APP_ICON_IPC_CHANNELS, DOCK_BADGE_IPC_CHANNELS, STORAGE_IPC_CHANNELS } from '../types'
 import type {
   RuntimeStatus,
   GitRepoStatus,
@@ -377,6 +377,20 @@ export interface ElectronAPI {
 
   /** 截图当前画布区域到剪贴板，返回 dataURL */
   captureCanvasRegion: (rect: { x: number; y: number; width: number; height: number }) => Promise<string | null>
+
+  // ===== 浏览器 =====
+
+  /** 从磁盘加载最后访问的 URL */
+  loadBrowserUrl: () => Promise<string>
+
+  /** 异步保存最后访问的 URL */
+  saveBrowserUrl: (url: string) => Promise<boolean>
+
+  /** 同步保存最后访问的 URL（beforeunload 场景） */
+  saveBrowserUrlSync: (url: string) => boolean
+
+  /** 截图当前浏览器区域到剪贴板，返回 dataURL */
+  captureBrowserRegion: (rect: { x: number; y: number; width: number; height: number }) => Promise<string | null>
 
   // ===== 应用图标切换 =====
 
@@ -1407,6 +1421,23 @@ const electronAPI: ElectronAPI = {
 
   captureCanvasRegion: (rect: { x: number; y: number; width: number; height: number }) => {
     return ipcRenderer.invoke(CANVAS_IPC_CHANNELS.CAPTURE, rect)
+  },
+
+  // 浏览器 URL 持久化
+  loadBrowserUrl: () => {
+    return ipcRenderer.invoke(BROWSER_IPC_CHANNELS.LOAD_URL)
+  },
+
+  saveBrowserUrl: (url: string) => {
+    return ipcRenderer.invoke(BROWSER_IPC_CHANNELS.SAVE_URL, url)
+  },
+
+  saveBrowserUrlSync: (url: string) => {
+    return ipcRenderer.sendSync(BROWSER_IPC_CHANNELS.SAVE_URL_SYNC, url)
+  },
+
+  captureBrowserRegion: (rect: { x: number; y: number; width: number; height: number }) => {
+    return ipcRenderer.invoke(BROWSER_IPC_CHANNELS.CAPTURE, rect)
   },
 
   chooseExportPath: (defaultName: string) => {

@@ -10,7 +10,7 @@ import { existsSync, realpathSync, rmSync, readFileSync, writeFileSync, mkdirSyn
 import { writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, isPromaPermissionMode, normalizePathForCompare } from '@proma/shared'
-import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SCRATCH_PAD_IPC_CHANNELS, CANVAS_IPC_CHANNELS, QUICK_TASK_IPC_CHANNELS, VOICE_DICTATION_IPC_CHANNELS, APP_ICON_IPC_CHANNELS, DOCK_BADGE_IPC_CHANNELS, STORAGE_IPC_CHANNELS } from '../types'
+import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SCRATCH_PAD_IPC_CHANNELS, CANVAS_IPC_CHANNELS, BROWSER_IPC_CHANNELS, QUICK_TASK_IPC_CHANNELS, VOICE_DICTATION_IPC_CHANNELS, APP_ICON_IPC_CHANNELS, DOCK_BADGE_IPC_CHANNELS, STORAGE_IPC_CHANNELS } from '../types'
 import type {
   QuickTaskSubmitInput,
   VoiceDictationAudioChunkInput,
@@ -196,7 +196,7 @@ import { runAgent, stopAgent, generateAgentTitle, saveFilesToAgentSession, saveF
 import { permissionService } from './lib/agent-permission-service'
 import { askUserService } from './lib/agent-ask-user-service'
 import { exitPlanService } from './lib/agent-exit-plan-service'
-import { getAgentSessionWorkspacePath, getAgentWorkspacesDir, getWorkspaceSkillsDir, getWorkspaceFilesDir, getScratchPadPath, getCanvasPath } from './lib/config-paths'
+import { getAgentSessionWorkspacePath, getAgentWorkspacesDir, getWorkspaceSkillsDir, getWorkspaceFilesDir, getScratchPadPath, getCanvasPath, getBrowserUrlPath } from './lib/config-paths'
 import { getCachedDefaultAppInfo, saveCachedDefaultAppInfo } from './lib/default-app-cache'
 import { calculateStorageStats, cleanupStorage, cleanupTempFiles } from './lib/storage-service'
 import type { CleanupOptions } from './lib/storage-service'
@@ -1747,6 +1747,74 @@ export function registerIpcHandlers(): void {
         return image.toDataURL()
       } catch (err) {
         console.error('[Canvas] 截图失败:', err)
+        return null
+      }
+    }
+  )
+
+  // ===== 浏览器 URL 持久化 =====
+
+  // 从磁盘加载最后访问的 URL
+  ipcMain.handle(
+    BROWSER_IPC_CHANNELS.LOAD_URL,
+    async (): Promise<string> => {
+      const path = getBrowserUrlPath()
+      try {
+        if (!existsSync(path)) return ''
+        return readFileSync(path, 'utf-8').trim()
+      } catch (err) {
+        console.error('[Browser] 加载 URL 失败:', err)
+        return ''
+      }
+    }
+  )
+
+  // 异步保存最后访问的 URL
+  ipcMain.handle(
+    BROWSER_IPC_CHANNELS.SAVE_URL,
+    async (_, url: string): Promise<boolean> => {
+      const path = getBrowserUrlPath()
+      try {
+        await writeFile(path, url, 'utf-8')
+        return true
+      } catch (err) {
+        console.error('[Browser] 保存 URL 失败:', err)
+        return false
+      }
+    }
+  )
+
+  // 同步保存最后访问的 URL（beforeunload 场景）
+  ipcMain.on(
+    BROWSER_IPC_CHANNELS.SAVE_URL_SYNC,
+    (event, url: string) => {
+      try {
+        writeFileSync(getBrowserUrlPath(), url, 'utf-8')
+        event.returnValue = true
+      } catch (err) {
+        console.error('[Browser] 同步保存 URL 失败:', err)
+        event.returnValue = false
+      }
+    }
+  )
+
+  // 截图当前浏览器区域：按 rect 截取焦点窗口的可见像素，复制到剪贴板
+  ipcMain.handle(
+    BROWSER_IPC_CHANNELS.CAPTURE,
+    async (_, rect: { x: number; y: number; width: number; height: number }): Promise<string | null> => {
+      const win = BrowserWindow.getFocusedWindow()
+      if (!win) return null
+      try {
+        const image = await win.webContents.capturePage({
+          x: Math.round(rect.x),
+          y: Math.round(rect.y),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+        })
+        clipboard.writeImage(image)
+        return image.toDataURL()
+      } catch (err) {
+        console.error('[Browser] 截图失败:', err)
         return null
       }
     }
