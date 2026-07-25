@@ -3610,14 +3610,6 @@ const AgentSessionItem = React.memo(function AgentSessionItem({
   const inComparePair = comparePartnerId !== null
   const compareColor = getCompareColor(comparePairs, session.id)
   // tailwind safelist：动态类名必须出现在源码里才会被 JIT 编译
-  const COMPARE_BAR_CLASS: Record<string, string> = {
-    'violet-500': 'bg-violet-500',
-    'sky-500': 'bg-sky-500',
-    'amber-500': 'bg-amber-500',
-    'emerald-500': 'bg-emerald-500',
-    'rose-500': 'bg-rose-500',
-    'indigo-500': 'bg-indigo-500',
-  }
   const COMPARE_ICON_CLASS: Record<string, string> = {
     'violet-500': 'text-violet-500/70',
     'sky-500': 'text-sky-500/70',
@@ -3626,7 +3618,6 @@ const AgentSessionItem = React.memo(function AgentSessionItem({
     'rose-500': 'text-rose-500/70',
     'indigo-500': 'text-indigo-500/70',
   }
-  const compareBarClass = compareColor ? (COMPARE_BAR_CLASS[compareColor.tw] ?? 'bg-violet-500') : ''
   const compareIconClass = compareColor ? (COMPARE_ICON_CLASS[compareColor.tw] ?? 'text-violet-500/70') : ''
   const handleEnterSplit = React.useCallback((): void => {
     if (!currentAgentSessionId || currentAgentSessionId === session.id) {
@@ -3756,13 +3747,6 @@ const AgentSessionItem = React.memo(function AgentSessionItem({
                 'absolute inset-y-0 left-0 w-[3px] rounded-l-md pointer-events-none',
                 leftAccent ? SESSION_ACCENT_INDICATOR_CLASS[leftAccent] : 'bg-primary',
               )}
-            />
-          )}
-          {/* 分屏对比指示器：左侧彩色竖线，同对同色 */}
-          {inComparePair && (
-            <span
-              className={cn('absolute inset-y-0 left-0 w-[3px] rounded-l-md pointer-events-none', compareBarClass)}
-              style={{ left: leftAccent ? '3px' : undefined }}
             />
           )}
           <div className="flex-1 min-w-0">
