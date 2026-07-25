@@ -21,7 +21,7 @@ import type { AgentQueuedAttachment } from '@/lib/agent-message-queue'
  * left = 主 session（左栏，通常是发起配对的当前 session），
  * right = 对比 session（右栏）。
  * colorIndex = 创建时分配的颜色索引（单调递增，不随数组位置变化）。
- * 内存态，切换/重启不保留。
+ * 持久化到 localStorage，重启后保留。
  */
 export interface ComparePair {
   left: string
@@ -29,7 +29,7 @@ export interface ComparePair {
   colorIndex: number
 }
 
-export const comparePairsAtom = atom<ComparePair[]>([])
+export const comparePairsAtom = atomWithStorage<ComparePair[]>('proma-compare-pairs', [])
 
 /**
  * 从配对数组中找出包含某个 session 的配对。
