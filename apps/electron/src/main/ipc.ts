@@ -196,7 +196,7 @@ import { runAgent, stopAgent, generateAgentTitle, saveFilesToAgentSession, saveF
 import { permissionService } from './lib/agent-permission-service'
 import { askUserService } from './lib/agent-ask-user-service'
 import { exitPlanService } from './lib/agent-exit-plan-service'
-import { getAgentSessionWorkspacePath, getAgentWorkspacesDir, getWorkspaceSkillsDir, getWorkspaceFilesDir, getScratchPadPath, getCanvasPath, getBrowserUrlPath } from './lib/config-paths'
+import { getAgentSessionWorkspacePath, getAgentWorkspacesDir, getWorkspaceSkillsDir, getWorkspaceFilesDir, getScratchPadPath, getCanvasPath, getBrowserUrlPath, getBrowserScreenshotsDir } from './lib/config-paths'
 import { getCachedDefaultAppInfo, saveCachedDefaultAppInfo } from './lib/default-app-cache'
 import { calculateStorageStats, cleanupStorage, cleanupTempFiles } from './lib/storage-service'
 import type { CleanupOptions } from './lib/storage-service'
@@ -1798,23 +1798,27 @@ export function registerIpcHandlers(): void {
     }
   )
 
-  // 截图当前浏览器区域：按 rect 截取焦点窗口的可见像素，复制到剪贴板
+  // 截图：接收 webview.capturePage() 产出的 dataURL，写剪贴板 + 存盘
+  // （不能用主窗口 capturePage：webview 是独立 guest webContents，主窗口截不到）
   ipcMain.handle(
-    BROWSER_IPC_CHANNELS.CAPTURE,
-    async (_, rect: { x: number; y: number; width: number; height: number }): Promise<string | null> => {
-      const win = BrowserWindow.getFocusedWindow()
-      if (!win) return null
+    BROWSER_IPC_CHANNELS.SAVE_SCREENSHOT,
+    async (_, dataUrl: string): Promise<string | null> => {
       try {
-        const image = await win.webContents.capturePage({
-          x: Math.round(rect.x),
-          y: Math.round(rect.y),
-          width: Math.round(rect.width),
-          height: Math.round(rect.height),
-        })
+        const image = nativeImage.createFromDataURL(dataUrl)
+        if (image.isEmpty()) {
+          console.warn('[Browser] 截图为空')
+          return null
+        }
         clipboard.writeImage(image)
-        return image.toDataURL()
+
+        const dir = getBrowserScreenshotsDir()
+        if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+        const filePath = join(dir, `shot-${stamp}.png`)
+        await writeFile(filePath, image.toPNG())
+        return filePath
       } catch (err) {
-        console.error('[Browser] 截图失败:', err)
+        console.error('[Browser] 截图保存失败:', err)
         return null
       }
     }

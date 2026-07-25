@@ -677,6 +677,15 @@ export function getCanvasPath(): string {
 }
 
 /**
+ * 获取浏览器截图目录
+ *
+ * @returns ~/.proma/browser-screenshots
+ */
+export function getBrowserScreenshotsDir(): string {
+  return join(getConfigDir(), 'browser-screenshots')
+}
+
+/**
  * 获取浏览器最后访问 URL 文件路径
  *
  * @returns ~/.proma/browser-last-url.txt

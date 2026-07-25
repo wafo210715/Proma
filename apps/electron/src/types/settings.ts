@@ -341,8 +341,8 @@ export const BROWSER_IPC_CHANNELS = {
   SAVE_URL: 'browser:save-url',
   /** 同步保存最后访问的 URL（beforeunload 场景） */
   SAVE_URL_SYNC: 'browser:save-url-sync',
-  /** 截图当前浏览器区域（复制到剪贴板） */
-  CAPTURE: 'browser:capture-region',
+  /** 保存 webview 截图（dataURL）到磁盘并写入剪贴板 */
+  SAVE_SCREENSHOT: 'browser:save-screenshot',
 } as const
 
 /** 应用图标 IPC 通道 */

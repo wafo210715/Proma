@@ -15,6 +15,7 @@ import {
   activeTabIdAtom,
   activeTabAtom,
   scratchPadPanelOpenAtom,
+  browserPanelOpenAtom,
   rightWorkspaceSplitRatioAtom,
 } from '@/atoms/tab-atoms'
 import { Panel } from '@/components/app-shell/Panel'
@@ -22,6 +23,8 @@ import { WelcomeView } from '@/components/welcome/WelcomeView'
 import { previewPanelOpenMapAtom, previewSplitRatioAtom } from '@/atoms/preview-atoms'
 import { PreviewPanel } from '@/components/diff/PreviewPanel'
 import { ScratchPadPane } from '@/components/scratch-pad/ScratchPadView'
+import { BrowserPane } from '@/components/browser/BrowserView'
+import { closeBrowserInSplit } from '@/components/browser/browser-opener'
 import { closeScratchInSplit } from '@/components/scratch-pad/scratch-pad-opener'
 import { useTrackSessionView } from '@/hooks/useTrackSessionView'
 import { TabBar } from './TabBar'
@@ -190,6 +193,9 @@ export function MainArea(): React.ReactElement {
   const scratchPanelOpen = useAtomValue(scratchPadPanelOpenAtom)
   const showScratchPanel =
     activeTab?.type === 'agent' && scratchPanelOpen && activeView === 'conversations'
+  const browserPanelOpen = useAtomValue(browserPanelOpenAtom)
+  const showBrowserPanel =
+    activeTab?.type === 'agent' && browserPanelOpen && activeView === 'conversations'
 
   // 关闭动画状态：当 previewOpen 从 true → false 时，播放退出动画再移除 DOM
   // 在 render 阶段同步派生 closing，避免中间帧出现 flex: 1 1 auto 导致左侧瞬间跳到 100% 宽
@@ -215,8 +221,10 @@ export function MainArea(): React.ReactElement {
 
   const showPreview = (previewOpen || closing) && previewSessionId && activeView === 'conversations'
   const showPreviewClosingOnly = closing && !previewOpen
-  const showPreviewPane = !!showPreview && !(showPreviewClosingOnly && showScratchPanel)
-  const showBothRightPanels = showPreviewPane && showScratchPanel
+  // 右侧槽位的次要面板：草稿与浏览器互斥（由 opener 保证），同时只会存在一个
+  const showSecondaryPane = showScratchPanel || showBrowserPanel
+  const showPreviewPane = !!showPreview && !(showPreviewClosingOnly && showSecondaryPane)
+  const showBothRightPanels = showPreviewPane && showSecondaryPane
 
   const handlePreviewDragStart = React.useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -330,6 +338,10 @@ export function MainArea(): React.ReactElement {
     closeScratchInSplit(store)
   }, [store])
 
+  const handleCloseBrowserPanel = React.useCallback(() => {
+    closeBrowserInSplit(store)
+  }, [store])
+
   React.useEffect(() => {
     if (tabs.length === 0) {
       console.warn('[FLASH-DEBUG] MainArea: tabs.length === 0, showing WelcomeView!', new Error().stack)
@@ -359,7 +371,7 @@ export function MainArea(): React.ReactElement {
   // 左侧容器宽度：右侧工作区打开时固定占 splitRatio；其他情况（含 closing 动画期间）
   // 直接 1 1 auto 占满——closing 时右侧 absolute 脱离 flex 流，所以左侧自然占 100%。
   // 对比态优先接管右 slot：此时不显示 preview/scratch 右面板
-  const showRightPanel = !showComparePane && (showScratchPanel || showPreviewPane)
+  const showRightPanel = !showComparePane && (showSecondaryPane || showPreviewPane)
   const leftFlexStyle: React.CSSProperties = showComparePane
     ? { flex: `0 0 calc(${compareSplitRatio * 100}% - 6px)` }
     : showRightPanel
@@ -368,7 +380,7 @@ export function MainArea(): React.ReactElement {
   const previewPaneStyle: React.CSSProperties = showBothRightPanels
     ? { flex: `0 0 calc(${rightWorkspaceRatio * 100}% - 4px)` }
     : { flex: '1 1 auto' }
-  const scratchPaneStyle: React.CSSProperties = showBothRightPanels
+  const secondaryPaneStyle: React.CSSProperties = showBothRightPanels
     ? { flex: `0 0 calc(${(1 - rightWorkspaceRatio) * 100}% - 4px)` }
     : { flex: '1 1 auto' }
 
@@ -445,13 +457,13 @@ export function MainArea(): React.ReactElement {
           {/* 右侧：预览/草稿工作区。Preview 和草稿可在同一右侧槽位内并排显示。 */}
           {showRightPanel && (
             <div
-              className={cn(closing && !showScratchPanel ? 'animate-preview-slide-out' : 'flex flex-1 min-w-0')}
-              style={closing && !showScratchPanel ? closingOverlayStyle : undefined}
+              className={cn(closing && !showSecondaryPane ? 'animate-preview-slide-out' : 'flex flex-1 min-w-0')}
+              style={closing && !showSecondaryPane ? closingOverlayStyle : undefined}
               onAnimationEnd={(e) => {
                 if (closing && e.target === e.currentTarget) setClosingState(false)
               }}
             >
-              {!(closing && !showScratchPanel) && (
+              {!(closing && !showSecondaryPane) && (
                 <div
                   className="w-[8px] cursor-col-resize bg-border/40 hover:bg-primary/30 active:bg-primary/50 transition-colors flex-shrink-0 self-stretch"
                   onMouseDown={handlePreviewDragStart}
@@ -470,8 +482,13 @@ export function MainArea(): React.ReactElement {
                   />
                 )}
                 {showScratchPanel && (
-                  <div className="min-w-[260px] h-full overflow-hidden" style={scratchPaneStyle}>
+                  <div className="min-w-[260px] h-full overflow-hidden" style={secondaryPaneStyle}>
                     <ScratchPadPane onClose={handleCloseScratchPanel} />
+                  </div>
+                )}
+                {showBrowserPanel && (
+                  <div className="min-w-[320px] h-full overflow-hidden" style={secondaryPaneStyle}>
+                    <BrowserPane onClose={handleCloseBrowserPanel} />
                   </div>
                 )}
               </div>

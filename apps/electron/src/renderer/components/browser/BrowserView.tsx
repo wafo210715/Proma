@@ -2,13 +2,20 @@
  * BrowserView — 内嵌浏览器面板
  *
  * 使用 Electron <webview> 标签嵌入第三方网页或本地 HTML。
- * 支持地址栏导航、前进/后退/刷新、截图到剪贴板、DevTools、打开外部浏览器。
+ * 支持地址栏导航、前进/后退/刷新、截图、DevTools、拖出分屏。
+ *
+ * 两种形态：
+ * - BrowserView（variant='page'）：作为独立 Tab
+ * - BrowserPane（variant='pane'）：作为 Agent 右侧分屏
+ *
+ * 截图走 webview 自身的 capturePage()——webview 是独立的 guest webContents，
+ * 主窗口的 capturePage 截不到它的内容（会得到空白块）。
  *
  * 最后访问的 URL 持久化到 ~/.proma/browser-last-url.txt。
  */
 
 import * as React from 'react'
-import { useAtom, useAtomValue } from 'jotai'
+import { useAtom, useAtomValue, useStore } from 'jotai'
 import {
   ArrowLeft,
   ArrowRight,
@@ -18,18 +25,27 @@ import {
   ExternalLink,
   Loader2,
   Home,
+  PanelRight,
+  X,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { browserUrlAtom, browserLoadedAtom } from '@/atoms/tab-atoms'
+import { tearOffBrowserToSplit } from './browser-opener'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 
 // 默认主页
 const HOME_URL = 'https://www.google.com'
 
-export function BrowserView(): React.ReactElement {
+interface BrowserCoreProps {
+  variant: 'page' | 'pane'
+  onClose?: () => void
+}
+
+function BrowserCore({ variant, onClose }: BrowserCoreProps): React.ReactElement {
   const [url, setUrl] = useAtom(browserUrlAtom)
   const loaded = useAtomValue(browserLoadedAtom)
+  const store = useStore()
 
   const [inputUrl, setInputUrl] = React.useState('')
   const [canGoBack, setCanGoBack] = React.useState(false)
@@ -37,137 +53,120 @@ export function BrowserView(): React.ReactElement {
   const [isLoading, setIsLoading] = React.useState(false)
   const [pageTitle, setPageTitle] = React.useState('')
 
-  const webviewRef = React.useRef<Electron.WebviewTag | null>(null)
-  const containerRef = React.useRef<HTMLDivElement>(null)
-  const lastSavedUrlRef = React.useRef<string>('')
-  const saveTimerRef = React.useRef<ReturnType<typeof setTimeout>>()
+  // 用 state 而非 ref 持有 webview 节点：节点挂载后能正确触发 effect 重新绑定事件，
+  // 避免 ref + 固定依赖数组导致的时序竞争和闭包陈旧
+  const [webviewEl, setWebviewEl] = React.useState<Electron.WebviewTag | null>(null)
 
-  // ===== 同步 inputUrl ← url（仅外部变化时） =====
+  // ref callback 必须用 useCallback 固定身份：否则每次 render 都是新函数，
+  // React 会先以 null 再以 node 重复调用，造成 setState → render → setState 循环
+  const handleWebviewRef = React.useCallback((node: HTMLElement | null): void => {
+    setWebviewEl((node as Electron.WebviewTag | null) ?? null)
+  }, [])
+
+  const lastUrlRef = React.useRef<string>('')
+  const isPane = variant === 'pane'
+
+  // webview 的 src 只用挂载时的初始值——后续导航一律走 loadURL()，
+  // 否则 React 重渲染时 src 变化会触发整页重载，丢失浏览历史
+  const initialSrcRef = React.useRef<string | null>(null)
+  if (initialSrcRef.current === null && loaded) {
+    initialSrcRef.current = url || HOME_URL
+    lastUrlRef.current = url || ''
+  }
+
+  // ===== webview 事件绑定（节点就绪后） =====
   React.useEffect(() => {
-    if (!loaded) return
-    if (url !== lastSavedUrlRef.current) {
-      setInputUrl(url)
-      lastSavedUrlRef.current = url
-      // 如果 webview 存在且 URL 不同，导航到新 URL
-      const wv = webviewRef.current
-      if (wv && url && wv.getURL() !== url) {
-        wv.loadURL(url)
-      }
-    }
-  }, [url, loaded])
+    if (!webviewEl) return
 
-  // ===== webview 事件绑定 =====
-  React.useEffect(() => {
-    if (!loaded) return
-    const wv = webviewRef.current
-    if (!wv) return
-
-    const handleNavStateChange = (): void => {
-      setCanGoBack(wv.canGoBack())
-      setCanGoForward(wv.canGoForward())
-      const currentUrl = wv.getURL()
-      setInputUrl(currentUrl)
-      // 更新持久化的 URL（防抖保存）
-      if (currentUrl && currentUrl !== lastSavedUrlRef.current) {
-        lastSavedUrlRef.current = currentUrl
-        setUrl(currentUrl)
+    const syncNavState = (): void => {
+      try {
+        setCanGoBack(webviewEl.canGoBack())
+        setCanGoForward(webviewEl.canGoForward())
+        const currentUrl = webviewEl.getURL()
+        if (currentUrl && currentUrl !== lastUrlRef.current) {
+          lastUrlRef.current = currentUrl
+          setInputUrl(currentUrl)
+          setUrl(currentUrl)
+        }
+      } catch {
+        // webview 尚未 attach 时调用这些方法会抛，忽略即可
       }
     }
 
     const handleLoadStart = (): void => setIsLoading(true)
     const handleLoadStop = (): void => {
       setIsLoading(false)
-      handleNavStateChange()
-      setPageTitle(wv.getTitle() || '')
+      syncNavState()
+      try {
+        setPageTitle(webviewEl.getTitle() || '')
+      } catch { /* noop */ }
     }
-    const handleTitleSet = (e: Electron.PageTitleUpdatedEvent): void => {
-      setPageTitle(e.title)
-    }
+    // did-navigate-in-page 覆盖 SPA 的 pushState 路由跳转——
+    // 这类跳转不触发 did-stop-loading，只监听后者会导致地址栏停留在旧 URL
+    const handleNavigate = (): void => syncNavState()
+    const handleTitleSet = (e: Electron.PageTitleUpdatedEvent): void => setPageTitle(e.title)
+    const handleDomReady = (): void => syncNavState()
 
-    wv.addEventListener('did-start-loading', handleLoadStart)
-    wv.addEventListener('did-stop-loading', handleLoadStop)
-    wv.addEventListener('page-title-updated', handleTitleSet)
+    webviewEl.addEventListener('dom-ready', handleDomReady)
+    webviewEl.addEventListener('did-start-loading', handleLoadStart)
+    webviewEl.addEventListener('did-stop-loading', handleLoadStop)
+    webviewEl.addEventListener('did-navigate', handleNavigate)
+    webviewEl.addEventListener('did-navigate-in-page', handleNavigate)
+    webviewEl.addEventListener('page-title-updated', handleTitleSet)
 
     return () => {
-      wv.removeEventListener('did-start-loading', handleLoadStart)
-      wv.removeEventListener('did-stop-loading', handleLoadStop)
-      wv.removeEventListener('page-title-updated', handleTitleSet)
+      webviewEl.removeEventListener('dom-ready', handleDomReady)
+      webviewEl.removeEventListener('did-start-loading', handleLoadStart)
+      webviewEl.removeEventListener('did-stop-loading', handleLoadStop)
+      webviewEl.removeEventListener('did-navigate', handleNavigate)
+      webviewEl.removeEventListener('did-navigate-in-page', handleNavigate)
+      webviewEl.removeEventListener('page-title-updated', handleTitleSet)
     }
-  }, [loaded, setUrl])
+  }, [webviewEl, setUrl])
 
-  // ===== 防抖保存 URL =====
+  // ===== 外部改动 url atom（非本组件导航产生）时同步到 webview =====
   React.useEffect(() => {
-    if (!loaded) return
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
-    saveTimerRef.current = setTimeout(() => {
-      if (window.electronAPI.saveBrowserUrl) {
-        window.electronAPI.saveBrowserUrl(url).catch(console.error)
-      }
-    }, 500)
-    return () => {
-      if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
-    }
-  }, [url, loaded])
-
-  // ===== beforeunload 同步保存 =====
-  React.useEffect(() => {
-    const handleBeforeUnload = (): void => {
-      if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
-      if (window.electronAPI.saveBrowserUrlSync) {
-        window.electronAPI.saveBrowserUrlSync(lastSavedUrlRef.current)
-      }
-    }
-    window.addEventListener('beforeunload', handleBeforeUnload)
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
-  }, [])
+    if (!webviewEl || !url) return
+    if (url === lastUrlRef.current) return
+    lastUrlRef.current = url
+    setInputUrl(url)
+    try {
+      if (webviewEl.getURL() !== url) webviewEl.loadURL(url)
+    } catch { /* webview 未就绪，src 已带初始值，无需处理 */ }
+  }, [url, webviewEl])
 
   // ===== 导航操作 =====
   const navigate = React.useCallback((target: string): void => {
     let normalized = target.trim()
     if (!normalized) return
 
-    // 如果不是协议开头，尝试作为搜索或补全
-    if (!/^[a-z]+:\/\//i.test(normalized) && !normalized.startsWith('file://')) {
-      // 判断是否像 URL（包含 . 且没有空格）
+    if (!/^[a-z]+:\/\//i.test(normalized)) {
+      // 像域名（含点、无空格）就补 https，否则当搜索词
       if (/^[\w-]+(\.[\w-]+)+/.test(normalized) && !normalized.includes(' ')) {
         normalized = 'https://' + normalized
       } else {
-        // 当作搜索词
         normalized = 'https://www.google.com/search?q=' + encodeURIComponent(normalized)
       }
     }
 
-    const wv = webviewRef.current
-    if (wv) {
-      wv.loadURL(normalized)
+    if (webviewEl) {
+      webviewEl.loadURL(normalized)
     } else {
-      // webview 尚未挂载，更新 url atom 触发加载
       setUrl(normalized)
     }
-  }, [setUrl])
+  }, [webviewEl, setUrl])
 
-  const handleGoBack = React.useCallback((): void => {
-    webviewRef.current?.goBack()
-  }, [])
-
-  const handleGoForward = React.useCallback((): void => {
-    webviewRef.current?.goForward()
-  }, [])
-
-  const handleReload = React.useCallback((): void => {
-    webviewRef.current?.reload()
-  }, [])
-
-  const handleGoHome = React.useCallback((): void => {
-    navigate(HOME_URL)
-  }, [navigate])
+  const handleGoBack = React.useCallback((): void => { webviewEl?.goBack() }, [webviewEl])
+  const handleGoForward = React.useCallback((): void => { webviewEl?.goForward() }, [webviewEl])
+  const handleReload = React.useCallback((): void => { webviewEl?.reload() }, [webviewEl])
+  const handleGoHome = React.useCallback((): void => { navigate(HOME_URL) }, [navigate])
 
   const handleOpenExternal = React.useCallback((): void => {
-    const current = webviewRef.current?.getURL() || url
-    if (current) {
-      window.open(current, '_blank')
-    }
-  }, [url])
+    const current = (() => {
+      try { return webviewEl?.getURL() || url } catch { return url }
+    })()
+    if (current) window.open(current, '_blank')
+  }, [webviewEl, url])
 
   const handleUrlKeyDown = React.useCallback((e: React.KeyboardEvent<HTMLInputElement>): void => {
     if (e.key === 'Enter') {
@@ -176,28 +175,32 @@ export function BrowserView(): React.ReactElement {
       ;(e.target as HTMLInputElement).blur()
     }
     if (e.key === 'Escape') {
-      setInputUrl(webviewRef.current?.getURL() || url)
+      try { setInputUrl(webviewEl?.getURL() || url) } catch { setInputUrl(url) }
       ;(e.target as HTMLInputElement).blur()
     }
-  }, [inputUrl, navigate, url])
+  }, [inputUrl, navigate, url, webviewEl])
 
   // ===== 截图 =====
+  // 必须用 webview 自己的 capturePage：webview 是独立 guest webContents，
+  // 主窗口 webContents.capturePage() 在 webview 区域只会得到空白
   const handleScreenshot = React.useCallback(async (): Promise<void> => {
-    if (!containerRef.current) return
-    const rect = containerRef.current.getBoundingClientRect()
-    // 截取 webview 区域（减去工具栏高度 38px）
-    const webviewRect = {
-      x: rect.left,
-      y: rect.top + 38,
-      width: rect.width,
-      height: rect.height - 38,
-    }
+    if (!webviewEl) return
     try {
-      const dataUrl = window.electronAPI.captureBrowserRegion
-        ? await window.electronAPI.captureBrowserRegion(webviewRect)
-        : null
-      if (dataUrl) {
-        toast.success('截图已复制到剪贴板')
+      const image = await webviewEl.capturePage()
+      const dataUrl = image.toDataURL()
+      if (!dataUrl || dataUrl.length < 100) {
+        toast.error('截图为空，页面可能尚未渲染完成')
+        return
+      }
+      const savedPath = await window.electronAPI.saveBrowserScreenshot(dataUrl)
+      if (savedPath) {
+        toast.success('截图已复制到剪贴板', {
+          description: `已保存：${savedPath}`,
+          action: {
+            label: '复制路径',
+            onClick: () => navigator.clipboard.writeText(savedPath),
+          },
+        })
       } else {
         toast.error('截图失败')
       }
@@ -205,54 +208,34 @@ export function BrowserView(): React.ReactElement {
       console.error('[Browser] 截图失败:', err)
       toast.error('截图失败')
     }
-  }, [])
+  }, [webviewEl])
 
-  // ===== 右键菜单：DevTools =====
+  const handleTearOff = React.useCallback((): void => {
+    const ok = tearOffBrowserToSplit(store)
+    if (ok === false) toast.error('需要先打开一个 Agent 会话')
+  }, [store])
+
+  // ===== 右键：DevTools =====
   const handleContextMenu = React.useCallback((e: React.MouseEvent): void => {
     e.preventDefault()
-    const wv = webviewRef.current
-    if (!wv) return
-    // 简单实现：直接切换 DevTools
-    // TODO: 未来可以用 Electron Menu API 做更完整的右键菜单
-    const isDevOpen = wv.isDevToolsOpened?.() ?? false
-    if (isDevOpen) {
-      wv.closeDevTools()
-    } else {
-      wv.openDevTools()
-    }
-  }, [])
-
-  // ===== webview ref callback =====
-  const setWebviewRef = React.useCallback((node: Electron.WebviewTag | null): void => {
-    if (node) {
-      webviewRef.current = node
-      // 如果已有保存的 URL，加载它
-      const currentUrl = url || lastSavedUrlRef.current
-      if (currentUrl && node.getURL() !== currentUrl) {
-        // 给 webview 一点时间挂载
-        setTimeout(() => {
-          if (webviewRef.current && webviewRef.current.getURL() !== currentUrl) {
-            webviewRef.current.loadURL(currentUrl)
-          }
-        }, 100)
-      }
-    } else {
-      webviewRef.current = null
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loaded])
+    if (!webviewEl) return
+    try {
+      if (webviewEl.isDevToolsOpened()) webviewEl.closeDevTools()
+      else webviewEl.openDevTools()
+    } catch { /* noop */ }
+  }, [webviewEl])
 
   return (
-    <div className="relative flex h-full flex-col overflow-hidden bg-content-area">
+    <div className="relative flex h-full flex-col overflow-hidden bg-content-area titlebar-no-drag">
       {/* 工具栏 */}
       <div className="flex h-[38px] flex-shrink-0 items-center gap-0.5 border-b border-border/30 px-2">
         <ToolbarButton label="后退" onClick={handleGoBack} disabled={!canGoBack} icon={<ArrowLeft className="size-3.5" />} />
         <ToolbarButton label="前进" onClick={handleGoForward} disabled={!canGoForward} icon={<ArrowRight className="size-3.5" />} />
         <ToolbarButton label="刷新" onClick={handleReload} icon={<RotateCw className={cn('size-3.5', isLoading && 'animate-spin')} />} />
-        <ToolbarButton label="主页" onClick={handleGoHome} icon={<Home className="size-3.5" />} />
+        {!isPane && <ToolbarButton label="主页" onClick={handleGoHome} icon={<Home className="size-3.5" />} />}
 
         {/* 地址栏 */}
-        <div className="mx-1.5 flex flex-1 items-center gap-1.5 rounded-md border border-border/40 bg-muted/30 px-2.5 py-1">
+        <div className="mx-1.5 flex min-w-0 flex-1 items-center gap-1.5 rounded-md border border-border/40 bg-muted/30 px-2.5 py-1">
           <Globe className="size-3 flex-shrink-0 text-muted-foreground/60" />
           <input
             type="text"
@@ -267,25 +250,27 @@ export function BrowserView(): React.ReactElement {
           {isLoading && <Loader2 className="size-3 flex-shrink-0 animate-spin text-muted-foreground/60" />}
         </div>
 
-        <ToolbarButton label="截图到剪贴板" onClick={handleScreenshot} icon={<Camera className="size-3.5" />} />
+        <ToolbarButton label="截图（复制到剪贴板并存盘）" onClick={handleScreenshot} icon={<Camera className="size-3.5" />} />
+        {!isPane && (
+          <ToolbarButton label="拖到 Agent 右侧分屏" onClick={handleTearOff} icon={<PanelRight className="size-3.5" />} />
+        )}
         <ToolbarButton label="在外部浏览器打开" onClick={handleOpenExternal} icon={<ExternalLink className="size-3.5" />} />
+        {isPane && onClose && (
+          <ToolbarButton label="关闭分屏" onClick={onClose} icon={<X className="size-3.5" />} />
+        )}
       </div>
 
       {/* webview 容器 */}
-      <div
-        ref={containerRef}
-        className="relative min-h-0 flex-1 overflow-hidden"
-        onContextMenu={handleContextMenu}
-      >
-        {!loaded ? (
+      <div className="relative min-h-0 flex-1 overflow-hidden" onContextMenu={handleContextMenu}>
+        {!loaded || initialSrcRef.current === null ? (
           <div className="flex h-full items-center justify-center text-sm text-muted-foreground/40">
             <Loader2 className="mr-2 size-4 animate-spin" />
             加载中…
           </div>
         ) : (
           <webview
-            ref={setWebviewRef}
-            src={url || HOME_URL}
+            ref={handleWebviewRef}
+            src={initialSrcRef.current}
             className="h-full w-full"
             allowpopups={true}
             webpreferences="contextIsolation=yes, nodeIntegration=no"
@@ -293,14 +278,26 @@ export function BrowserView(): React.ReactElement {
         )}
       </div>
 
-      {/* 状态栏：页面标题 */}
-      {pageTitle && (
+      {/* 状态栏 */}
+      {pageTitle && !isPane && (
         <div className="flex h-[22px] flex-shrink-0 items-center border-t border-border/20 px-3 text-[11px] text-muted-foreground/60">
           <span className="truncate">{pageTitle}</span>
         </div>
       )}
     </div>
   )
+}
+
+export function BrowserView(): React.ReactElement {
+  return <BrowserCore variant="page" />
+}
+
+interface BrowserPaneProps {
+  onClose: () => void
+}
+
+export function BrowserPane({ onClose }: BrowserPaneProps): React.ReactElement {
+  return <BrowserCore variant="pane" onClose={onClose} />
 }
 
 interface ToolbarButtonProps {
@@ -319,10 +316,8 @@ function ToolbarButton({ label, onClick, icon, disabled }: ToolbarButtonProps): 
           onClick={onClick}
           disabled={disabled}
           className={cn(
-            'flex size-7 items-center justify-center rounded text-muted-foreground transition-colors',
-            disabled
-              ? 'cursor-not-allowed opacity-30'
-              : 'hover:bg-muted/50 hover:text-foreground',
+            'flex size-7 flex-shrink-0 items-center justify-center rounded text-muted-foreground transition-colors',
+            disabled ? 'cursor-not-allowed opacity-30' : 'hover:bg-muted/50 hover:text-foreground',
           )}
           aria-label={label}
         >

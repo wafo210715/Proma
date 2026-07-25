@@ -141,6 +141,8 @@ export const browserUrlAtom = atom<string>('')
 export const browserLoadedAtom = atom<boolean>(false)
 /** Scratch Pad 是否固定在 Agent 右侧分屏；通过拖出 Scratch Tab 打开 */
 export const scratchPadPanelOpenAtom = atom<boolean>(false)
+/** 浏览器是否固定在 Agent 右侧分屏；通过拖出 Browser Tab 打开 */
+export const browserPanelOpenAtom = atom<boolean>(false)
 /** 右侧工作区中 Preview 与 Scratch 并排时，Preview 占比 */
 export const rightWorkspaceSplitRatioAtom = atomWithStorage<number>(
   'proma-right-workspace-split-ratio',

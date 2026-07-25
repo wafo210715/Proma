@@ -31,6 +31,7 @@ import { appModeAtom } from '@/atoms/app-mode'
 import { automationFormAtom } from '@/atoms/automation-atoms'
 import { tearOffPreviewToSplit } from '@/components/diff/preview-opener'
 import { tearOffScratchToSplit } from '@/components/scratch-pad/scratch-pad-opener'
+import { tearOffBrowserToSplit } from '@/components/browser/browser-opener'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { TabBarItem } from './TabBarItem'
@@ -71,6 +72,10 @@ export function TabBar(): React.ReactElement {
     }
     if (tab?.type === 'scratch') {
       tearOffScratchToSplit(store)
+      return
+    }
+    if (tab?.type === 'browser') {
+      tearOffBrowserToSplit(store)
     }
   }, [store, tabs])
 

@@ -389,8 +389,8 @@ export interface ElectronAPI {
   /** 同步保存最后访问的 URL（beforeunload 场景） */
   saveBrowserUrlSync: (url: string) => boolean
 
-  /** 截图当前浏览器区域到剪贴板，返回 dataURL */
-  captureBrowserRegion: (rect: { x: number; y: number; width: number; height: number }) => Promise<string | null>
+  /** 截图当前浏览器页面（dataURL 由 webview.capturePage 产出）→ 剪贴板 + 存盘，返回文件路径 */
+  saveBrowserScreenshot: (dataUrl: string) => Promise<string | null>
 
   // ===== 应用图标切换 =====
 
@@ -1436,8 +1436,8 @@ const electronAPI: ElectronAPI = {
     return ipcRenderer.sendSync(BROWSER_IPC_CHANNELS.SAVE_URL_SYNC, url)
   },
 
-  captureBrowserRegion: (rect: { x: number; y: number; width: number; height: number }) => {
-    return ipcRenderer.invoke(BROWSER_IPC_CHANNELS.CAPTURE, rect)
+  saveBrowserScreenshot: (dataUrl: string) => {
+    return ipcRenderer.invoke(BROWSER_IPC_CHANNELS.SAVE_SCREENSHOT, dataUrl)
   },
 
   chooseExportPath: (defaultName: string) => {
