@@ -9,6 +9,7 @@
 import * as React from 'react'
 import { useAtomValue, useSetAtom, useAtom, useStore } from 'jotai'
 import { toast } from 'sonner'
+import { Loader2 } from 'lucide-react'
 import {
   tabsAtom,
   activeTabIdAtom,
@@ -104,6 +105,15 @@ export function MainArea(): React.ReactElement {
     !!activeComparePair &&
     !!comparePartnerId &&
     activeView === 'conversations'
+
+  // 延迟挂载右栏 AgentView：左栏先渲染完毕，下一帧再挂右栏，避免两个重组件同时初始化。
+  const [partnerPaneReady, setPartnerPaneReady] = React.useState(false)
+  React.useEffect(() => {
+    setPartnerPaneReady(false)
+    if (!comparePartnerId) return
+    const raf = requestAnimationFrame(() => setPartnerPaneReady(true))
+    return () => cancelAnimationFrame(raf)
+  }, [comparePartnerId])
 
   // 配对数组变化时丢弃尚未消费的旧广播，防止解绑/重绑后重放旧 prompt。
   React.useEffect(() => {
@@ -397,6 +407,7 @@ export function MainArea(): React.ReactElement {
           </div>
 
           {/* 右侧：双开对比栏（partner 的 AgentView）。对比态接管右 slot，优先于 preview/scratch。 */}
+          {/* 右栏延迟一帧挂载：左栏先渲染完，避免两个重组件同时初始化导致卡顿。 */}
           {showComparePane && comparePartnerId && (
             <>
               <div
@@ -407,9 +418,16 @@ export function MainArea(): React.ReactElement {
                 {/* 补一条与左栏 TabBar 等高（34px）的顶栏，使右栏 AgentHeader 与左栏对齐 */}
                 <div className="h-[34px] tabbar-bg flex-shrink-0" />
                 <div className="flex-1 min-h-0">
-                  <TabErrorBoundary key={comparePartnerId} sessionId={comparePartnerId}>
-                    <AgentView sessionId={comparePartnerId} sharedModelSelectorOpen={false} />
-                  </TabErrorBoundary>
+                  {partnerPaneReady ? (
+                    <TabErrorBoundary key={comparePartnerId} sessionId={comparePartnerId}>
+                      <AgentView sessionId={comparePartnerId} sharedModelSelectorOpen={false} />
+                    </TabErrorBoundary>
+                  ) : (
+                    <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
+                      <Loader2 className="size-4 animate-spin mr-2" />
+                      加载中…
+                    </div>
+                  )}
                 </div>
               </div>
             </>
