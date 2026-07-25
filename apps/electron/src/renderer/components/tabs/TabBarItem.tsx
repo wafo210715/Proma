@@ -9,7 +9,7 @@
 import * as React from 'react'
 import { createPortal } from 'react-dom'
 import { useAtomValue } from 'jotai'
-import { FileText, StickyNote, X, Clock, GitBranch } from 'lucide-react'
+import { FileText, StickyNote, Shapes, X, Clock, GitBranch } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { TabType, TabMinimapItem } from '@/atoms/tab-atoms'
 import type { SessionIndicatorStatus } from '@/atoms/agent-atoms'
@@ -88,8 +88,8 @@ export function TabBarItem({
   }, [])
 
   const handleMouseDown = (e: React.MouseEvent): void => {
-    // Scratch Pad 不可中键关闭
-    if (type === 'scratch') return
+    // Scratch Pad / Canvas 不可中键关闭
+    if (type === 'scratch' || type === 'canvas') return
     if (e.button === 1) {
       e.preventDefault()
       onMiddleClick()
@@ -102,13 +102,14 @@ export function TabBarItem({
   }
 
   const isScratch = type === 'scratch'
+  const isCanvas = type === 'canvas'
   const showAgentSpinner = type === 'agent' && isStreaming === 'running'
   const previewItems = minimapCache.get(id) ?? []
   // 当前 active Tab 不显示预览面板
   const showPreview = isHovered && !isActive
 
-  // Scratch Pad 是固定草稿入口
-  if (isScratch) {
+  // Scratch Pad / Canvas 是固定入口（紧凑图标 tab，不可关闭）
+  if (isScratch || isCanvas) {
     return (
       <div
         className="relative flex-shrink-0 titlebar-no-drag"
@@ -135,8 +136,8 @@ export function TabBarItem({
           onMouseDown={handleMouseDown}
           onPointerDown={onDragStart}
         >
-          <StickyNote className="size-3.5" />
-          <span className="truncate">草稿</span>
+          {isCanvas ? <Shapes className="size-3.5" /> : <StickyNote className="size-3.5" />}
+          <span className="truncate">{isCanvas ? 'Canvas' : '草稿'}</span>
         </button>
       </div>
     )

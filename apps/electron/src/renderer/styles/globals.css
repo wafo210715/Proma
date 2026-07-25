@@ -2453,3 +2453,21 @@
 .ProseMirror-focused .ProseMirror-gapcursor {
   display: block;
 }
+
+/* ===== Canvas 画布 =====
+ * 网格点背景 + 连线标签 text halo（文字周围用内容区背景色描边，
+ * 视觉上"擦除"穿过文字的连线，无可见底色）。适配所有主题的 --content-area。
+ */
+.canvas-grid {
+  background-image: radial-gradient(circle, hsl(var(--border) / 0.55) 1px, transparent 0);
+  background-size: 24px 24px;
+}
+.canvas-edge-label {
+  fill: hsl(var(--muted-foreground));
+  font-size: 11px;
+  font-family: sans-serif;
+  paint-order: stroke;
+  stroke: hsl(var(--content-area));
+  stroke-width: 4px;
+  stroke-linejoin: round;
+}

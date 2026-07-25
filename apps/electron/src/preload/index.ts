@@ -7,7 +7,7 @@
 
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS } from '@proma/shared'
-import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SCRATCH_PAD_IPC_CHANNELS, APP_ICON_IPC_CHANNELS, DOCK_BADGE_IPC_CHANNELS, STORAGE_IPC_CHANNELS } from '../types'
+import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SCRATCH_PAD_IPC_CHANNELS, CANVAS_IPC_CHANNELS, APP_ICON_IPC_CHANNELS, DOCK_BADGE_IPC_CHANNELS, STORAGE_IPC_CHANNELS } from '../types'
 import type {
   RuntimeStatus,
   GitRepoStatus,
@@ -363,6 +363,20 @@ export interface ElectronAPI {
 
   /** 将图片 data URL 写入系统剪贴板 */
   copyImageToClipboard: (dataUrl: string) => Promise<{ success: boolean; message?: string }>
+
+  // ===== Canvas 画布 =====
+
+  /** 从磁盘加载 canvas.canvas（JSON Canvas 格式字符串） */
+  loadCanvas: () => Promise<string>
+
+  /** 异步保存内容到 canvas.canvas */
+  saveCanvas: (content: string) => Promise<boolean>
+
+  /** 同步保存内容到 canvas.canvas（beforeunload 场景） */
+  saveCanvasSync: (content: string) => boolean
+
+  /** 截图当前画布区域到剪贴板，返回 dataURL */
+  captureCanvasRegion: (rect: { x: number; y: number; width: number; height: number }) => Promise<string | null>
 
   // ===== 应用图标切换 =====
 
@@ -1376,6 +1390,23 @@ const electronAPI: ElectronAPI = {
 
   exportScratchPad: (markdown: string, dirPath: string, filename: string) => {
     return ipcRenderer.invoke(SCRATCH_PAD_IPC_CHANNELS.EXPORT, markdown, dirPath, filename)
+  },
+
+  // Canvas 画布持久化
+  loadCanvas: () => {
+    return ipcRenderer.invoke(CANVAS_IPC_CHANNELS.LOAD)
+  },
+
+  saveCanvas: (content: string) => {
+    return ipcRenderer.invoke(CANVAS_IPC_CHANNELS.SAVE, content)
+  },
+
+  saveCanvasSync: (content: string) => {
+    return ipcRenderer.sendSync(CANVAS_IPC_CHANNELS.SAVE_SYNC, content)
+  },
+
+  captureCanvasRegion: (rect: { x: number; y: number; width: number; height: number }) => {
+    return ipcRenderer.invoke(CANVAS_IPC_CHANNELS.CAPTURE, rect)
   },
 
   chooseExportPath: (defaultName: string) => {

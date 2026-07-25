@@ -10,7 +10,7 @@ import { existsSync, realpathSync, rmSync, readFileSync, writeFileSync, mkdirSyn
 import { writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, isPromaPermissionMode, normalizePathForCompare } from '@proma/shared'
-import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SCRATCH_PAD_IPC_CHANNELS, QUICK_TASK_IPC_CHANNELS, VOICE_DICTATION_IPC_CHANNELS, APP_ICON_IPC_CHANNELS, DOCK_BADGE_IPC_CHANNELS, STORAGE_IPC_CHANNELS } from '../types'
+import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SCRATCH_PAD_IPC_CHANNELS, CANVAS_IPC_CHANNELS, QUICK_TASK_IPC_CHANNELS, VOICE_DICTATION_IPC_CHANNELS, APP_ICON_IPC_CHANNELS, DOCK_BADGE_IPC_CHANNELS, STORAGE_IPC_CHANNELS } from '../types'
 import type {
   QuickTaskSubmitInput,
   VoiceDictationAudioChunkInput,
@@ -196,7 +196,7 @@ import { runAgent, stopAgent, generateAgentTitle, saveFilesToAgentSession, saveF
 import { permissionService } from './lib/agent-permission-service'
 import { askUserService } from './lib/agent-ask-user-service'
 import { exitPlanService } from './lib/agent-exit-plan-service'
-import { getAgentSessionWorkspacePath, getAgentWorkspacesDir, getWorkspaceSkillsDir, getWorkspaceFilesDir, getScratchPadPath } from './lib/config-paths'
+import { getAgentSessionWorkspacePath, getAgentWorkspacesDir, getWorkspaceSkillsDir, getWorkspaceFilesDir, getScratchPadPath, getCanvasPath } from './lib/config-paths'
 import { getCachedDefaultAppInfo, saveCachedDefaultAppInfo } from './lib/default-app-cache'
 import { calculateStorageStats, cleanupStorage, cleanupTempFiles } from './lib/storage-service'
 import type { CleanupOptions } from './lib/storage-service'
@@ -1680,6 +1680,74 @@ export function registerIpcHandlers(): void {
       } catch (err) {
         console.error('[ScratchPad] 复制图片到剪贴板失败:', err)
         return { success: false, message: '复制失败' }
+      }
+    }
+  )
+
+  // ===== Canvas 画布持久化 =====
+
+  // 从磁盘加载 canvas.canvas（JSON Canvas 格式）
+  ipcMain.handle(
+    CANVAS_IPC_CHANNELS.LOAD,
+    async (): Promise<string> => {
+      const path = getCanvasPath()
+      try {
+        if (!existsSync(path)) return ''
+        return readFileSync(path, 'utf-8')
+      } catch (err) {
+        console.error('[Canvas] 加载失败:', err)
+        return ''
+      }
+    }
+  )
+
+  // 异步保存 canvas.canvas
+  ipcMain.handle(
+    CANVAS_IPC_CHANNELS.SAVE,
+    async (_, content: string): Promise<boolean> => {
+      const path = getCanvasPath()
+      try {
+        await writeFile(path, content, 'utf-8')
+        return true
+      } catch (err) {
+        console.error('[Canvas] 保存失败:', err)
+        return false
+      }
+    }
+  )
+
+  // 同步保存 canvas.canvas（beforeunload 场景）
+  ipcMain.on(
+    CANVAS_IPC_CHANNELS.SAVE_SYNC,
+    (event, content: string) => {
+      try {
+        writeFileSync(getCanvasPath(), content, 'utf-8')
+        event.returnValue = true
+      } catch (err) {
+        console.error('[Canvas] 同步保存失败:', err)
+        event.returnValue = false
+      }
+    }
+  )
+
+  // 截图当前画布区域：按 rect 截取焦点窗口的可见像素（已缩放好的视图），复制到剪贴板
+  ipcMain.handle(
+    CANVAS_IPC_CHANNELS.CAPTURE,
+    async (_, rect: { x: number; y: number; width: number; height: number }): Promise<string | null> => {
+      const win = BrowserWindow.getFocusedWindow()
+      if (!win) return null
+      try {
+        const image = await win.webContents.capturePage({
+          x: Math.round(rect.x),
+          y: Math.round(rect.y),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+        })
+        clipboard.writeImage(image)
+        return image.toDataURL()
+      } catch (err) {
+        console.error('[Canvas] 截图失败:', err)
+        return null
       }
     }
   )

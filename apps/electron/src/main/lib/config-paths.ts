@@ -668,6 +668,15 @@ export function getScratchPadPath(): string {
 }
 
 /**
+ * 获取 Canvas 画布文件路径
+ *
+ * @returns ~/.proma/canvas.canvas（JSON Canvas 格式）
+ */
+export function getCanvasPath(): string {
+  return join(getConfigDir(), 'canvas.canvas')
+}
+
+/**
  * 获取定时任务（Automation）配置文件路径
  *
  * @returns ~/.proma/automations.json
