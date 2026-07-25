@@ -422,6 +422,18 @@ export const SCRATCH_PAD_IPC_CHANNELS = {
   COPY_IMAGE: 'scratch-pad:copy-image',
 } as const
 
+/** Canvas 画布 IPC 通道 */
+export const CANVAS_IPC_CHANNELS = {
+  /** 从磁盘加载 canvas.canvas 内容（JSON Canvas 格式） */
+  LOAD: 'canvas:load',
+  /** 保存内容到 canvas.canvas */
+  SAVE: 'canvas:save',
+  /** 同步保存（beforeunload 场景） */
+  SAVE_SYNC: 'canvas:save-sync',
+  /** 截图当前画布区域（复制到剪贴板） */
+  CAPTURE: 'canvas:capture-region',
+} as const
+
 /** 应用图标 IPC 通道 */
 export const APP_ICON_IPC_CHANNELS = {
   /** 设置应用图标（variant ID） */
