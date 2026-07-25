@@ -134,19 +134,28 @@ export function MainArea(): React.ReactElement {
     }
   }, [compareLinked, setCompareBroadcast, setComparePendingFileLinks])
 
-  // 删除配对中的任一会话后自动清理对应配对，避免右栏渲染不存在的 session。
+  // 配对中的 session 被删除时自动清理对应配对。
+  // 注意：只检查「之前存在但现在不在列表中」的 session，避免 agentSessions 短暂空窗时误删。
+  const previousSessionIdsRef = React.useRef<Set<string>>(new Set())
   React.useEffect(() => {
-    if (comparePairs.length === 0) return
-    const sessionIds = new Set(agentSessions.map((session) => session.id))
-    const hasStalePair = comparePairs.some(
-      (p) => !sessionIds.has(p.left) || !sessionIds.has(p.right),
-    )
-    if (hasStalePair) {
+    if (comparePairs.length === 0) {
+      previousSessionIdsRef.current = new Set(agentSessions.map((s) => s.id))
+      return
+    }
+    const currentSessionIds = new Set(agentSessions.map((s) => s.id))
+    const prevIds = previousSessionIdsRef.current
+    // 只清理「上一轮存在、这一轮消失了」的 session，不因列表短暂空窗误删
+    const deletedIds = new Set<string>()
+    for (const id of prevIds) {
+      if (!currentSessionIds.has(id)) deletedIds.add(id)
+    }
+    if (deletedIds.size > 0) {
       setComparePairs((prev) =>
-        prev.filter((p) => sessionIds.has(p.left) && sessionIds.has(p.right)),
+        prev.filter((p) => !deletedIds.has(p.left) && !deletedIds.has(p.right)),
       )
     }
-  }, [agentSessions, comparePairs, setComparePairs])
+    previousSessionIdsRef.current = currentSessionIds
+  }, [agentSessions, comparePairs.length, setComparePairs])
 
   // 待办继承由常驻 MainArea 观察全局流状态，切换 tab 后也能在源会话完成时执行。
   React.useEffect(() => {
