@@ -2,7 +2,7 @@
  * 跨平台清理残留的 electronmon / electron 进程
  * 替代 pkill（Windows 不支持）
  *
- * 传入 --vite 时，额外清理占用 Vite 端口（5173）的残留进程。
+ * 传入 --vite 时，额外清理占用 Vite 端口（5174）的残留进程。
  * 该清理仅应在 concurrently 拉起 dev:vite 之前跑一次（顶层 dev 脚本），
  * 不要在与 dev:vite 并发的 dev:electron 内部跑，否则会误杀本次刚启动的 vite。
  */
@@ -11,7 +11,7 @@ import { execSync } from 'child_process'
 const isWin = process.platform === 'win32'
 const killVite = process.argv.includes('--vite')
 /** 与 vite.config.ts 的 server.port 保持一致 */
-const VITE_PORT = 5173
+const VITE_PORT = 5174
 
 function kill(pattern: string): void {
   try {
@@ -74,6 +74,9 @@ function killStaleVite(port: number): void {
   }
 }
 
-kill(isWin ? 'electronmon.exe' : 'electronmon \\.')
-kill(isWin ? 'electron.exe' : 'electron.*dist/main')
+// 使用项目路径限定进程匹配，避免杀掉其他 Proma 开发实例（如 proma-ext）的进程。
+// __dirname 在编译后是 dist/ 的父目录（apps/electron），可据此区分不同 fork。
+const projectMarker = __dirname.replace(/\\/g, '/').includes('/Proma/') ? 'Proma' : 'electron'
+kill(isWin ? 'electronmon.exe' : `electronmon .*${projectMarker}`)
+kill(isWin ? 'electron.exe' : `electron.*${projectMarker}.*dist/main`)
 if (killVite) killStaleVite(VITE_PORT)

@@ -28,12 +28,12 @@ export function getConfigDirName(): string {
     } else {
       try {
         const { app } = require('electron')
-        _configDirName = app.isPackaged ? '.proma' : '.proma-dev'
+        _configDirName = app.isPackaged ? '.proma' : '.proma-dev-fork'
       } catch {
         _configDirName = '.proma'
       }
     }
-    const mode = _configDirName === '.proma-dev' ? '开发模式' : '正式版本'
+    const mode = _configDirName === '.proma-dev-fork' ? '开发模式（fork 实例）' : _configDirName === '.proma-dev' ? '开发模式' : '正式版本'
     console.log(`[配置] 配置目录: ~/${_configDirName}/（${mode}）`)
   }
   return _configDirName

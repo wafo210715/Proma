@@ -4,8 +4,9 @@ import { existsSync } from 'fs'
 
 // Dev 与正式版使用独立的 userData 目录，避免共享 Chromium SingletonLock 导致 dev 启动被静默退出
 // 必须在任何会读取 userData 路径的模块加载之前执行
+// 使用 '@proma/electron-dev-fork' 而非 '@proma/electron-dev'，与 proma-ext 等其他 fork 实例隔离
 if (!app.isPackaged) {
-  app.setPath('userData', join(app.getPath('appData'), '@proma/electron-dev'))
+  app.setPath('userData', join(app.getPath('appData'), '@proma/electron-dev-fork'))
 }
 
 // 单实例锁：防止重复启动同一个版本（dev/prod 因 userData 已隔离，互不影响）
@@ -316,7 +317,7 @@ function saveMainWindowState(): void {
 
 function isDevServerNavigation(url: string): boolean {
   try {
-    return new URL(url).origin === 'http://127.0.0.1:5173'
+    return new URL(url).origin === 'http://127.0.0.1:5174'
   } catch {
     return false
   }
@@ -367,7 +368,7 @@ function createWindow(): void {
   // Load the renderer
   const isDev = !app.isPackaged
   if (isDev) {
-    mainWindow.loadURL('http://127.0.0.1:5173')
+    mainWindow.loadURL('http://127.0.0.1:5174')
     mainWindow.webContents.openDevTools()
   } else {
     mainWindow.loadFile(join(__dirname, 'renderer', 'index.html'))
