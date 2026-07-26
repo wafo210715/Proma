@@ -186,29 +186,6 @@ function BrowserCore({ variant, onClose }: BrowserCoreProps): React.ReactElement
   // 父容器引用：截图时需要读取实际渲染尺寸
   const viewportRef = React.useRef<HTMLDivElement>(null)
 
-  // Electron webview 在 flexbox 容器里不自动感知尺寸变化。
-  // 用 ResizeObserver 监听容器尺寸，强制同步 webview 的 width/height。
-  React.useEffect(() => {
-    const vp = viewportRef.current
-    if (!vp) return
-
-    const syncSize = (): void => {
-      const cw = vp.clientWidth
-      const ch = vp.clientHeight
-      vp.querySelectorAll('webview').forEach((el) => {
-        const node = el as HTMLElement
-        node.style.width = cw + 'px'
-        node.style.height = ch + 'px'
-      })
-    }
-
-    // 初始同步
-    syncSize()
-    const observer = new ResizeObserver(syncSize)
-    observer.observe(vp)
-    return () => observer.disconnect()
-  }, [loaded, webviewEl])
-
   const handleScreenshot = React.useCallback(async (): Promise<void> => {
     if (!webviewEl) return
     try {
@@ -293,9 +270,10 @@ function BrowserCore({ variant, onClose }: BrowserCoreProps): React.ReactElement
         )}
       </div>
 
-      {/* webview 容器 */}
-      {/* 用 absolute inset-0 而非 h-full：Electron webview 在 flexbox + height:100% 下有
-          高度感知 bug，guest 内容只渲染头部一截 */}
+      {/* webview 容器。
+          Electron webview 默认 display:flex，内部 shadow DOM 的 <object> 节点
+          靠 flex 拉伸填满容器（issue #3948）。不要用 display:block，否则 object
+          回退到 300×150px 内在尺寸。 */}
       <div ref={viewportRef} className="relative min-h-0 flex-1 overflow-hidden" onContextMenu={handleContextMenu}>
         {!loaded || initialSrcRef.current === null ? (
           <div className="flex h-full items-center justify-center text-sm text-muted-foreground/40">
@@ -306,7 +284,7 @@ function BrowserCore({ variant, onClose }: BrowserCoreProps): React.ReactElement
           <webview
             ref={handleWebviewRef}
             src={initialSrcRef.current}
-            className="absolute inset-0 h-full w-full border-none"
+            className="h-full w-full border-none"
             allowpopups={true}
             webpreferences="contextIsolation=yes, nodeIntegration=no"
           />

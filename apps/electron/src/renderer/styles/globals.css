@@ -2473,11 +2473,13 @@
 }
 
 /* ===== 浏览器面板 ===== */
-/* Electron <webview> 是替换元素，默认尺寸 300×150。
-   在 flexbox 容器中用 height:100% 不一定生效——
-   guest webContents 的渲染区域由元素盒模型决定。
-   用 absolute inset-0 + display:block 确保铺满父容器。 */
+/* Electron <webview> 默认使用 display:flex，其内部 shadow DOM 的 <object> 节点
+   依赖 flex 拉伸来填满容器。如果改成 display:block，object 节点会回退到
+   默认内在尺寸 300×150px——这正是之前 webview 内容只显示顶部一截的根因。
+   参见 Electron issue #3948。 */
 webview {
-  display: block;
+  display: flex;
   border: none;
+  width: 100%;
+  height: 100%;
 }
