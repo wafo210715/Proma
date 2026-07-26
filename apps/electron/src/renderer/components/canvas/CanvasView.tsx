@@ -15,11 +15,19 @@
  */
 
 import * as React from 'react'
-import { useAtom, useAtomValue } from 'jotai'
-import { Camera, LayoutGrid, Crosshair, Undo2, Redo2, Group, Upload, Mic, X } from 'lucide-react'
+import { useAtom, useAtomValue, useStore } from 'jotai'
+import { Camera, LayoutGrid, Crosshair, Undo2, Redo2, Group, Upload, Mic, X, PanelRight, Send } from 'lucide-react'
 import { toast } from 'sonner'
-import { canvasContentAtom, canvasLoadedAtom } from '@/atoms/tab-atoms'
+import {
+  canvasContentAtom,
+  canvasLoadedAtom,
+  sessionCanvasContentsAtom,
+  sessionCanvasLoadedAtom,
+} from '@/atoms/tab-atoms'
+import { agentPendingFilesAtomFamily } from '@/atoms/agent-atoms'
+import type { AgentPendingFile } from '@proma/shared'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { tearOffCanvasToSplit, closeCanvasInSplit } from './canvas-opener'
 import {
   COLOR_PRESETS,
   NEW_NODE_WIDTH,
@@ -27,6 +35,7 @@ import {
   buildClusterMarkdown,
   computeEdgeBows,
   computeEdgePath,
+  computeSnapGuides,
   extractCluster,
   generateId,
   getSidePoint,
@@ -40,8 +49,10 @@ import {
   runForceLayout,
   screenToCanvas,
   serializeCanvas,
+  type CanvasClipboard,
   type CanvasEdge,
   type CanvasNode,
+  type GuideLine,
   type NodeSide,
   type ViewState,
 } from './canvas-utils'
@@ -53,12 +64,92 @@ function todayStamp(): string {
   return `${String(d.getFullYear()).slice(2)}${p(d.getMonth() + 1)}${p(d.getDate())}`
 }
 
+/** 异步加载 session canvas 文件内容 */
+async function loadSessionCanvasContent(sessionId: string): Promise<string | null> {
+  try {
+    const result = await window.electronAPI.loadSessionCanvas?.(sessionId)
+    return result ?? null
+  } catch {
+    return null
+  }
+}
+
 const ALL_SIDES: NodeSide[] = ['top', 'right', 'bottom', 'left']
 const HISTORY_LIMIT = 80
 
-export function CanvasView(): React.ReactElement {
-  const [content, setContent] = useAtom(canvasContentAtom)
-  const loaded = useAtomValue(canvasLoadedAtom)
+export interface CanvasViewProps {
+  /** variant='page' 时作为独立 Tab；variant='pane' 时作为右侧分屏 */
+  variant?: 'page' | 'pane'
+  /** sessionId 存在时使用 session 专属画布，否则使用全局画布 */
+  sessionId?: string
+  /** pane 模式的关闭回调 */
+  onClose?: () => void
+}
+
+export function CanvasView({
+  variant = 'page',
+  sessionId,
+  onClose,
+}: CanvasViewProps): React.ReactElement {
+  const isSession = !!sessionId
+  const isPane = variant === 'pane'
+
+  // 全局画布 atoms（始终订阅，保持兼容）
+  const [globalContent, setGlobalContent] = useAtom(canvasContentAtom)
+  const globalLoaded = useAtomValue(canvasLoadedAtom)
+
+  // Session 画布 atoms
+  const [sessionContents, setSessionContents] = useAtom(sessionCanvasContentsAtom)
+  const [sessionLoadedMap, setSessionLoadedMap] = useAtom(sessionCanvasLoadedAtom)
+  const sessionLoaded = isSession ? (sessionLoadedMap.get(sessionId!) ?? false) : false
+
+  // 当前活跃的 content / loaded / setContent
+  const content = isSession ? (sessionContents.get(sessionId!) ?? '') : globalContent
+  const loaded = isSession ? sessionLoaded : globalLoaded
+
+  const setContent = React.useCallback(
+    (val: string): void => {
+      if (isSession && sessionId) {
+        setSessionContents((prev) => {
+          const next = new Map(prev)
+          next.set(sessionId, val)
+          return next
+        })
+      } else {
+        setGlobalContent(val)
+      }
+    },
+    [isSession, sessionId, setSessionContents, setGlobalContent],
+  )
+
+  // Session canvas 的初始加载
+  React.useEffect(() => {
+    if (!isSession || !sessionId) return
+    if (sessionLoadedMap.get(sessionId)) return // 已加载
+
+    // 从文件加载，加载完成后才标记 loaded=true
+    loadSessionCanvasContent(sessionId).then((json) => {
+      if (json !== null && json !== '') {
+        setSessionContents((prev) => {
+          const next = new Map(prev)
+          next.set(sessionId, json)
+          return next
+        })
+      }
+      setSessionLoadedMap((prev) => {
+        const next = new Map(prev)
+        next.set(sessionId, true)
+        return next
+      })
+    }).catch((err) => {
+      console.error('[Canvas] session canvas 加载失败:', err)
+      setSessionLoadedMap((prev) => {
+        const next = new Map(prev)
+        next.set(sessionId, true)
+        return next
+      })
+    })
+  }, [isSession, sessionId, sessionLoadedMap, setSessionContents, setSessionLoadedMap])
 
   const [nodes, setNodes] = React.useState<CanvasNode[]>([])
   const [edges, setEdges] = React.useState<CanvasEdge[]>([])
@@ -75,6 +166,12 @@ export function CanvasView(): React.ReactElement {
   const [canUndo, setCanUndo] = React.useState(false)
   const [canRedo, setCanRedo] = React.useState(false)
   const [exportOpen, setExportOpen] = React.useState(false)
+  const [activeGuides, setActiveGuides] = React.useState<GuideLine[]>([])
+
+  // 内部剪贴板（不与系统剪贴板交互，纯内存）
+  const clipboardRef = React.useRef<CanvasClipboard | null>(null)
+  // 最后一次鼠标位置（画布坐标），用于 paste 贴近鼠标位置
+  const lastMouseCanvasRef = React.useRef<{ x: number; y: number }>({ x: 0, y: 0 })
 
   const containerRef = React.useRef<HTMLDivElement>(null)
   const lastSerializedRef = React.useRef<string>('')
@@ -97,6 +194,8 @@ export function CanvasView(): React.ReactElement {
   editingRef.current = { node: editingNodeId, edge: editingEdgeId }
   const spaceRef = React.useRef(spaceDown)
   spaceRef.current = spaceDown
+  // 用 ref 存 handleGroup，避免 TDZ（handleGroup 定义在 keyboard handler 之后）
+  const groupRef = React.useRef<(() => void) | null>(null)
 
   const syncHistoryFlags = React.useCallback((): void => {
     setCanUndo(historyIndexRef.current > 0)
@@ -229,6 +328,62 @@ export function CanvasView(): React.ReactElement {
     commit(nextNodes, nextEdges)
   }, [commit])
 
+  // ===== 复制选中 =====
+  const copySelected = React.useCallback((): void => {
+    const sel = selectedRef.current
+    if (sel.size === 0) return
+    const selNodes = nodesRef.current.filter((n) => sel.has(n.id))
+    const selIds = new Set(selNodes.map((n) => n.id))
+    const selEdges = edgesRef.current.filter(
+      (e) => selIds.has(e.fromNode) && selIds.has(e.toNode),
+    )
+    if (selNodes.length === 0) return
+    clipboardRef.current = {
+      nodes: selNodes.map((n) => ({ ...n })),
+      edges: selEdges.map((e) => ({ ...e })),
+    }
+  }, [])
+
+  // ===== 粘贴 =====
+  const paste = React.useCallback((): void => {
+    const clip = clipboardRef.current
+    if (!clip || clip.nodes.length === 0) return
+    const OFFSET = 24
+    // 旧 ID → 新 ID 映射
+    const idMap = new Map<string, string>()
+    for (const n of clip.nodes) {
+      idMap.set(n.id, generateId())
+    }
+    // 以剪贴板内容的包围盒左上角为基准，粘贴到鼠标位置或偏移
+    let minX = Infinity, minY = Infinity
+    for (const n of clip.nodes) {
+      minX = Math.min(minX, n.x)
+      minY = Math.min(minY, n.y)
+    }
+    const targetX = lastMouseCanvasRef.current.x || minX + OFFSET
+    const targetY = lastMouseCanvasRef.current.y || minY + OFFSET
+    const dx = targetX - minX + OFFSET
+    const dy = targetY - minY + OFFSET
+    const newNodes: CanvasNode[] = clip.nodes.map((n) => ({
+      ...n,
+      id: idMap.get(n.id)!,
+      x: Math.round(n.x + dx),
+      y: Math.round(n.y + dy),
+    }))
+    const newEdges: CanvasEdge[] = clip.edges.map((e) => ({
+      ...e,
+      id: generateId(),
+      fromNode: idMap.get(e.fromNode)!,
+      toNode: idMap.get(e.toNode)!,
+    }))
+    const nextNodes = [...nodesRef.current, ...newNodes]
+    const nextEdges = [...edgesRef.current, ...newEdges]
+    setNodes(nextNodes)
+    setEdges(nextEdges)
+    setSelectedIds(new Set(newNodes.map((n) => n.id)))
+    commit(nextNodes, nextEdges)
+  }, [commit])
+
   // ===== 编辑 flush：在 React 卸载 textarea 之前主动提交 =====
   // React 在元素卸载时不会触发 onBlur，所以点空白导致 setEditing(null) 会丢失未提交的文字。
   // 用 capture 阶段的 document mousedown（早于 React 合成事件）在点击外部时先 flush。
@@ -286,6 +441,28 @@ export function CanvasView(): React.ReactElement {
         setSelectedIds(new Set(nodesRef.current.map((n) => n.id)))
         return
       }
+      if (mod && e.key.toLowerCase() === 'c') {
+        copySelected()
+        return
+      }
+      if (mod && e.key.toLowerCase() === 'v') {
+        e.preventDefault()
+        paste()
+        return
+      }
+      if (mod && e.key.toLowerCase() === 'd') {
+        // 复制选中（in-place duplicate）
+        e.preventDefault()
+        copySelected()
+        paste()
+        return
+      }
+      if (mod && e.key.toLowerCase() === 'g') {
+        // 成组
+        e.preventDefault()
+        groupRef.current?.()
+        return
+      }
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedRef.current.size > 0) {
           e.preventDefault()
@@ -308,7 +485,7 @@ export function CanvasView(): React.ReactElement {
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('keyup', onKeyUp)
     }
-  }, [undo, redo, deleteSelected])
+  }, [undo, redo, deleteSelected, copySelected, paste])
 
   // ===== 画布平移 =====
   const startPan = React.useCallback((e: React.MouseEvent | MouseEvent): void => {
@@ -410,6 +587,23 @@ export function CanvasView(): React.ReactElement {
         const n = nodesRef.current.find((x) => x.id === id)
         if (n) origins.set(id, { x: n.x, y: n.y })
       }
+      // 如果拖的是 group 节点，找出几何上在 group 范围内的成员，一并移动
+      const groupNode = nodesRef.current.find((n) => n.id === nodeId && n.type === 'group')
+      if (groupNode) {
+        const groupRect = { x: groupNode.x, y: groupNode.y, width: groupNode.width, height: groupNode.height }
+        for (const n of nodesRef.current) {
+          if (n.type === 'group' || movingIds.includes(n.id)) continue
+          // 节点中心在 group 框内就算成员
+          const cx = n.x + n.width / 2
+          const cy = n.y + n.height / 2
+          if (cx >= groupRect.x && cx <= groupRect.x + groupRect.width &&
+              cy >= groupRect.y && cy <= groupRect.y + groupRect.height) {
+            movingIds.push(n.id)
+            origins.set(n.id, { x: n.x, y: n.y })
+          }
+        }
+      }
+      const movingIdsSet = new Set(movingIds)
       const startX = e.clientX
       const startY = e.clientY
       let moved = false
@@ -419,16 +613,30 @@ export function CanvasView(): React.ReactElement {
         const dx = (ev.clientX - startX) / scale
         const dy = (ev.clientY - startY) / scale
         if (Math.abs(dx) > 1 || Math.abs(dy) > 1) moved = true
+
+        // 先计算拖拽后的位置
+        const dragRects = movingIds.map((id) => {
+          const o = origins.get(id)!
+          const n = nodesRef.current.find((x) => x.id === id)
+          return { id, x: o.x + dx, y: o.y + dy, width: n?.width ?? 200, height: n?.height ?? 60 }
+        })
+        const others = nodesRef.current.filter((n) => !movingIdsSet.has(n.id))
+        const { snapDx, snapDy, guides } = computeSnapGuides(dragRects, others)
+        const finalDx = dx + snapDx
+        const finalDy = dy + snapDy
+
         setNodes((prev) =>
           prev.map((n) => {
             const o = origins.get(n.id)
-            return o ? { ...n, x: o.x + dx, y: o.y + dy } : n
+            return o ? { ...n, x: o.x + finalDx, y: o.y + finalDy } : n
           }),
         )
+        setActiveGuides(guides)
       }
       const onUp = (): void => {
         window.removeEventListener('mousemove', onMove)
         window.removeEventListener('mouseup', onUp)
+        setActiveGuides([])
         if (moved) commit(nodesRef.current, edgesRef.current)
       }
       window.addEventListener('mousemove', onMove)
@@ -627,6 +835,63 @@ export function CanvasView(): React.ReactElement {
     }
   }, [])
 
+  // Page 模式：拖到分屏 + session canvas 截图发给 agent 所需的 store 引用
+  // 注意：必须在 handleSendToAgent 之前定义，避免 TDZ
+  const store = useStore()
+  const handleTearOff = React.useCallback((): void => {
+    tearOffCanvasToSplit(store)
+  }, [store])
+
+  // 用于 session canvas 截图发给 agent
+  const storeSetPendingFiles = React.useCallback(
+    (sid: string, updater: (prev: AgentPendingFile[]) => AgentPendingFile[]) => {
+      const pendingAtom = agentPendingFilesAtomFamily(sid)
+      store.set(pendingAtom, updater)
+    },
+    [store],
+  )
+
+  // ===== 截图发给 Agent（仅 session canvas 模式） =====
+  const handleSendToAgent = React.useCallback(async (): Promise<void> => {
+    if (!isSession || !sessionId || !containerRef.current || !window.electronAPI.captureCanvasRegion) return
+    const rect = containerRef.current.getBoundingClientRect()
+    try {
+      const dataUrl = await window.electronAPI.captureCanvasRegion({
+        x: rect.left,
+        y: rect.top,
+        width: rect.width,
+        height: rect.height,
+      })
+      if (!dataUrl) {
+        toast.error('截图失败')
+        return
+      }
+      // 将 dataURL 转为 AgentPendingFile
+      const timestamp = new Date()
+      const p = (n: number): string => String(n).padStart(2, '0')
+      const stamp = `${String(timestamp.getFullYear()).slice(2)}${p(timestamp.getMonth() + 1)}${p(timestamp.getDate())}-${p(timestamp.getHours())}${p(timestamp.getMinutes())}`
+      const filename = `canvas-${stamp}.png`
+      const pending: AgentPendingFile = {
+        id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        filename,
+        mediaType: 'image/png',
+        size: Math.round(dataUrl.length * 0.75), // base64 估算
+        previewUrl: dataUrl,
+      }
+      // 存 base64 data 供发送时读取
+      if (!window.__pendingAgentFileData) {
+        window.__pendingAgentFileData = new Map<string, string>()
+      }
+      window.__pendingAgentFileData.set(pending.id, dataUrl)
+      // 写入 session pending files atom
+      storeSetPendingFiles(sessionId, (prev) => [...prev, pending])
+      toast.success(`已添加到 Agent 输入：${filename}`)
+    } catch (err) {
+      console.error('[Canvas] 发送给 Agent 失败:', err)
+      toast.error('发送给 Agent 失败')
+    }
+  }, [isSession, sessionId, storeSetPendingFiles])
+
   // ===== 成组 =====
   const handleGroup = React.useCallback((): void => {
     const sel = selectedRef.current
@@ -640,8 +905,7 @@ export function CanvasView(): React.ReactElement {
     setEditingNodeId(group.id)
     commit(next, edgesRef.current)
   }, [commit])
-
-  // ===== 导出 =====
+  groupRef.current = handleGroup
   const selectedTextCount = React.useMemo(
     () => nodes.filter((n) => selectedIds.has(n.id) && n.type !== 'group').length,
     [nodes, selectedIds],
@@ -697,15 +961,17 @@ export function CanvasView(): React.ReactElement {
   return (
     <div className="relative flex h-full flex-col overflow-hidden bg-content-area">
       {/* 工具栏 */}
-      <div className="flex h-[38px] flex-shrink-0 items-center gap-1 border-b border-border/30 px-3">
-        <span className="text-xs text-muted-foreground">Canvas</span>
-        <span className="ml-1 hidden text-[11px] text-muted-foreground/60 sm:inline">
-          双击空白新建 · 拖锚点连线 · 空格拖拽平移 · ⌘滚轮缩放
-        </span>
+      <div className={`flex ${isPane ? 'h-[34px]' : 'h-[38px]'} flex-shrink-0 items-center gap-1 border-b border-border/30 px-3`}>
+        <span className="text-xs text-muted-foreground">{isPane ? (isSession ? '会话画布' : 'Canvas') : 'Canvas'}</span>
+        {!isPane && (
+          <span className="ml-1 hidden text-[11px] text-muted-foreground/60 sm:inline">
+            双击新建 · 拖连线 · ⌘C/V 复制粘贴 · ⌘G 成组 · ⌘Z 撤销
+          </span>
+        )}
         <div className="ml-auto flex items-center gap-0.5">
           {selectedTextCount > 0 && (
             <>
-              <ToolbarButton label="成组 (包住选中)" onClick={handleGroup} icon={<Group className="size-3.5" />} />
+              <ToolbarButton label="成组 (⌘G)" onClick={handleGroup} icon={<Group className="size-3.5" />} />
               <ToolbarButton
                 label={`导出选中 ${selectedTextCount} 个节点为独立文件`}
                 onClick={() => setExportOpen(true)}
@@ -720,6 +986,15 @@ export function CanvasView(): React.ReactElement {
           <ToolbarButton label="自动整理" onClick={handleAutoLayout} icon={<LayoutGrid className="size-3.5" />} />
           <ToolbarButton label="回到中心" onClick={() => fitView(nodesRef.current)} icon={<Crosshair className="size-3.5" />} />
           <ToolbarButton label="截图当前视图到剪贴板" onClick={handleScreenshot} icon={<Camera className="size-3.5" />} />
+          {isSession && (
+            <ToolbarButton label="截图并发送给 Agent" onClick={handleSendToAgent} icon={<Send className="size-3.5" />} />
+          )}
+          {!isPane && (
+            <ToolbarButton label="拖到 Agent 右侧分屏" onClick={handleTearOff} icon={<PanelRight className="size-3.5" />} />
+          )}
+          {isPane && onClose && (
+            <ToolbarButton label="关闭分屏" onClick={onClose} icon={<X className="size-3.5" />} />
+          )}
         </div>
       </div>
 
@@ -730,6 +1005,12 @@ export function CanvasView(): React.ReactElement {
           spaceDown ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'
         }`}
         onMouseDown={handleBackgroundMouseDown}
+        onMouseMove={(e) => {
+          if (!containerRef.current) return
+          const rect = containerRef.current.getBoundingClientRect()
+          const pt = screenToCanvas(e.clientX, e.clientY, rect, viewRef.current)
+          lastMouseCanvasRef.current = pt
+        }}
         onDoubleClick={handleBackgroundDoubleClick}
       >
         {!loaded ? (
@@ -844,6 +1125,35 @@ export function CanvasView(): React.ReactElement {
                       strokeWidth={1}
                       style={{ pointerEvents: 'none' }}
                     />
+                  )}
+
+                  {/* 智能对齐辅助线 */}
+                  {activeGuides.map((g, i) =>
+                    g.orient === 'v' ? (
+                      <line
+                        key={`guide-${i}`}
+                        x1={g.pos}
+                        y1={g.start}
+                        x2={g.pos}
+                        y2={g.end}
+                        stroke="hsl(var(--primary))"
+                        strokeWidth={1}
+                        strokeDasharray="3 3"
+                        style={{ pointerEvents: 'none' }}
+                      />
+                    ) : (
+                      <line
+                        key={`guide-${i}`}
+                        x1={g.start}
+                        y1={g.pos}
+                        x2={g.end}
+                        y2={g.pos}
+                        stroke="hsl(var(--primary))"
+                        strokeWidth={1}
+                        strokeDasharray="3 3"
+                        style={{ pointerEvents: 'none' }}
+                      />
+                    ),
                   )}
                 </g>
               </svg>
@@ -1040,7 +1350,7 @@ export function CanvasView(): React.ReactElement {
         {/* 状态条 */}
         {loaded && (
           <div className="pointer-events-none absolute bottom-2.5 right-3 flex items-center gap-2 rounded border border-border/40 bg-background/80 px-2 py-0.5 text-[11px] text-muted-foreground">
-            {selectedIds.size > 0 && <span>已选 {selectedIds.size}</span>}
+            {selectedIds.size > 0 && <span>已选 {selectedIds.size} · ⌘G 成组 · ⌘C/V 复制</span>}
             <span>
               {nodes.length} 节点 · {edges.length} 连线
             </span>
@@ -1172,9 +1482,9 @@ function ToolbarButton({ label, onClick, icon, disabled }: ToolbarButtonProps): 
       <TooltipTrigger asChild>
         <button
           type="button"
-          onClick={onClick}
-          disabled={disabled}
-          className="flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground disabled:pointer-events-none disabled:opacity-30"
+          onClick={disabled ? undefined : onClick}
+          className={`flex size-7 items-center justify-center rounded transition-colors ${disabled ? 'opacity-30 cursor-default' : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground cursor-pointer'}`}
+          title={label}
           aria-label={label}
         >
           {icon}
@@ -1184,5 +1494,18 @@ function ToolbarButton({ label, onClick, icon, disabled }: ToolbarButtonProps): 
         <p>{label}</p>
       </TooltipContent>
     </Tooltip>
+  )
+}
+
+/** Canvas 分屏面板入口 */
+export function CanvasPane({
+  sessionId,
+  onClose,
+}: {
+  sessionId?: string
+  onClose: () => void
+}): React.ReactElement {
+  return (
+    <CanvasView variant="pane" sessionId={sessionId} onClose={onClose} />
   )
 }

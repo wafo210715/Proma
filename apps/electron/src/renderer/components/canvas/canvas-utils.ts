@@ -467,3 +467,114 @@ export function runForceLayout(nodes: CanvasNode[], edges: CanvasEdge[]): void {
     }
   }
 }
+
+// ===== 智能对齐辅助线（Smart Guides） =====
+
+/** 对齐线的类型：水平 or 垂直 */
+export interface GuideLine {
+  /** 坐标值（水平线=y，垂直线=x） */
+  pos: number
+  /** 'h' = 水平线（固定 y），'v' = 垂直线（固定 x） */
+  orient: 'h' | 'v'
+  /** 起止范围（用于画线长度） */
+  start: number
+  end: number
+}
+
+const SNAP_THRESHOLD = 6
+
+/**
+ * 计算拖拽中的节点与其它静止节点的对齐吸附。
+ * 检查：左边缘、中心、右边缘 三条线在 x 和 y 方向的对齐。
+ * 返回吸附偏移量和对齐辅助线。
+ */
+export function computeSnapGuides(
+  dragRects: Array<{ id: string; x: number; y: number; width: number; height: number }>,
+  otherNodes: CanvasNode[],
+): { snapDx: number; snapDy: number; guides: GuideLine[] } {
+  if (dragRects.length === 0 || otherNodes.length === 0) {
+    return { snapDx: 0, snapDy: 0, guides: [] }
+  }
+
+  let bestDx: number | null = null
+  let bestDy: number | null = null
+  let bestDxDist = SNAP_THRESHOLD
+  let bestDyDist = SNAP_THRESHOLD
+  const guides: GuideLine[] = []
+
+  // 收集静止节点的锚点
+  const staticXAnchors: Array<{ val: number; min: number; max: number }> = []
+  const staticYAnchors: Array<{ val: number; min: number; max: number }> = []
+  for (const n of otherNodes) {
+    if (n.type === 'group') continue
+    staticXAnchors.push(
+      { val: n.x, min: n.y, max: n.y + n.height }, // 左边缘
+      { val: n.x + n.width / 2, min: n.y, max: n.y + n.height }, // 中心
+      { val: n.x + n.width, min: n.y, max: n.y + n.height }, // 右边缘
+    )
+    staticYAnchors.push(
+      { val: n.y, min: n.x, max: n.x + n.width },
+      { val: n.y + n.height / 2, min: n.x, max: n.x + n.width },
+      { val: n.y + n.height, min: n.x, max: n.x + n.width },
+    )
+  }
+
+  // 对每个拖拽节点，检查锚点对齐
+  for (const drag of dragRects) {
+    const dragXAnchors = [drag.x, drag.x + drag.width / 2, drag.x + drag.width]
+    const dragYAnchors = [drag.y, drag.y + drag.height / 2, drag.y + drag.height]
+
+    // X 方向对齐
+    for (const dx of dragXAnchors) {
+      for (const sa of staticXAnchors) {
+        const dist = Math.abs(dx - sa.val)
+        if (dist < bestDxDist) {
+          bestDxDist = dist
+          bestDx = sa.val - dx
+          guides.push({ pos: sa.val, orient: 'v', start: Math.min(drag.y, sa.min), end: Math.max(drag.y + drag.height, sa.max) })
+        } else if (dist < SNAP_THRESHOLD && bestDx !== null) {
+          // 同距离的额外辅助线
+        }
+      }
+    }
+
+    // Y 方向对齐
+    for (const dy of dragYAnchors) {
+      for (const sa of staticYAnchors) {
+        const dist = Math.abs(dy - sa.val)
+        if (dist < bestDyDist) {
+          bestDyDist = dist
+          bestDy = sa.val - dy
+          guides.push({ pos: sa.val, orient: 'h', start: Math.min(drag.x, sa.min), end: Math.max(drag.x + drag.width, sa.max) })
+        }
+      }
+    }
+  }
+
+  // 只保留最佳 snap 对应的辅助线
+  const finalGuides: GuideLine[] = []
+  if (bestDx !== null) {
+    // 找到对应方向的辅助线（取最长的）
+    const vGuides = guides.filter((g) => g.orient === 'v')
+    if (vGuides.length > 0) {
+      vGuides.sort((a, b) => (b.end - b.start) - (a.end - a.start))
+      finalGuides.push(vGuides[0]!)
+    }
+  }
+  if (bestDy !== null) {
+    const hGuides = guides.filter((g) => g.orient === 'h')
+    if (hGuides.length > 0) {
+      hGuides.sort((a, b) => (b.end - b.start) - (a.end - a.start))
+      finalGuides.push(hGuides[0]!)
+    }
+  }
+
+  return { snapDx: bestDx ?? 0, snapDy: bestDy ?? 0, guides: finalGuides }
+}
+
+// ===== 剪贴板 =====
+
+export interface CanvasClipboard {
+  nodes: CanvasNode[]
+  edges: CanvasEdge[]
+}

@@ -16,6 +16,8 @@ import {
   activeTabAtom,
   scratchPadPanelOpenAtom,
   browserPanelOpenAtom,
+  canvasPanelOpenAtom,
+  canvasPanelSessionIdAtom,
   rightWorkspaceSplitRatioAtom,
 } from '@/atoms/tab-atoms'
 import { Panel } from '@/components/app-shell/Panel'
@@ -24,8 +26,10 @@ import { previewPanelOpenMapAtom, previewSplitRatioAtom } from '@/atoms/preview-
 import { PreviewPanel } from '@/components/diff/PreviewPanel'
 import { ScratchPadPane } from '@/components/scratch-pad/ScratchPadView'
 import { BrowserPane } from '@/components/browser/BrowserView'
+import { CanvasPane } from '@/components/canvas/CanvasView'
 import { closeBrowserInSplit } from '@/components/browser/browser-opener'
 import { closeScratchInSplit } from '@/components/scratch-pad/scratch-pad-opener'
+import { closeCanvasInSplit } from '@/components/canvas/canvas-opener'
 import { useTrackSessionView } from '@/hooks/useTrackSessionView'
 import { TabBar } from './TabBar'
 import { TabContent } from './TabContent'
@@ -196,6 +200,10 @@ export function MainArea(): React.ReactElement {
   const browserPanelOpen = useAtomValue(browserPanelOpenAtom)
   const showBrowserPanel =
     activeTab?.type === 'agent' && browserPanelOpen && activeView === 'conversations'
+  const canvasPanelOpen = useAtomValue(canvasPanelOpenAtom)
+  const canvasPanelSessionId = useAtomValue(canvasPanelSessionIdAtom)
+  const showCanvasPanel =
+    activeTab?.type === 'agent' && canvasPanelOpen && activeView === 'conversations'
 
   // 关闭动画状态：当 previewOpen 从 true → false 时，播放退出动画再移除 DOM
   // 在 render 阶段同步派生 closing，避免中间帧出现 flex: 1 1 auto 导致左侧瞬间跳到 100% 宽
@@ -222,7 +230,7 @@ export function MainArea(): React.ReactElement {
   const showPreview = (previewOpen || closing) && previewSessionId && activeView === 'conversations'
   const showPreviewClosingOnly = closing && !previewOpen
   // 右侧槽位的次要面板：草稿与浏览器互斥（由 opener 保证），同时只会存在一个
-  const showSecondaryPane = showScratchPanel || showBrowserPanel
+  const showSecondaryPane = showScratchPanel || showBrowserPanel || showCanvasPanel
   const showPreviewPane = !!showPreview && !(showPreviewClosingOnly && showSecondaryPane)
   const showBothRightPanels = showPreviewPane && showSecondaryPane
 
@@ -340,6 +348,10 @@ export function MainArea(): React.ReactElement {
 
   const handleCloseBrowserPanel = React.useCallback(() => {
     closeBrowserInSplit(store)
+  }, [store])
+
+  const handleCloseCanvasPanel = React.useCallback(() => {
+    closeCanvasInSplit(store)
   }, [store])
 
   React.useEffect(() => {
@@ -489,6 +501,14 @@ export function MainArea(): React.ReactElement {
                 {showBrowserPanel && (
                   <div className="min-w-[320px] h-full overflow-hidden" style={secondaryPaneStyle}>
                     <BrowserPane onClose={handleCloseBrowserPanel} />
+                  </div>
+                )}
+                {showCanvasPanel && (
+                  <div className="min-w-[280px] h-full overflow-hidden" style={secondaryPaneStyle}>
+                    <CanvasPane
+                      sessionId={canvasPanelSessionId ?? undefined}
+                      onClose={handleCloseCanvasPanel}
+                    />
                   </div>
                 )}
               </div>

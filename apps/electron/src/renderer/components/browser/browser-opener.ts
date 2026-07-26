@@ -14,6 +14,7 @@ import {
   activeTabIdAtom,
   browserPanelOpenAtom,
   scratchPadPanelOpenAtom,
+  canvasPanelOpenAtom,
   BROWSER_ID,
   BROWSER_TITLE,
   SCRATCH_PAD_ID,
@@ -95,8 +96,9 @@ export function openBrowserInSplit(store: JotaiStore): boolean {
     }).catch(console.error)
   }
 
-  // 浏览器与草稿互斥：右侧槽位同时塞两个重面板会把地图挤到不可用宽度
+  // 浏览器与草稿/画布互斥：右侧槽位同时塞两个重面板会把地图挤到不可用宽度
   store.set(scratchPadPanelOpenAtom, false)
+  store.set(canvasPanelOpenAtom, false)
   store.set(browserPanelOpenAtom, true)
   return true
 }

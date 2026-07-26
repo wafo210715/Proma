@@ -196,7 +196,7 @@ import { runAgent, stopAgent, generateAgentTitle, saveFilesToAgentSession, saveF
 import { permissionService } from './lib/agent-permission-service'
 import { askUserService } from './lib/agent-ask-user-service'
 import { exitPlanService } from './lib/agent-exit-plan-service'
-import { getAgentSessionWorkspacePath, getAgentWorkspacesDir, getWorkspaceSkillsDir, getWorkspaceFilesDir, getScratchPadPath, getCanvasPath, getCanvasExportsDir, getBrowserUrlPath, getBrowserScreenshotsDir } from './lib/config-paths'
+import { getAgentSessionWorkspacePath, getAgentWorkspacesDir, getWorkspaceSkillsDir, getWorkspaceFilesDir, getScratchPadPath, getCanvasPath, getCanvasExportsDir, getSessionCanvasPath, getBrowserUrlPath, getBrowserScreenshotsDir } from './lib/config-paths'
 import { getCachedDefaultAppInfo, saveCachedDefaultAppInfo } from './lib/default-app-cache'
 import { calculateStorageStats, cleanupStorage, cleanupTempFiles } from './lib/storage-service'
 import type { CleanupOptions } from './lib/storage-service'
@@ -1816,6 +1816,65 @@ export function registerIpcHandlers(): void {
       } catch (err) {
         console.error('[Canvas] 截图失败:', err)
         return null
+      }
+    }
+  )
+
+  // ===== Session Canvas 画布持久化 =====
+
+  // 从磁盘加载 session 专属画布
+  ipcMain.handle(
+    CANVAS_IPC_CHANNELS.LOAD_SESSION,
+    async (_, sessionId: string): Promise<string> => {
+      try {
+        const meta = getAgentSessionMeta(sessionId)
+        if (!meta?.workspaceId) return ''
+        const workspace = getAgentWorkspace(meta.workspaceId)
+        if (!workspace) return ''
+        const path = getSessionCanvasPath(workspace.slug, sessionId)
+        if (!existsSync(path)) return ''
+        return readFileSync(path, 'utf-8')
+      } catch (err) {
+        console.error('[Canvas] 加载 session 画布失败:', err)
+        return ''
+      }
+    }
+  )
+
+  // 异步保存 session 专属画布
+  ipcMain.handle(
+    CANVAS_IPC_CHANNELS.SAVE_SESSION,
+    async (_, sessionId: string, content: string): Promise<boolean> => {
+      try {
+        const meta = getAgentSessionMeta(sessionId)
+        if (!meta?.workspaceId) return false
+        const workspace = getAgentWorkspace(meta.workspaceId)
+        if (!workspace) return false
+        const path = getSessionCanvasPath(workspace.slug, sessionId)
+        await writeFile(path, content, 'utf-8')
+        return true
+      } catch (err) {
+        console.error('[Canvas] 保存 session 画布失败:', err)
+        return false
+      }
+    }
+  )
+
+  // 同步保存 session 专属画布（beforeunload 场景）
+  ipcMain.on(
+    CANVAS_IPC_CHANNELS.SAVE_SESSION_SYNC,
+    (event, sessionId: string, content: string) => {
+      try {
+        const meta = getAgentSessionMeta(sessionId)
+        if (!meta?.workspaceId) return
+        const workspace = getAgentWorkspace(meta.workspaceId)
+        if (!workspace) return
+        const path = getSessionCanvasPath(workspace.slug, sessionId)
+        writeFileSync(path, content, 'utf-8')
+        event.returnValue = true
+      } catch (err) {
+        console.error('[Canvas] 同步保存 session 画布失败:', err)
+        event.returnValue = false
       }
     }
   )

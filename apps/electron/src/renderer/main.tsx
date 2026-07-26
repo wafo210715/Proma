@@ -63,7 +63,7 @@ import {
 } from './atoms/markdown-font-size'
 import { useGlobalAgentListeners } from './hooks/useGlobalAgentListeners'
 import { useGlobalChatListeners } from './hooks/useGlobalChatListeners'
-import { tabsAtom, activeTabIdAtom, ensureScratchPadTab, getPersistableTabState, scratchPadContentAtom, scratchPadLoadedAtom, SCRATCH_PAD_ID, canvasContentAtom, canvasLoadedAtom, browserUrlAtom, browserLoadedAtom } from './atoms/tab-atoms'
+import { tabsAtom, activeTabIdAtom, ensureScratchPadTab, getPersistableTabState, scratchPadContentAtom, scratchPadLoadedAtom, SCRATCH_PAD_ID, canvasContentAtom, canvasLoadedAtom, browserUrlAtom, browserLoadedAtom, sessionCanvasContentsAtom } from './atoms/tab-atoms'
 import type { TabItem } from './atoms/tab-atoms'
 import { chatToolsAtom } from './atoms/chat-tool-atoms'
 import { feishuBotStatesAtom } from './atoms/feishu-atoms'
@@ -987,6 +987,61 @@ function CanvasPersistence(): null {
 }
 
 /**
+ * Session Canvas 持久化组件
+ *
+ * 监听 sessionCanvasContentsAtom 变化，防抖保存每个 session 的画布文件。
+ * 初始加载由 CanvasView 组件内部按需执行（打开 session canvas pane 时才加载）。
+ */
+function SessionCanvasPersistence(): null {
+  const store = useStore()
+  const saveTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+
+  // 自动保存：监听 sessionCanvasContentsAtom 变化，per-session 防抖写入磁盘
+  useEffect(() => {
+    const saveSession = (sessionId: string, content: string): void => {
+      if (window.electronAPI.saveSessionCanvas) {
+        window.electronAPI.saveSessionCanvas(sessionId, content).then((ok) => {
+          if (!ok) console.error('[SessionCanvas] 保存失败:', sessionId)
+        }).catch(console.error)
+      }
+    }
+
+    const debouncedSave = (): void => {
+      const contents = store.get(sessionCanvasContentsAtom)
+      for (const [sessionId, content] of contents) {
+        const timers = saveTimersRef.current
+        const existing = timers.get(sessionId)
+        if (existing) clearTimeout(existing)
+        const timer = setTimeout(() => saveSession(sessionId, content), 500)
+        timers.set(sessionId, timer)
+      }
+    }
+
+    const unsub = store.sub(sessionCanvasContentsAtom, debouncedSave)
+
+    const handleBeforeUnload = (): void => {
+      const timers = saveTimersRef.current
+      for (const timer of timers.values()) clearTimeout(timer)
+      const contents = store.get(sessionCanvasContentsAtom)
+      for (const [sessionId, content] of contents) {
+        if (window.electronAPI.saveSessionCanvasSync) {
+          window.electronAPI.saveSessionCanvasSync(sessionId, content)
+        }
+      }
+    }
+    window.addEventListener('beforeunload', handleBeforeUnload)
+
+    return () => {
+      unsub()
+      for (const timer of saveTimersRef.current.values()) clearTimeout(timer)
+      window.removeEventListener('beforeunload', handleBeforeUnload)
+    }
+  }, [store])
+
+  return null
+}
+
+/**
  * 浏览器 URL 持久化组件
  *
  * 从磁盘加载最后访问的 URL 到 browserUrlAtom，
@@ -1106,6 +1161,7 @@ if (isQuickTaskWindow) {
       <TabStatePersistenceInitializer />
       <ScratchPadPersistence />
       <CanvasPersistence />
+      <SessionCanvasPersistence />
       <BrowserPersistence />
       <GlobalShortcuts />
       <TabSwitcher />

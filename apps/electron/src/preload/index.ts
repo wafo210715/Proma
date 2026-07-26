@@ -389,6 +389,15 @@ export interface ElectronAPI {
     error?: string
   }>
 
+  /** 从磁盘加载 session 专属画布内容 */
+  loadSessionCanvas: (sessionId: string) => Promise<string>
+
+  /** 异步保存 session 专属画布 */
+  saveSessionCanvas: (sessionId: string, content: string) => Promise<boolean>
+
+  /** 同步保存 session 专属画布（beforeunload 场景） */
+  saveSessionCanvasSync: (sessionId: string, content: string) => boolean
+
   // ===== 浏览器 =====
 
   /** 从磁盘加载最后访问的 URL */
@@ -1442,6 +1451,19 @@ const electronAPI: ElectronAPI = {
 
   exportCanvasCluster: (payload: { name: string; canvasJson: string; markdown: string }) => {
     return ipcRenderer.invoke(CANVAS_IPC_CHANNELS.EXPORT, payload)
+  },
+
+  // Session Canvas 画布持久化
+  loadSessionCanvas: (sessionId: string) => {
+    return ipcRenderer.invoke(CANVAS_IPC_CHANNELS.LOAD_SESSION, sessionId)
+  },
+
+  saveSessionCanvas: (sessionId: string, content: string) => {
+    return ipcRenderer.invoke(CANVAS_IPC_CHANNELS.SAVE_SESSION, sessionId, content)
+  },
+
+  saveSessionCanvasSync: (sessionId: string, content: string) => {
+    return ipcRenderer.sendSync(CANVAS_IPC_CHANNELS.SAVE_SESSION_SYNC, sessionId, content)
   },
 
   // 浏览器 URL 持久化

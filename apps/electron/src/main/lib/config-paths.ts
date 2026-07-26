@@ -677,6 +677,21 @@ export function getCanvasPath(): string {
 }
 
 /**
+ * 获取指定 Agent session 的专属画布文件路径
+ *
+ * 存储在 session 工作目录下，与 session 的 cwd 同级。
+ * Agent 可通过 read 工具访问（用户明确要求时）。
+ *
+ * @param workspaceSlug 工作区 slug
+ * @param sessionId 会话 ID
+ * @returns ~/.proma/agent-workspaces/{slug}/{sessionId}/session-canvas.canvas
+ */
+export function getSessionCanvasPath(workspaceSlug: string, sessionId: string): string {
+  const sessionDir = getAgentSessionWorkspacePath(workspaceSlug, sessionId)
+  return join(sessionDir, 'session-canvas.canvas')
+}
+
+/**
  * 获取 Canvas 导出目录（与 session jsonl 同级，属于 Proma 备份范畴，不进 OB vault）
  *
  * 如果目录不存在则自动创建。

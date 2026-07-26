@@ -143,6 +143,14 @@ export const browserLoadedAtom = atom<boolean>(false)
 export const scratchPadPanelOpenAtom = atom<boolean>(false)
 /** 浏览器是否固定在 Agent 右侧分屏；通过拖出 Browser Tab 打开 */
 export const browserPanelOpenAtom = atom<boolean>(false)
+/** Canvas 是否固定在 Agent 右侧分屏；通过拖出 Canvas Tab 或 session 按钮打开 */
+export const canvasPanelOpenAtom = atom<boolean>(false)
+/** 当前分屏画布对应的 session ID（null = 全局画布，string = session 专属画布） */
+export const canvasPanelSessionIdAtom = atom<string | null>(null)
+/** Per-session canvas 内容缓存：sessionId → JSON Canvas 字符串 */
+export const sessionCanvasContentsAtom = atom<Map<string, string>>(new Map())
+/** Per-session canvas 是否已加载：sessionId → boolean */
+export const sessionCanvasLoadedAtom = atom<Map<string, boolean>>(new Map())
 /** 右侧工作区中 Preview 与 Scratch 并排时，Preview 占比 */
 export const rightWorkspaceSplitRatioAtom = atomWithStorage<number>(
   'proma-right-workspace-split-ratio',

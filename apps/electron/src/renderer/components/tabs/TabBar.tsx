@@ -32,6 +32,7 @@ import { automationFormAtom } from '@/atoms/automation-atoms'
 import { tearOffPreviewToSplit } from '@/components/diff/preview-opener'
 import { tearOffScratchToSplit } from '@/components/scratch-pad/scratch-pad-opener'
 import { tearOffBrowserToSplit } from '@/components/browser/browser-opener'
+import { tearOffCanvasToSplit } from '@/components/canvas/canvas-opener'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { TabBarItem } from './TabBarItem'
@@ -76,6 +77,10 @@ export function TabBar(): React.ReactElement {
     }
     if (tab?.type === 'browser') {
       tearOffBrowserToSplit(store)
+      return
+    }
+    if (tab?.type === 'canvas') {
+      tearOffCanvasToSplit(store)
     }
   }, [store, tabs])
 
@@ -259,8 +264,8 @@ function TabBarInner({
   // 拦截外层 handleDragStart：若拖出 TabBar 区域且是 preview/scratch Tab，触发 tear-off
   const handleDragStartWithTearOff = React.useCallback((tabId: string, e: React.PointerEvent) => {
     const tab = tabs.find((t) => t.id === tabId)
-    // 仅 preview / scratch Tab 支持拖出转分屏
-    if (!tab || (tab.type !== 'preview' && tab.type !== 'scratch')) {
+    // 仅 preview / scratch / canvas / browser Tab 支持拖出转分屏
+    if (!tab || (tab.type !== 'preview' && tab.type !== 'scratch' && tab.type !== 'canvas' && tab.type !== 'browser')) {
       onDragStart(tabId, e)
       return
     }

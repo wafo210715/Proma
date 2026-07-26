@@ -6,11 +6,11 @@
  */
 
 import * as React from 'react'
-import { useAtom, useAtomValue, useSetAtom } from 'jotai'
-import { Pencil, Check, X, Columns2, Link2, Link2Off, Plus } from 'lucide-react'
+import { useAtom, useAtomValue, useSetAtom, useStore } from 'jotai'
+import { Pencil, Check, X, Columns2, Link2, Link2Off, Plus, Shapes } from 'lucide-react'
 import type { ModelOption } from '@proma/shared'
 import { agentSessionsAtom, agentSessionStreamingStateAtomFamily } from '@/atoms/agent-atoms'
-import { tabsAtom, updateTabTitle } from '@/atoms/tab-atoms'
+import { tabsAtom, updateTabTitle, canvasPanelOpenAtom, canvasPanelSessionIdAtom } from '@/atoms/tab-atoms'
 import { comparePairsAtom, compareLinkedAtom, getComparePartner, removePairContaining, addPair } from '@/atoms/compare-atoms'
 import { useCompareActions } from '@/hooks/useCompareActions'
 import { ModelSelector } from '@/components/chat/ModelSelector'
@@ -19,6 +19,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { replaceAgentSessionInFreshnessOrder } from '@/lib/agent-session-list'
 import { detectIsWindows, WINDOW_CONTROLS_INSET_RIGHT } from '@/lib/platform'
 import { cn } from '@/lib/utils'
+import { toggleSessionCanvas } from '@/components/canvas/canvas-opener'
 
 /** AgentHeader 属性接口 */
 interface AgentHeaderProps {
@@ -47,6 +48,12 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
   // 源会话是否正在跑：继承上下文时用于决定「立即执行」还是「变待办等这轮结束」
   const srcStreaming = useAtomValue(agentSessionStreamingStateAtomFamily(sessionId))
   const sourceRunning = !!srcStreaming?.running
+
+  // Canvas 分屏按钮状态
+  const canvasPanelOpen = useAtomValue(canvasPanelOpenAtom)
+  const canvasPanelSessionId = useAtomValue(canvasPanelSessionIdAtom)
+  const store = useStore()
+  const canvasActive = canvasPanelOpen && canvasPanelSessionId === sessionId
 
   /** 新建空白会话并对比 */
   const handleCreateBlank = React.useCallback(async (): Promise<void> => {
@@ -157,6 +164,26 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
 
       {/* 双开对比控件：未配对显示「分屏对比」按钮；已配对显示联动开关 + 解绑 */}
       <div className="titlebar-no-drag flex items-center gap-1 flex-shrink-0">
+        {/* Canvas 画布 toggle 按钮 */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              onClick={() => toggleSessionCanvas(store, sessionId)}
+              className={cn(
+                'p-1.5 rounded-md transition-colors',
+                canvasActive
+                  ? 'text-primary bg-primary/10 hover:bg-primary/20'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-muted',
+              )}
+              aria-label="开画布"
+            >
+              <Shapes className="size-3.5" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>{canvasActive ? '关闭画布分屏' : '打开画布分屏'}</TooltipContent>
+        </Tooltip>
+
         {inComparePair ? (
           <>
             <Tooltip>
