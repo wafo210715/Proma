@@ -4,7 +4,7 @@
  * 主题模式、IPC 通道等设置相关定义。
  */
 
-import type { AgentRuntime, EnvironmentCheckResult, ThinkingConfig, AgentEffort, FeishuSessionMirrorSettings } from '@proma/shared'
+import type { AgentRuntime, EnvironmentCheckResult, ThinkingConfig, AgentEffort, AgentThinkingLevel, FeishuSessionMirrorSettings, WindowsShellPreference } from '@proma/shared'
 
 /** 通知音场景类型 */
 export type NotificationSoundType = 'taskComplete' | 'permissionRequest' | 'exitPlanMode'
@@ -180,8 +180,8 @@ export type InterfaceVariant = 'classic' | 'modern'
 /** 默认界面风格 */
 export const DEFAULT_INTERFACE_VARIANT: InterfaceVariant = 'modern'
 
-/** 默认 Agent runtime；历史配置缺省继续使用 Claude */
-export const DEFAULT_AGENT_RUNTIME: AgentRuntime = 'claude'
+/** 新建 Agent 会话与自动任务的默认 runtime。历史持久化记录缺失 runtime 时仍按 Claude 兼容。 */
+export const DEFAULT_AGENT_RUNTIME: AgentRuntime = 'pi'
 
 /** Markdown 预览字号档位 */
 export type MarkdownFontSize = 'small' | 'medium' | 'large'
@@ -205,8 +205,10 @@ export interface AppSettings {
   agentChannelIds?: string[]
   /** Agent 当前工作区 ID */
   agentWorkspaceId?: string
-  /** 新 Agent 会话默认使用的 runtime；历史会话缺省为 claude */
+  /** 新 Agent 会话默认使用的 runtime；历史会话缺省仍按 claude 兼容。 */
   agentRuntime?: AgentRuntime
+  /** Windows 上 Agent Bash 工具的运行环境；默认自动选择 Git Bash，WSL 需用户显式启用。 */
+  windowsShellPreference?: WindowsShellPreference
   /** 侧栏「自动任务」合成项目组在项目列表中的位置索引（默认 0 = 最靠前；可拖拽调整） */
   agentAutomationGroupOrder?: number
   /** 是否已完成 Onboarding 流程 */
@@ -227,6 +229,8 @@ export interface AppSettings {
   agentThinking?: ThinkingConfig
   /** Agent 推理深度 */
   agentEffort?: AgentEffort
+  /** OpenAI 新会话默认思考深度 */
+  defaultOpenAIThinkingLevel?: AgentThinkingLevel
   /** Agent 最大预算（美元/次） */
   agentMaxBudgetUsd?: number
   /** Agent 最大轮次（0 或 undefined = SDK 默认） */
@@ -265,6 +269,12 @@ export interface AppSettings {
   autoCleanupTempOnStart?: boolean
   /** 自动清理 N 天前已归档会话的 SDK 数据（0 = 禁用，默认 0） */
   autoCleanupArchivedDays?: number
+  /**
+   * Agent 代创建 git commit / PR 时是否附加 Proma 推广标识。
+   * 默认 true：commit trailer `Made-with: Proma`，PR body 末尾含 https://proma.cool 与 https://github.com/proma-ai/Proma。
+   * 关闭后不注入任何 Proma 归因，并覆盖 Claude SDK 默认 Co-Authored-By。
+   */
+  gitAttributionEnabled?: boolean
   /** 主窗口状态（大小、位置、是否最大化） */
   mainWindowState?: MainWindowState
 }
@@ -307,6 +317,8 @@ export const SCRATCH_PAD_IPC_CHANNELS = {
   EXPORT: 'scratch-pad:export',
   /** 打开保存对话框选择导出路径 */
   CHOOSE_EXPORT_PATH: 'scratch-pad:choose-export-path',
+  /** 将图片写入系统剪贴板 */
+  COPY_IMAGE: 'scratch-pad:copy-image',
 } as const
 
 /** 应用图标 IPC 通道 */

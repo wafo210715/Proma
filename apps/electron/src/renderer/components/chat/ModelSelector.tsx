@@ -18,6 +18,11 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
+import {
   conversationsAtom,
   selectedModelAtom,
   channelsAtom,
@@ -28,17 +33,23 @@ import { useConversationModelOptional } from '@/hooks/useConversationSettings'
 import { useConversationIdOptional } from '@/contexts/session-context'
 import { getModelLogo, getChannelLogo, DefaultLogo } from '@/lib/model-logo'
 import { cn } from '@/lib/utils'
-import type { Channel, ModelOption } from '@proma/shared'
+import type { Channel, ModelOption, ProviderType } from '@proma/shared'
 import { ChannelPlanQuotaBadge } from './ChannelPlanQuotaBadge'
 
 /** 从渠道列表构建扁平化的模型选项 */
-export function buildModelOptions(channels: Channel[], filterChannelId?: string, filterChannelIds?: string[]): ModelOption[] {
+export function buildModelOptions(
+  channels: Channel[],
+  filterChannelId?: string,
+  filterChannelIds?: string[],
+  excludedProviders?: readonly ProviderType[],
+): ModelOption[] {
   const options: ModelOption[] = []
 
   for (const channel of channels) {
     if (!channel.enabled) continue
     if (filterChannelId && channel.id !== filterChannelId) continue
     if (filterChannelIds && !filterChannelIds.includes(channel.id)) continue
+    if (excludedProviders?.includes(channel.provider)) continue
 
     for (const model of channel.models) {
       if (!model.enabled) continue
@@ -82,6 +93,8 @@ interface ModelSelectorProps {
   onModelSelect?: (option: ModelOption) => void
   /** 触发按钮是否显示「渠道 · 模型」（默认只显示模型名） */
   showChannelInTrigger?: boolean
+  /** 不在此选择器中显示的供应商（例如 Chat 暂不支持的协议） */
+  excludedProviders?: readonly ProviderType[]
   /** 是否使用全局 modelSelectorOpenAtom 控制打开状态（用于外部拉起，如错误提示按钮） */
   useSharedOpenState?: boolean
 }
@@ -92,6 +105,7 @@ export function ModelSelector({
   externalSelectedModel,
   onModelSelect,
   showChannelInTrigger = false,
+  excludedProviders,
   useSharedOpenState = false,
 }: ModelSelectorProps = {}): React.ReactElement {
   const [conversationModel, setConversationModel] = useConversationModelOptional()
@@ -118,7 +132,10 @@ export function ModelSelector({
     }
   }, [open, setChannels])
 
-  const modelOptions = React.useMemo(() => buildModelOptions(channels, filterChannelId, filterChannelIds), [channels, filterChannelId, filterChannelIds])
+  const modelOptions = React.useMemo(
+    () => buildModelOptions(channels, filterChannelId, filterChannelIds, excludedProviders),
+    [channels, filterChannelId, filterChannelIds, excludedProviders],
+  )
   const grouped = React.useMemo(() => groupByChannel(modelOptions), [modelOptions])
 
   // 搜索过滤
@@ -237,27 +254,32 @@ export function ModelSelector({
   return (
     <>
       {/* 触发按钮 */}
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="model-selector-trigger flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-      >
-        {displayModelInfo ? (
-          <img
-            src={getModelLogo(displayModelInfo.modelId, displayModelInfo.provider)}
-            alt={displayModelInfo.modelName}
-            className="size-4 rounded object-cover"
-          />
-        ) : (
-          <Cpu className="size-3.5" />
-        )}
-        <span className="max-w-[200px] truncate">
-          {displayModelInfo
-            ? (showChannelInTrigger ? `${displayModelInfo.channelName} · ${displayModelInfo.modelName}` : displayModelInfo.modelName)
-            : '选择模型'}
-        </span>
-        <ChevronDown className="size-3" />
-      </button>
+      <Tooltip open={open || !displayModelInfo ? false : undefined}>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            className="model-selector-trigger flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+          >
+            {displayModelInfo ? (
+              <img
+                src={getModelLogo(displayModelInfo.modelId, displayModelInfo.provider)}
+                alt={displayModelInfo.modelName}
+                className="size-4 rounded object-cover"
+              />
+            ) : (
+              <Cpu className="size-3.5" />
+            )}
+            <span className="max-w-[200px] truncate">
+              {displayModelInfo
+                ? (showChannelInTrigger ? `${displayModelInfo.channelName} · ${displayModelInfo.modelName}` : displayModelInfo.modelName)
+                : '选择模型'}
+            </span>
+            <ChevronDown className="size-3" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top">渠道：{displayModelInfo?.channelName}</TooltipContent>
+      </Tooltip>
 
       {/* 模型选择 Dialog */}
       <Dialog open={open} onOpenChange={setOpen}>

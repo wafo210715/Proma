@@ -16,6 +16,11 @@ describe('isTransientNetworkError', () => {
     'network error',
     'stream closed prematurely',
     'premature close',
+    'OpenAI Responses stream ended before a terminal response event',
+    'Anthropic stream ended before message_stop',
+    'peer closed connection',
+    'incomplete chunked read',
+    'peer closed connection without sending complete message body (incomplete chunked read)',
   ])('Given 已知瞬时网络错误 "%s" Then 判定为可重试', (msg) => {
     expect(isTransientNetworkError(msg)).toBe(true)
   })
@@ -43,6 +48,7 @@ describe('isTransientNetworkError', () => {
   test('Given 普通业务错误 Then 不判定为瞬时网络错误', () => {
     expect(isTransientNetworkError('invalid api key')).toBe(false)
     expect(isTransientNetworkError('400 Bad Request: model not found')).toBe(false)
+    expect(isTransientNetworkError('stream ended before an unrelated local marker')).toBe(false)
     expect(isTransientNetworkError()).toBe(false)
   })
 })

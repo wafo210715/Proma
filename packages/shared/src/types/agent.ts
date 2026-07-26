@@ -49,7 +49,7 @@ export type ThinkingConfig =
 export type AgentEffort = 'low' | 'medium' | 'high' | 'max'
 
 /** Agent 思考等级（用于 Pi runtime；Claude runtime 继续使用 ThinkingConfig/AgentEffort） */
-export type AgentThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+export type AgentThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 /** 是否为 Proma 可暴露 reasoning.effort 的 OpenAI 推理模型。 */
 export function isOpenAIReasoningSupportedModel(modelId: string | undefined): boolean {
@@ -58,6 +58,12 @@ export function isOpenAIReasoningSupportedModel(modelId: string | undefined): bo
   // reasoning.effort，必须在 UI 层与请求层共同排除。
   if (normalized.endsWith('-chat-latest')) return false
   return normalized.startsWith('gpt-5') || /^(o1|o3|o4)(?:-|$)/.test(normalized)
+}
+
+/** GPT-5.6 系列支持 Pi/OpenAI 的 max 思考等级。 */
+export function isOpenAIReasoningMaxSupportedModel(modelId: string | undefined): boolean {
+  const normalized = modelId?.toLowerCase() ?? ''
+  return /^gpt-5\.6(?:-|$)/.test(normalized) && isOpenAIReasoningSupportedModel(modelId)
 }
 
 /** 支持 ChatGPT Codex Fast Mode（priority service tier）的模型。 */
@@ -244,6 +250,8 @@ export interface SDKResultMessage {
   modelUsage?: Record<string, { contextWindow?: number }>
   errors?: string[]
   terminal_reason?: string
+  /** Pi 手动压缩用于收束流的内部 result，不代表真实模型 usage */
+  isSyntheticCompactionResult?: boolean
   background_tasks?: SDKBackgroundTaskSummary[]
   session_crons?: SDKSessionCronSummary[]
   session_id?: string
@@ -267,9 +275,11 @@ export interface SDKSystemMessage {
   tool_use_id?: string
   status?: string
   /** SDK status: 上下文压缩结果 */
-  compact_result?: 'success' | 'failed'
+  compact_result?: 'success' | 'failed' | 'noop'
   /** SDK status: 上下文压缩失败原因 */
   compact_error?: string
+  /** Pi 手动压缩后的上下文 token 预估值 */
+  compactionEstimatedTokensAfter?: number
   summary?: string
   output_file?: string
   last_tool_name?: string
@@ -533,7 +543,13 @@ export type AgentEvent =
   | { type: 'usage_update'; usage: AgentEventUsage }
   // 上下文压缩
   | { type: 'compacting' }
-  | { type: 'compact_complete' }
+  | {
+    type: 'compact_complete'
+    status: 'success' | 'noop' | 'failed'
+    summary?: string
+    message?: string
+    estimatedTokensAfter?: number
+  }
   // 权限请求
   | { type: 'permission_request'; request: PermissionRequest }
   | { type: 'permission_resolved'; requestId: string; behavior: 'allow' | 'deny' }
@@ -619,6 +635,8 @@ export interface AgentSessionMeta {
   workspaceId?: string
   /** 是否置顶 */
   pinned?: boolean
+  /** 是否已星标（仅用于侧栏快速识别，不影响排序或置顶） */
+  starred?: boolean
   /** 是否已归档 */
   archived?: boolean
   /** 附加的外部目录路径列表（绝对路径，作为 SDK additionalDirectories 传递） */
@@ -971,6 +989,8 @@ export interface AgentSendInput {
   mentionedSessionIds?: string[]
   /** 渲染进程生成的流式开始时间戳，主进程原样回传到 STREAM_COMPLETE，确保竞态保护比较的是同一个值 */
   startedAt?: number
+  /** 用户点击错误消息的重试时，指向本轮开始前应删除的错误 UUID。 */
+  retryOfErrorUuid?: string
   /** 触发来源：用户手动、定时任务、父 Agent 委派（用于 UI 区分标记） */
   triggeredBy?: 'user' | 'automation' | 'delegation'
   /** 定时任务执行上下文（注入到系统提示词，用户不可见） */
@@ -1101,6 +1121,8 @@ export interface AgentStreamEvent {
  */
 export interface AgentStreamCompletePayload {
   sessionId: string
+  /** 触发来源：用于区分顶层会话与父 Agent 委派的子会话完成 */
+  triggeredBy?: AgentSendInput['triggeredBy']
   /** 已持久化的完整消息列表 */
   messages?: AgentMessage[]
   /** 是否由用户手动中止 */
@@ -1422,6 +1444,8 @@ export const AGENT_IPC_CHANNELS = {
   MIGRATE_CHAT_TO_AGENT: 'agent:migrate-chat-to-agent',
   /** 切换会话置顶状态 */
   TOGGLE_PIN: 'agent:toggle-pin',
+  /** 切换会话星标状态 */
+  TOGGLE_STAR: 'agent:toggle-star',
   /** 清除会话完成状态（兼容清除旧版 manualWorking）。channel 值保留旧名以兼容已缓存的 preload */
   CLEAR_COMPLETION_STATE: 'agent:confirm-working-done',
   /** 切换会话归档状态 */
@@ -1576,6 +1600,8 @@ export const AGENT_IPC_CHANNELS = {
   OPEN_FILE: 'agent:open-file',
   /** 在系统文件管理器中显示文件 */
   SHOW_IN_FOLDER: 'agent:show-in-folder',
+  /** 使用系统终端打开文件夹 */
+  OPEN_FOLDER_IN_TERMINAL: 'agent:open-folder-in-terminal',
   /** 重命名文件/目录 */
   RENAME_FILE: 'agent:rename-file',
   /** 移动文件/目录到目标目录 */

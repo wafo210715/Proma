@@ -17,6 +17,7 @@ export type ProviderType =
   | 'google'
   | 'kimi-api'
   | 'kimi-coding'
+  | 'opencode-go-openai'
   | 'zhipu'
   | 'zhipu-coding'
   | 'zhipu-coding-team'
@@ -25,6 +26,7 @@ export type ProviderType =
   | 'doubao'
   | 'qwen'
   | 'qwen-anthropic'
+  | 'qwen-token-plan'
   | 'xiaomi'
   | 'xiaomi-token-plan'
   | 'openai-codex'
@@ -48,6 +50,7 @@ export const PROVIDER_DEFAULT_URLS: Record<ProviderType, string> = {
   google: 'https://generativelanguage.googleapis.com',
   'kimi-api': 'https://api.moonshot.cn/anthropic',
   'kimi-coding': 'https://api.kimi.com/coding/v1',
+  'opencode-go-openai': 'https://opencode.ai/zen/go/v1',
   zhipu: 'https://open.bigmodel.cn/api/paas/v4',
   'zhipu-coding': 'https://open.bigmodel.cn/api/anthropic',
   'zhipu-coding-team': 'https://open.bigmodel.cn/api/anthropic',
@@ -56,6 +59,8 @@ export const PROVIDER_DEFAULT_URLS: Record<ProviderType, string> = {
   doubao: 'https://ark.cn-beijing.volces.com/api/v3',
   qwen: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
   'qwen-anthropic': 'https://dashscope.aliyuncs.com/apps/anthropic',
+  // Token Plan Anthropic endpoint is provided as a complete messages URL.
+  'qwen-token-plan': 'https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic/v1/messages',
   xiaomi: 'https://api.xiaomimimo.com/anthropic',
   'xiaomi-token-plan': 'https://token-plan-cn.xiaomimimo.com/anthropic',
   // ChatGPT 订阅登录：baseUrl 由 Pi SDK 内部管理（登录后从 OAuth token 派生），无需用户填写。
@@ -75,6 +80,7 @@ export const PROVIDER_LABELS: Record<ProviderType, string> = {
   google: 'Google',
   'kimi-api': 'Kimi API (Anthropic 协议)',
   'kimi-coding': 'Kimi Coding Plan',
+  'opencode-go-openai': 'OpenCode Go (OpenAI 协议)',
   zhipu: '智谱 AI',
   'zhipu-coding': '智谱 Coding Plan',
   'zhipu-coding-team': '智谱 Coding Plan 团队版',
@@ -83,6 +89,7 @@ export const PROVIDER_LABELS: Record<ProviderType, string> = {
   doubao: '豆包',
   qwen: '通义千问',
   'qwen-anthropic': '通义千问 (Anthropic 协议)',
+  'qwen-token-plan': '通义千问 Token Plan',
   xiaomi: '小米 MiMo (API)',
   'xiaomi-token-plan': '小米 MiMo Token Plan',
   'openai-codex': 'ChatGPT 订阅 (Codex)',
@@ -108,6 +115,7 @@ export const AGENT_COMPATIBLE_PROVIDERS: ReadonlySet<ProviderType> = new Set<Pro
   'xiaomi',
   'xiaomi-token-plan',
   'qwen-anthropic',
+  'qwen-token-plan',
 ])
 
 /**

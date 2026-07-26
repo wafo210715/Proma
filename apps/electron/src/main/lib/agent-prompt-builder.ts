@@ -15,6 +15,8 @@ import { join } from 'node:path'
 import { getUserProfile } from './user-profile-service'
 import { getWorkspaceMcpConfig } from './agent-workspace-manager'
 import { getConfigDirName } from './config-paths'
+import { buildGitAttributionPromptSection, isGitAttributionEnabled } from './agent-git-attribution'
+import { getSettings } from './settings-service'
 
 // ===== 工具使用指南（可复用常量） =====
 
@@ -90,7 +92,8 @@ export function buildSystemPrompt(ctx: SystemPromptContext): string {
 - 调用 \`write\` 时必须在同一次调用中同时提供 \`path\` 和完整的字符串 \`content\`；不要只提供路径。需要创建空文件时显式传入 \`content: ""\`
 - 遵循本提示词中的工作区、权限、计划模式、Context 和知识维护规则
 - 不要假设当前处于 Claude Code CLI 原生运行环境，也不要依赖只存在于 Claude runtime 的内置配置
-- 当 Proma 提供附加目录时，可以按提示中的绝对路径直接访问这些用户授权范围`)
+- 当 Proma 提供附加目录时，可以按提示中的绝对路径直接访问这些用户授权范围
+- **默认直接执行**：工具调用不是向用户索要许可。目标已足够明确时，立即用工具推进；不要因低风险、可验证或可回滚的操作反复请求确认。完成后报告结果与关键假设。`)
   }
 
   // 工具使用指南（复用常量）
@@ -153,15 +156,14 @@ Proma 提供内置 \`collaboration\` 工具，用来创建真实可见、可追�
 - 新会话开始时，**两个目录都要检查**以恢复完整上下文`)
   }
 
-  // 不确定性处理策略
-  sections.push(`## 不确定性处理
+  // 自主执行与最小澄清策略
+  sections.push(`## 自主执行与澄清
 
-**遇到不确定的部分时，站在用户角度多想一步，把可选方案梳理完善再交给用户判断：**
-- 把你能想到的选项列清楚，每个选项附带简短说明（利弊、适用场景），降低用户决策成本
-- 问题较多或方向差异较大时，拆分成几个独立的小问题分别抛给用户，不要一次性堆一大段
-- 抛出选择后耐心等待用户反馈再继续，不要在没有确认的情况下擅自替用户拍板
-- 特别是在触发 brainstorming / 头脑风暴类 Skill 时，通过逐步提问引导用户明确需求和方向，而非让用户自己大段输入
-- 发现用户的假设或判断可能有误时，主动指出并提供依据，不要盲目附和`)
+默认直接行动：目标足够明确时，基于现有代码、上下文和项目惯例选择合理默认并立即执行；不要为常规实现细节、工具选择或低风险可逆操作请求确认。完成后说明结果与关键假设。
+
+仅当答案会实质改变下一步、且无法合理推断时才提问；一次只问一个阻塞问题。只有不可逆数据操作、外部发布/发送、付费消耗、权限或安全边界变更等高风险操作需要事前确认；用户已明确授权时不重复确认。
+
+不确定不等于停止：先完成低风险调研和可逆准备。仅在产品目标、受众或成功标准未明确、且存在重大方向分歧时，才采用 brainstorming 式澄清；明确的功能需求直接实施。`)
 
   // 计划模式指令（始终注入计划文件路径规则）
   if (ctx.permissionMode === 'plan') {
@@ -225,6 +227,10 @@ Skills 用来固化可复用的流程、决策树和 SOP（"以后遇到类似�
 | 执行计划 | → 写入 .context/plan/ 目录 |
 
 维护这些长期文件前，先按需搜索当前会话、会话级 Context、工作区级 Context、CLAUDE.md、auto memory 索引和 Skills 元数据；涉及长期副作用时，优先提出简短维护建议，让用户知道会改哪里、为什么改、下次会怎样。`)
+
+  // Git / PR 推广标识（默认开启，设置可关）
+  const gitAttributionEnabled = isGitAttributionEnabled(getSettings().gitAttributionEnabled)
+  sections.push(buildGitAttributionPromptSection(gitAttributionEnabled))
 
   // 交互规范
   sections.push(`## 交互规范

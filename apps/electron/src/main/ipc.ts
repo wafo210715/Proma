@@ -4,7 +4,7 @@
  * 负责注册主进程和渲染进程之间的通信处理器
  */
 
-import { ipcMain, nativeTheme, shell, dialog, BrowserWindow, app } from 'electron'
+import { ipcMain, nativeTheme, shell, dialog, BrowserWindow, app, clipboard, nativeImage } from 'electron'
 import { join, resolve, sep, dirname } from 'node:path'
 import { existsSync, realpathSync, rmSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
@@ -1663,6 +1663,27 @@ export function registerIpcHandlers(): void {
     }
   )
 
+  // 将图片 data URL 写入系统剪贴板
+  ipcMain.handle(
+    SCRATCH_PAD_IPC_CHANNELS.COPY_IMAGE,
+    async (_, dataUrl: string): Promise<{ success: boolean; message?: string }> => {
+      try {
+        if (!dataUrl || typeof dataUrl !== 'string') {
+          return { success: false, message: '无效的图片数据' }
+        }
+        const img = nativeImage.createFromDataURL(dataUrl)
+        if (img.isEmpty()) {
+          return { success: false, message: '该格式图片暂不支持复制' }
+        }
+        clipboard.writeImage(img)
+        return { success: true }
+      } catch (err) {
+        console.error('[ScratchPad] 复制图片到剪贴板失败:', err)
+        return { success: false, message: '复制失败' }
+      }
+    }
+  )
+
   // ===== 应用图标切换 =====
 
   ipcMain.handle(
@@ -1808,7 +1829,7 @@ export function registerIpcHandlers(): void {
       if (agentRuntime !== undefined && !isAgentRuntime(agentRuntime)) {
         throw new Error(`不支持的 Agent Runtime: ${String(agentRuntime)}`)
       }
-      const session = createAgentSession(title, channelId, workspaceId, modelId, agentRuntime ?? getSettings().agentRuntime ?? 'claude')
+      const session = createAgentSession(title, channelId, workspaceId, modelId, agentRuntime ?? getSettings().agentRuntime ?? 'pi')
       feishuBridgeManager.ensureSessionMirror(session).catch((error) => {
         console.error('[飞书 Session 镜像] 新会话建群失败:', error)
       })
@@ -1888,6 +1909,17 @@ export function registerIpcHandlers(): void {
         updates.archived = false
       }
       return updateAgentSessionMeta(id, updates)
+    }
+  )
+
+  // 切换 Agent 会话星标状态
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.TOGGLE_STAR,
+    async (_, id: string): Promise<AgentSessionMeta> => {
+      const sessions = listAgentSessions()
+      const current = sessions.find((s) => s.id === id)
+      if (!current) throw new Error(`Agent session not found: ${id}`)
+      return updateAgentSessionMeta(id, { starred: !current.starred })
     }
   )
 
@@ -2403,7 +2435,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.UPDATE_SESSION_OPENAI_REASONING,
     async (_, sessionId: string, thinkingLevel: AgentThinkingLevel): Promise<AgentSessionMeta> => {
-      const validThinkingLevels: AgentThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh']
+      const validThinkingLevels: AgentThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
       if (!validThinkingLevels.includes(thinkingLevel)) {
         throw new Error(`无效的 Codex 思考深度: ${String(thinkingLevel)}`)
       }
@@ -2974,6 +3006,34 @@ export function registerIpcHandlers(): void {
       }
 
       shell.showItemInFolder(safePath)
+    }
+  )
+
+  // 使用 macOS 系统 Terminal 在指定工作目录打开会话/工作区文件夹
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.OPEN_FOLDER_IN_TERMINAL,
+    async (_, folderPath: string): Promise<void> => {
+      if (process.platform !== 'darwin') {
+        throw new Error('当前仅支持在 macOS 终端中打开文件夹')
+      }
+      if (!isPathAllowed(folderPath)) {
+        throw new Error('访问路径超出 Agent 工作区范围')
+      }
+
+      const safePath = realpathSync(resolve(folderPath))
+      if (!statSync(safePath).isDirectory()) {
+        throw new Error('只能在终端中打开文件夹')
+      }
+
+      const { spawn } = await import('node:child_process')
+      await new Promise<void>((resolvePromise, reject) => {
+        const child = spawn('open', ['-a', 'Terminal', safePath], { detached: true, stdio: 'ignore' })
+        child.once('error', reject)
+        child.once('spawn', () => {
+          child.unref()
+          resolvePromise()
+        })
+      })
     }
   )
 
@@ -4439,7 +4499,8 @@ export function registerIpcHandlers(): void {
     input: Partial<CreateAutomationInput | UpdateAutomationInput>,
     existing?: Automation,
   ): void => {
-    const finalRuntime: AgentRuntime = input.agentRuntime ?? existing?.agentRuntime ?? 'claude'
+    // 更新历史任务时，缺失的持久化 runtime 仍按 Claude 解释；仅新建任务使用 Pi 默认值。
+    const finalRuntime: AgentRuntime = input.agentRuntime ?? existing?.agentRuntime ?? (existing ? 'claude' : 'pi')
     const finalChannelId = input.channelId !== undefined ? input.channelId : existing?.channelId
     if (finalRuntime === 'claude' && finalChannelId) {
       const agentChannelIds = getSettings().agentChannelIds ?? []

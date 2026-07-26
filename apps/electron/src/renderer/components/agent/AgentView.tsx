@@ -17,7 +17,7 @@ import * as React from 'react'
 import { unstable_batchedUpdates } from 'react-dom'
 import { useAtom, useAtomValue, useSetAtom, useStore } from 'jotai'
 import { toast } from 'sonner'
-import { Box, CornerDownLeft, Square, Settings, Paperclip, FolderPlus, X, Copy, Check, Brain, Sparkles, Eye, ChevronDown } from 'lucide-react'
+import { Box, CornerDownLeft, Square, Settings, Paperclip, FolderPlus, X, Copy, Check, Brain, Sparkles, ChevronDown } from 'lucide-react'
 import { AgentMessages } from './AgentMessages'
 import { AgentHeader } from './AgentHeader'
 import { AgentMessageQueue } from './AgentMessageQueue'
@@ -103,7 +103,6 @@ import {
   allPendingPermissionRequestsAtom,
   allPendingExitPlanRequestsAtom,
   finalizeStreamingActivities,
-  agentProcessGroupsKeepExpandedAtom,
 } from '@/atoms/agent-atoms'
 import type { AgentContextStatus } from '@/atoms/agent-atoms'
 import { settingsOpenAtom } from '@/atoms/settings-tab'
@@ -118,7 +117,7 @@ import { draftSessionIdsAtom } from '@/atoms/draft-session-atoms'
 import { sendWithCmdEnterAtom } from '@/atoms/shortcut-atoms'
 import { useOpenPreview } from '@/components/diff/preview-opener'
 import type { AgentRuntime, AgentSendInput, AgentPendingFile, AgentThinkingLevel, FileDialogLargeFile, ModelOption, SDKMessage, SDKUserMessage, ProviderType } from '@proma/shared'
-import { inferAgentSdkContextWindow, inferContextWindow, isCodexFastModeSupportedModel, isOpenAIReasoningSupportedModel, MAX_ATTACHMENT_SIZE } from '@proma/shared'
+import { inferAgentSdkContextWindow, inferContextWindow, isCodexFastModeSupportedModel, isOpenAIReasoningMaxSupportedModel, isOpenAIReasoningSupportedModel, MAX_ATTACHMENT_SIZE } from '@proma/shared'
 import { fileToBase64, formatFileNames, getFileParentPath } from '@/lib/file-utils'
 import { buildQuotedSelectionBlock } from '@/lib/quoted-selection'
 import { createClipboardPendingFile, createClipboardTextDraft, makeUniqueAttachmentName } from '@/lib/clipboard-text-attachment'
@@ -173,8 +172,10 @@ function resolveRunContextWindow(
 
 interface SDKMessageRecord {
   type?: string
+  uuid?: string
   parent_tool_use_id?: string | null
   isSynthetic?: boolean
+  error?: unknown
   message?: {
     content?: unknown
   }
@@ -201,6 +202,15 @@ function getUserTextFromSDKMessage(message: SDKMessage): string | null {
   return texts.length > 0 ? texts.join('\n') : null
 }
 
+function removeRetriedErrorSDKMessage(messages: SDKMessage[], errorUuid: string | undefined): SDKMessage[] {
+  if (!errorUuid) return messages
+  const next = messages.filter((message) => {
+    const record = message as unknown as SDKMessageRecord
+    return !(record.type === 'assistant' && record.uuid === errorUuid && record.error !== undefined && record.error !== null)
+  })
+  return next.length === messages.length ? messages : next
+}
+
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -213,23 +223,31 @@ function isStaleAgentQueueError(error: unknown): boolean {
 
 // ===== 思考模式 Hover Popover =====
 
-const CODEX_THINKING_LEVELS = ['off', 'low', 'medium', 'high', 'xhigh'] as const satisfies readonly AgentThinkingLevel[]
-type OpenAIThinkingLevel = (typeof CODEX_THINKING_LEVELS)[number]
-const CODEX_THINKING_LABELS: Record<OpenAIThinkingLevel, string> = {
+const OPENAI_THINKING_LEVELS = ['off', 'low', 'medium', 'high', 'xhigh', 'max'] as const satisfies readonly AgentThinkingLevel[]
+const OPENAI_STANDARD_THINKING_LEVELS = OPENAI_THINKING_LEVELS.slice(0, -1)
+type OpenAIThinkingLevel = (typeof OPENAI_THINKING_LEVELS)[number]
+const OPENAI_THINKING_LABELS: Record<OpenAIThinkingLevel, string> = {
   off: '关闭',
   low: '低',
   medium: '中',
   high: '高',
   xhigh: '极高',
+  max: '最大',
 }
 
-function normalizeOpenAIThinkingLevel(level: AgentThinkingLevel | undefined): OpenAIThinkingLevel {
+function normalizeOpenAIThinkingLevel(
+  level: AgentThinkingLevel | undefined,
+  levels: readonly OpenAIThinkingLevel[],
+): OpenAIThinkingLevel {
   if (level === 'minimal') return 'low'
-  return CODEX_THINKING_LEVELS.includes(level as OpenAIThinkingLevel) ? level as OpenAIThinkingLevel : 'off'
+  // max 会话设置在切到非 GPT-5.6 时由主进程降级为 xhigh；UI 同步展示有效档位。
+  if (level === 'max' && !levels.includes('max')) return 'xhigh'
+  return levels.includes(level as OpenAIThinkingLevel) ? level as OpenAIThinkingLevel : 'off'
 }
 
 interface CodexThinkingConfig {
   thinkingLevel: AgentThinkingLevel
+  levels: readonly OpenAIThinkingLevel[]
   disabled: boolean
   onThinkingLevelChange: (level: AgentThinkingLevel) => void
 }
@@ -245,9 +263,10 @@ function AgentThinkingPopover({ agentThinking, onToggle, codexConfig }: AgentThi
   const [open, setOpen] = React.useState(false)
   const hoverTimeout = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   const isCodex = Boolean(codexConfig)
-  const normalizedLevel = normalizeOpenAIThinkingLevel(codexConfig?.thinkingLevel)
+  const thinkingLevels = codexConfig?.levels ?? OPENAI_STANDARD_THINKING_LEVELS
+  const normalizedLevel = normalizeOpenAIThinkingLevel(codexConfig?.thinkingLevel, thinkingLevels)
   const isEnabled = isCodex ? normalizedLevel !== 'off' : agentThinking?.type === 'adaptive'
-  const sliderPosition = CODEX_THINKING_LEVELS.indexOf(normalizedLevel)
+  const sliderPosition = thinkingLevels.indexOf(normalizedLevel)
 
   const handleMouseEnter = React.useCallback(() => {
     if (hoverTimeout.current) clearTimeout(hoverTimeout.current)
@@ -304,20 +323,20 @@ function AgentThinkingPopover({ agentThinking, onToggle, codexConfig }: AgentThi
                 <div className="flex items-center justify-between gap-4">
                   <span className="text-xs font-medium text-foreground/80">思考深度</span>
                   <span className="text-xs tabular-nums text-muted-foreground">
-                    {CODEX_THINKING_LABELS[normalizedLevel]}
+                    {OPENAI_THINKING_LABELS[normalizedLevel]}
                   </span>
                 </div>
                 <Slider
                   value={[sliderPosition]}
-                  onValueChange={([position]) => codexConfig.onThinkingLevelChange(CODEX_THINKING_LEVELS[position!]!)}
+                  onValueChange={([position]) => codexConfig.onThinkingLevelChange(thinkingLevels[position!]!)}
                   min={0}
-                  max={CODEX_THINKING_LEVELS.length - 1}
+                  max={thinkingLevels.length - 1}
                   step={1}
                   disabled={codexConfig.disabled}
                   aria-label="OpenAI 思考深度"
                 />
                 <div className="flex justify-between text-[10px] text-muted-foreground">
-                  {CODEX_THINKING_LEVELS.map((level) => <span key={level}>{CODEX_THINKING_LABELS[level]}</span>)}
+                  {thinkingLevels.map((level) => <span key={level}>{OPENAI_THINKING_LABELS[level]}</span>)}
                 </div>
               </div>
             </>
@@ -616,6 +635,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     isCompacting: streamState?.isCompacting ?? false,
     inputTokens: streamState?.inputTokens,
     contextWindow: streamState?.contextWindow,
+    contextUsageIsEstimated: streamState?.contextUsageIsEstimated,
   }
   const setAgentStreamErrors = useSetAtom(agentStreamErrorsAtom)
   const streamErrors = useAtomValue(agentStreamErrorsAtom)
@@ -735,8 +755,11 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
   const codexFastModeEnabled = isCodexFastModeAvailable && sessionMeta?.codexFastMode === true
   const isOpenAIThinkingAvailable = hasSessionMeta
     && sessionAgentRuntime === 'pi'
-    && (agentChannelProvider === 'openai-codex' || agentChannelProvider === 'openai-responses')
+    && (agentChannelProvider === 'openai-codex' || agentChannelProvider === 'openai-responses' || agentChannelProvider === 'openai' || agentChannelProvider === 'custom')
     && isOpenAIReasoningSupportedModel(agentModelId ?? undefined)
+  const openAIThinkingLevels = isOpenAIReasoningMaxSupportedModel(agentModelId ?? undefined)
+    ? OPENAI_THINKING_LEVELS
+    : OPENAI_STANDARD_THINKING_LEVELS
   const fallbackOpenAIThinkingLevel: AgentThinkingLevel = agentEffort === 'max'
     ? 'xhigh'
     : agentEffort ?? (agentThinking?.type === 'adaptive' ? 'high' : 'off')
@@ -1160,15 +1183,18 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
                 cacheReadTokens: state.cacheReadTokens,
                 cacheCreationTokens: state.cacheCreationTokens,
                 contextWindow: state.contextWindow,
+                contextUsageIsEstimated: state.contextUsageIsEstimated,
                 model: state.model,
+                contextCompaction: state.contextCompaction,
               })
-            } else if (state.backgroundWaiting) {
-              // 无 usage 数据但处于软空闲：保留标志，清空展示字段
+            } else if (state.backgroundWaiting || state.contextCompaction) {
+              // 无 usage 数据但处于软空闲或有待展示的压缩终态时，保留必要状态。
               map.set(sessionId, {
                 running: false,
-                backgroundWaiting: true,
+                backgroundWaiting: state.backgroundWaiting,
                 content: '',
                 toolActivities: [],
+                contextCompaction: state.contextCompaction,
               })
             } else {
               map.delete(sessionId)
@@ -1953,6 +1979,13 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     try {
       const updated = await window.electronAPI.updateSessionOpenAIThinkingLevel(sessionId, thinkingLevel)
       setAgentSessions((prev) => prev.map((item) => item.id === sessionId ? updated : item))
+
+      try {
+        await window.electronAPI.updateSettings({ defaultOpenAIThinkingLevel: thinkingLevel })
+      } catch (error) {
+        console.error('[AgentView] 保存 OpenAI 默认思考深度失败:', error)
+        toast.error('默认思考深度保存失败', { description: getErrorMessage(error) })
+      }
     } catch (error) {
       console.error('[AgentView] 更新 OpenAI 思考深度失败:', error)
       setAgentSessions((prev) => prev.map((item) => item.id === sessionId ? previousSessionMeta : item))
@@ -2309,7 +2342,14 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         model: agentModelId || undefined,
         startedAt: streamStartedAt,
       }
-      map.set(sessionId, { ...current, running: true, startedAt: streamStartedAt, isCompacting: true, compactInFlight: true })
+      map.set(sessionId, {
+        ...current,
+        running: true,
+        startedAt: streamStartedAt,
+        isCompacting: true,
+        compactInFlight: true,
+        contextCompaction: { status: 'running' },
+      })
       return map
     })
 
@@ -2357,7 +2397,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
   }, [agentError])
 
   /** 重试：在当前会话中重新发送最后一条用户消息 */
-  const handleRetry = React.useCallback((): void => {
+  const handleRetry = React.useCallback((retryOfErrorUuid?: string): void => {
     if (!agentChannelId || streaming) return
 
     // 找到最后一条用户消息
@@ -2366,6 +2406,15 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       .map(getUserTextFromSDKMessage)
       .find((text): text is string => text !== null)
     if (!lastUserMessage) return
+
+    // 与主进程按 UUID 的原子删除同步更新当前 React 状态和 LRU cache，避免旧错误
+    // 在下一轮回复开始前仍被页面渲染。旧会话没有 UUID 时保留历史，由主进程幂等处理。
+    const messagesAfterCleanup = removeRetriedErrorSDKMessage(persistedSDKMessages, retryOfErrorUuid)
+    if (messagesAfterCleanup !== persistedSDKMessages) {
+      persistedSDKMessagesRef.current = messagesAfterCleanup
+      setPersistedSDKMessages(messagesAfterCleanup)
+      setMessagesCache((prev) => setSessionMessagesCache(prev, sessionId, messagesAfterCleanup))
+    }
 
     // 清除错误状态
     setAgentStreamErrors((prev) => {
@@ -2401,8 +2450,9 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       workspaceId: currentWorkspaceId || undefined,
       startedAt: streamStartedAt,
       permissionModeOverride: permissionMode,
+      ...(retryOfErrorUuid && { retryOfErrorUuid }),
     }).catch(console.error)
-  }, [persistedSDKMessages, sessionId, agentChannelId, agentModelId, sessionAgentRuntime, agentChannelProvider, currentWorkspaceId, streaming, setAgentStreamErrors, setStreamingStates, permissionMode])
+  }, [persistedSDKMessages, sessionId, agentChannelId, agentModelId, sessionAgentRuntime, agentChannelProvider, currentWorkspaceId, streaming, setAgentStreamErrors, setStreamingStates, setMessagesCache, permissionMode])
 
   /** 在新对话继续：创建新会话 + 切换 tab + 使用 &session 引用旧会话 */
   const handleRetryInNewSession = React.useCallback(async (): Promise<void> => {
@@ -2666,7 +2716,6 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
 
   // ===== 预览面板状态（toggle 快捷键，分屏布局在 MainArea） =====
   const setPreviewOpenMap = useSetAtom(previewPanelOpenMapAtom)
-  const [processGroupsKeepExpanded, setProcessGroupsKeepExpanded] = useAtom(agentProcessGroupsKeepExpandedAtom)
 
   const togglePreviewPanel = React.useCallback(() => {
     setPreviewOpenMap((prev) => {
@@ -2743,6 +2792,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
           }}
           codexConfig={isOpenAIThinkingAvailable ? {
             thinkingLevel: openAIThinkingLevel,
+            levels: openAIThinkingLevels,
             disabled: streaming || backgroundWaiting,
             onThinkingLevelChange: (level) => { void updateOpenAIThinkingLevel(level) },
           } : undefined}
@@ -2801,21 +2851,13 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
           cacheReadTokens={contextStatus.cacheReadTokens}
           cacheCreationTokens={contextStatus.cacheCreationTokens}
           contextWindow={contextStatus.contextWindow}
+          isEstimated={contextStatus.contextUsageIsEstimated === true}
           isCompacting={contextStatus.isCompacting}
           isProcessing={streaming}
           sessionId={sessionId}
           channelId={planQuotaChannelId}
           channelUpdatedAt={planQuotaChannelUpdatedAt}
           onCompact={handleCompact}
-        />
-      ),
-    },
-    {
-      key: 'display-options',
-      node: (
-        <DisplayOptionsPopover
-          processGroupsKeepExpanded={processGroupsKeepExpanded}
-          onProcessGroupsKeepExpandedChange={setProcessGroupsKeepExpanded}
         />
       ),
     },
@@ -2829,6 +2871,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     handleCodexFastModeChange,
     isOpenAIThinkingAvailable,
     openAIThinkingLevel,
+    openAIThinkingLevels,
     updateOpenAIThinkingLevel,
     agentModelId,
     handleModelSelect,
@@ -2848,8 +2891,6 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     contextStatus.isCompacting,
     streaming,
     handleCompact,
-    processGroupsKeepExpanded,
-    setProcessGroupsKeepExpanded,
   ])
 
   const inputTrailingNode = streaming && !hasTextInput ? (

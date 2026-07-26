@@ -361,6 +361,9 @@ export interface ElectronAPI {
   /** 打开原生保存对话框，返回用户选择的路径 */
   chooseExportPath: (defaultName: string) => Promise<string | null>
 
+  /** 将图片 data URL 写入系统剪贴板 */
+  copyImageToClipboard: (dataUrl: string) => Promise<{ success: boolean; message?: string }>
+
   // ===== 应用图标切换 =====
 
   /** 设置应用图标变体（传入 variant ID，如 'blue'、'cyberpunk'，'default' 恢复默认） */
@@ -455,6 +458,9 @@ export interface ElectronAPI {
 
   /** 切换 Agent 会话置顶状态 */
   togglePinAgentSession: (id: string) => Promise<AgentSessionMeta>
+
+  /** 切换 Agent 会话星标状态 */
+  toggleStarAgentSession: (id: string) => Promise<AgentSessionMeta>
 
   /** 清除 Agent 会话完成状态（兼容清除旧版 manualWorking） */
   clearAgentCompletionState: (id: string) => Promise<AgentSessionMeta>
@@ -736,6 +742,9 @@ export interface ElectronAPI {
 
   /** 在系统文件管理器中显示文件 */
   showInFolder: (filePath: string) => Promise<void>
+
+  /** 使用系统终端打开文件夹 */
+  openFolderInTerminal: (folderPath: string) => Promise<void>
 
   /** 在系统文件管理器中显示文件（无工作区限制，支持候选基础目录） */
   showItemInFolder: (filePath: string, candidateBasePaths?: string[]) => Promise<boolean>
@@ -1373,6 +1382,10 @@ const electronAPI: ElectronAPI = {
     return ipcRenderer.invoke(SCRATCH_PAD_IPC_CHANNELS.CHOOSE_EXPORT_PATH, defaultName)
   },
 
+  copyImageToClipboard: (dataUrl: string) => {
+    return ipcRenderer.invoke(SCRATCH_PAD_IPC_CHANNELS.COPY_IMAGE, dataUrl)
+  },
+
   // 应用图标切换
   setAppIcon: (variantId: string) => {
     return ipcRenderer.invoke(APP_ICON_IPC_CHANNELS.SET, variantId)
@@ -1494,6 +1507,10 @@ const electronAPI: ElectronAPI = {
 
   togglePinAgentSession: (id: string) => {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.TOGGLE_PIN, id)
+  },
+
+  toggleStarAgentSession: (id: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.TOGGLE_STAR, id)
   },
 
   clearAgentCompletionState: (id: string) => {
@@ -1899,6 +1916,10 @@ const electronAPI: ElectronAPI = {
 
   showInFolder: (filePath: string) => {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.SHOW_IN_FOLDER, filePath)
+  },
+
+  openFolderInTerminal: (folderPath: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.OPEN_FOLDER_IN_TERMINAL, folderPath)
   },
 
   /** 在系统文件管理器中显示文件（无工作区限制，支持候选基础目录） */
