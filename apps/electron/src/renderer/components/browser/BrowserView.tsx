@@ -183,10 +183,20 @@ function BrowserCore({ variant, onClose }: BrowserCoreProps): React.ReactElement
   // ===== 截图 =====
   // 必须用 webview 自己的 capturePage：webview 是独立 guest webContents，
   // 主窗口 webContents.capturePage() 在 webview 区域只会得到空白
+  // 父容器引用：截图时需要读取实际渲染尺寸
+  const viewportRef = React.useRef<HTMLDivElement>(null)
+
   const handleScreenshot = React.useCallback(async (): Promise<void> => {
     if (!webviewEl) return
     try {
-      const image = await webviewEl.capturePage()
+      // capturePage(rect) 截取 guest webContents 的指定区域（CSS 像素）。
+      // 不带 rect 时截的是整个页面内容（对 Google 首页只有 ~300px），
+      // 带 rect 才能截到 webview 可视区域的完整高度。
+      const vp = viewportRef.current
+      const rect = vp
+        ? { x: 0, y: 0, width: vp.clientWidth, height: vp.clientHeight }
+        : undefined
+      const image = await webviewEl.capturePage(rect)
       const dataUrl = image.toDataURL()
       if (!dataUrl || dataUrl.length < 100) {
         toast.error('截图为空，页面可能尚未渲染完成')
@@ -261,7 +271,7 @@ function BrowserCore({ variant, onClose }: BrowserCoreProps): React.ReactElement
       </div>
 
       {/* webview 容器 */}
-      <div className="relative min-h-0 flex-1 overflow-hidden" onContextMenu={handleContextMenu}>
+      <div ref={viewportRef} className="relative min-h-0 flex-1 overflow-hidden" onContextMenu={handleContextMenu}>
         {!loaded || initialSrcRef.current === null ? (
           <div className="flex h-full items-center justify-center text-sm text-muted-foreground/40">
             <Loader2 className="mr-2 size-4 animate-spin" />

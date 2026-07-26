@@ -1,0 +1,323 @@
+/**
+ * Canvas 纯逻辑工具
+ *
+ * 采用 JSON Canvas 开源格式（github.com/obsidianmd/jsoncanvas），与 Obsidian Canvas 互通。
+ * 这里只放无副作用的解析/序列化/几何/布局函数，交互逻辑在 CanvasView.tsx。
+ */
+
+export interface CanvasNode {
+  id: string
+  type: string
+  x: number
+  y: number
+  width: number
+  height: number
+  text: string
+  color?: string
+  /** group 节点的标题 */
+  label?: string
+}
+
+export interface CanvasEdge {
+  id: string
+  fromNode: string
+  toNode: string
+  label?: string
+  color?: string
+  fromSide?: string
+  toSide?: string
+}
+
+export interface ViewState {
+  scale: number
+  offsetX: number
+  offsetY: number
+}
+
+export type NodeSide = 'top' | 'right' | 'bottom' | 'left'
+
+/** JSON Canvas color 预设映射（Obsidian 兼容；spec 故意不定义具体色值） */
+export const COLOR_PRESETS: Record<string, { bg: string; border: string; text: string }> = {
+  '1': { bg: '#fa5252', border: '#e03131', text: '#fff' },
+  '2': { bg: '#fd7e14', border: '#e8590c', text: '#fff' },
+  '3': { bg: '#fab005', border: '#f08c00', text: '#1a1a1a' },
+  '4': { bg: '#40c057', border: '#2f9e44', text: '#fff' },
+  '5': { bg: '#15aabf', border: '#1098ad', text: '#fff' },
+  '6': { bg: '#7950f2', border: '#6741d9', text: '#fff' },
+}
+
+export const DEFAULT_WIDTH = 250
+export const DEFAULT_HEIGHT = 60
+/** 新建节点的默认尺寸（比导入节点小，符合手写短概念的习惯） */
+export const NEW_NODE_WIDTH = 200
+export const NEW_NODE_HEIGHT = 60
+
+// ===== 解析 / 序列化 =====
+
+export function parseCanvas(json: string): { nodes: CanvasNode[]; edges: CanvasEdge[] } {
+  if (!json.trim()) return { nodes: [], edges: [] }
+  const data = JSON.parse(json)
+  const nodes: CanvasNode[] = (data.nodes || []).map((n: Record<string, unknown>) => ({
+    id: String(n.id),
+    type: (n.type as string) || 'text',
+    x: typeof n.x === 'number' ? n.x : 0,
+    y: typeof n.y === 'number' ? n.y : 0,
+    width: typeof n.width === 'number' ? n.width : DEFAULT_WIDTH,
+    height: typeof n.height === 'number' ? n.height : DEFAULT_HEIGHT,
+    text: (n.text as string) || (n.label as string) || '',
+    color: (n.color as string) || undefined,
+    label: (n.label as string) || undefined,
+  }))
+  const edges: CanvasEdge[] = (data.edges || []).map((e: Record<string, unknown>) => ({
+    id: String(e.id),
+    fromNode: String(e.fromNode),
+    toNode: String(e.toNode),
+    label: (e.label as string) || undefined,
+    color: (e.color as string) || undefined,
+    fromSide: (e.fromSide as string) || undefined,
+    toSide: (e.toSide as string) || undefined,
+  }))
+  return { nodes, edges }
+}
+
+export function serializeCanvas(nodes: CanvasNode[], edges: CanvasEdge[]): string {
+  const data = {
+    nodes: nodes.map((n) => {
+      const o: Record<string, unknown> = {
+        id: n.id,
+        type: n.type || 'text',
+        x: Math.round(n.x),
+        y: Math.round(n.y),
+        width: Math.round(n.width),
+        height: Math.round(n.height),
+      }
+      // group 节点用 label，其它用 text
+      if (n.type === 'group') {
+        if (n.label) o.label = n.label
+      } else {
+        o.text = n.text
+      }
+      if (n.color) o.color = n.color
+      return o
+    }),
+    edges: edges.map((e) => {
+      const o: Record<string, unknown> = { id: e.id, fromNode: e.fromNode, toNode: e.toNode }
+      if (e.label) o.label = e.label
+      if (e.color) o.color = e.color
+      if (e.fromSide) o.fromSide = e.fromSide
+      if (e.toSide) o.toSide = e.toSide
+      return o
+    }),
+  }
+  return JSON.stringify(data, null, 2)
+}
+
+// ===== ID 生成 =====
+
+/** JSON Canvas 的 id 是任意字符串；用 16 位十六进制，与 Obsidian 风格一致 */
+export function generateId(): string {
+  let s = ''
+  for (let i = 0; i < 16; i++) s += Math.floor(Math.random() * 16).toString(16)
+  return s
+}
+
+// ===== 坐标换算 =====
+
+/** 屏幕坐标 → 画布坐标 */
+export function screenToCanvas(
+  clientX: number,
+  clientY: number,
+  containerRect: DOMRect,
+  view: ViewState,
+): { x: number; y: number } {
+  return {
+    x: (clientX - containerRect.left - view.offsetX) / view.scale,
+    y: (clientY - containerRect.top - view.offsetY) / view.scale,
+  }
+}
+
+// ===== 命中测试 =====
+
+/** 找出画布坐标点落在哪个节点内（后绘制的在上层，故从后往前找） */
+export function hitTestNode(nodes: CanvasNode[], x: number, y: number): CanvasNode | null {
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    const n = nodes[i]!
+    if (n.type === 'group') continue // group 不参与连线命中
+    if (x >= n.x && x <= n.x + n.width && y >= n.y && y <= n.y + n.height) return n
+  }
+  return null
+}
+
+/** 矩形相交测试（marquee 框选用） */
+export function rectsIntersect(
+  a: { x: number; y: number; width: number; height: number },
+  b: { x: number; y: number; width: number; height: number },
+): boolean {
+  return !(a.x + a.width < b.x || b.x + b.width < a.x || a.y + a.height < b.y || b.y + b.height < a.y)
+}
+
+/** 把两点规整成左上角 + 宽高的矩形 */
+export function normalizeRect(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+): { x: number; y: number; width: number; height: number } {
+  return {
+    x: Math.min(x1, x2),
+    y: Math.min(y1, y2),
+    width: Math.abs(x2 - x1),
+    height: Math.abs(y2 - y1),
+  }
+}
+
+// ===== 连线几何 =====
+
+/** 从节点中心朝目标点射出，求与节点矩形边框的交点 */
+export function getRectEdgePoint(
+  node: { x: number; y: number; width: number; height: number },
+  targetCx: number,
+  targetCy: number,
+): { x: number; y: number } {
+  const cx = node.x + node.width / 2
+  const cy = node.y + node.height / 2
+  const dx = targetCx - cx
+  const dy = targetCy - cy
+  if (dx === 0 && dy === 0) return { x: cx, y: cy }
+  const hw = node.width / 2
+  const hh = node.height / 2
+  const t = Math.min(
+    Math.abs(dx) > 0.01 ? hw / Math.abs(dx) : Infinity,
+    Math.abs(dy) > 0.01 ? hh / Math.abs(dy) : Infinity,
+  )
+  return { x: cx + dx * t, y: cy + dy * t }
+}
+
+/** 取节点某一边的中点（连线锚点位置） */
+export function getSidePoint(
+  node: { x: number; y: number; width: number; height: number },
+  side: NodeSide,
+): { x: number; y: number } {
+  switch (side) {
+    case 'top':
+      return { x: node.x + node.width / 2, y: node.y }
+    case 'right':
+      return { x: node.x + node.width, y: node.y + node.height / 2 }
+    case 'bottom':
+      return { x: node.x + node.width / 2, y: node.y + node.height }
+    case 'left':
+      return { x: node.x, y: node.y + node.height / 2 }
+  }
+}
+
+/** 根据相对方位推断连线该从哪条边出发 */
+export function inferSide(dx: number, dy: number): NodeSide {
+  if (Math.abs(dx) > Math.abs(dy)) return dx > 0 ? 'right' : 'left'
+  return dy > 0 ? 'bottom' : 'top'
+}
+
+/** 某条边朝外的单位法向量（贝塞尔控制点沿此方向伸出，形成 OB 式平滑进出） */
+export function sideNormal(side: NodeSide): { x: number; y: number } {
+  switch (side) {
+    case 'top':
+      return { x: 0, y: -1 }
+    case 'bottom':
+      return { x: 0, y: 1 }
+    case 'left':
+      return { x: -1, y: 0 }
+    case 'right':
+      return { x: 1, y: 0 }
+  }
+}
+
+type Rect = { x: number; y: number; width: number; height: number }
+
+/** 无显式 side 时，按两节点中心相对位置自动选出入边 */
+export function autoSides(from: Rect, to: Rect): { fromSide: NodeSide; toSide: NodeSide } {
+  const dx = to.x + to.width / 2 - (from.x + from.width / 2)
+  const dy = to.y + to.height / 2 - (from.y + from.height / 2)
+  if (Math.abs(dx) > Math.abs(dy)) {
+    return dx > 0 ? { fromSide: 'right', toSide: 'left' } : { fromSide: 'left', toSide: 'right' }
+  }
+  return dy > 0 ? { fromSide: 'bottom', toSide: 'top' } : { fromSide: 'top', toSide: 'bottom' }
+}
+
+/**
+ * 计算 OB 风格的平滑连线：三次贝塞尔，控制点沿两端边法向伸出。
+ * 返回 SVG path、标签锚点（曲线中点）以及箭头末端切线角度。
+ */
+export function computeEdgePath(
+  from: Rect,
+  to: Rect,
+  explicitFromSide?: string,
+  explicitToSide?: string,
+): { d: string; midX: number; midY: number } {
+  const auto = autoSides(from, to)
+  const fromSide = (explicitFromSide as NodeSide) || auto.fromSide
+  const toSide = (explicitToSide as NodeSide) || auto.toSide
+  const a1 = getSidePoint(from, fromSide)
+  const a2 = getSidePoint(to, toSide)
+  const n1 = sideNormal(fromSide)
+  const n2 = sideNormal(toSide)
+  const dist = Math.hypot(a2.x - a1.x, a2.y - a1.y)
+  // 曲率随间距增长，夹在 [30,160]，避免近距离打结、远距离过直
+  const curve = Math.min(Math.max(dist * 0.4, 30), 160)
+  const c1 = { x: a1.x + n1.x * curve, y: a1.y + n1.y * curve }
+  const c2 = { x: a2.x + n2.x * curve, y: a2.y + n2.y * curve }
+  // 三次贝塞尔 t=0.5 处的点，作为标签锚点
+  const midX = 0.125 * a1.x + 0.375 * c1.x + 0.375 * c2.x + 0.125 * a2.x
+  const midY = 0.125 * a1.y + 0.375 * c1.y + 0.375 * c2.y + 0.125 * a2.y
+  const d = `M ${a1.x} ${a1.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${a2.x} ${a2.y}`
+  return { d, midX, midY }
+}
+
+// ===== 力导向初始布局（一次性，之后固定） =====
+
+export function runForceLayout(nodes: CanvasNode[], edges: CanvasEdge[]): void {
+  if (nodes.length === 0) return
+  const k = 280
+  nodes.forEach((n, i) => {
+    if (n.x === 0 && n.y === 0) {
+      const cols = Math.ceil(Math.sqrt(nodes.length))
+      n.x = (i % cols) * (DEFAULT_WIDTH + 80) + 50
+      n.y = Math.floor(i / cols) * (DEFAULT_HEIGHT + 60) + 50
+    }
+  })
+  const iters = 100
+  for (let it = 0; it < iters; it++) {
+    const fx = nodes.map(() => 0)
+    const fy = nodes.map(() => 0)
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const dx = nodes[i]!.x - nodes[j]!.x
+        const dy = nodes[i]!.y - nodes[j]!.y
+        const d = Math.sqrt(dx * dx + dy * dy) || 1
+        const f = (k * k) / d
+        fx[i]! += (dx / d) * f
+        fy[i]! += (dy / d) * f
+        fx[j]! -= (dx / d) * f
+        fy[j]! -= (dy / d) * f
+      }
+    }
+    for (const e of edges) {
+      const i = nodes.findIndex((n) => n.id === e.fromNode)
+      const j = nodes.findIndex((n) => n.id === e.toNode)
+      if (i < 0 || j < 0) continue
+      const dx = nodes[i]!.x - nodes[j]!.x
+      const dy = nodes[i]!.y - nodes[j]!.y
+      const d = Math.sqrt(dx * dx + dy * dy) || 1
+      const f = (d * d) / k
+      fx[i]! -= (dx / d) * f
+      fy[i]! -= (dy / d) * f
+      fx[j]! += (dx / d) * f
+      fy[j]! += (dy / d) * f
+    }
+    const temp = (1 - it / iters) * 35
+    for (let i = 0; i < nodes.length; i++) {
+      const mag = Math.sqrt(fx[i]! ** 2 + fy[i]! ** 2) || 1
+      const step = Math.min(mag, temp)
+      nodes[i]!.x += (fx[i]! / mag) * step
+      nodes[i]!.y += (fy[i]! / mag) * step
+    }
+  }
+}

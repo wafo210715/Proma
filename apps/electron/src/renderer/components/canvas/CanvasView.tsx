@@ -4,183 +4,45 @@
  * 采用 JSON Canvas 开源格式（github.com/obsidianmd/jsoncanvas），与 Obsidian Canvas 互通。
  * 内容持久化到 ~/.proma/canvas.canvas，自动保存由 CanvasPersistence 统一管理。
  *
- * 设计原则：坐标对 agent 无意义 —— agent 只写逻辑字段（id/text/fromNode/toNode），
- * 坐标由 autoLayout 力导向初始布局后固定，用户可自由拖拽/缩放/改尺寸，不回弹。
- *
- * 支持：自由拖拽、resize、双击编辑节点文本、双击编辑连线标签、平移缩放、
- *      color 预设（"1"-"6"）、text halo 连线标签（无底色）、截图当前视口到剪贴板。
+ * 交互方案对齐 Figma/Miro：
+ * - 空白双击 → 新建节点并进入编辑
+ * - 空白拖拽 → 框选；Shift 拖拽 → 追加框选
+ * - 空格+拖拽 / 中键拖拽 → 平移画布
+ * - 滚轮 → 平移；⌘/Ctrl+滚轮（含触控板捏合）→ 缩放
+ * - 节点 hover 显示四边锚点，从锚点拖出 → 连线到目标节点
+ * - 双击节点 / 连线标签 → 编辑文字
+ * - Delete/Backspace → 删除选中；⌘Z / ⌘⇧Z → 撤销重做；⌘A → 全选
  */
 
 import * as React from 'react'
 import { useAtom, useAtomValue } from 'jotai'
-import { Camera, LayoutGrid, Crosshair } from 'lucide-react'
+import { Camera, LayoutGrid, Crosshair, Undo2, Redo2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { canvasContentAtom, canvasLoadedAtom } from '@/atoms/tab-atoms'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import {
+  COLOR_PRESETS,
+  NEW_NODE_WIDTH,
+  NEW_NODE_HEIGHT,
+  computeEdgePath,
+  generateId,
+  getSidePoint,
+  hitTestNode,
+  inferSide,
+  normalizeRect,
+  parseCanvas,
+  rectsIntersect,
+  runForceLayout,
+  screenToCanvas,
+  serializeCanvas,
+  type CanvasEdge,
+  type CanvasNode,
+  type NodeSide,
+  type ViewState,
+} from './canvas-utils'
 
-// ===== 类型 =====
-
-interface CanvasNode {
-  id: string
-  type: string
-  x: number
-  y: number
-  width: number
-  height: number
-  text: string
-  color?: string
-}
-
-interface CanvasEdge {
-  id: string
-  fromNode: string
-  toNode: string
-  label?: string
-  color?: string
-  fromSide?: string
-  toSide?: string
-}
-
-interface ViewState {
-  scale: number
-  offsetX: number
-  offsetY: number
-}
-
-/** JSON Canvas color 预设映射（Obsidian 兼容） */
-const COLOR_PRESETS: Record<string, { bg: string; border: string; text: string }> = {
-  '1': { bg: '#fa5252', border: '#e03131', text: '#fff' },
-  '2': { bg: '#fd7e14', border: '#e8590c', text: '#fff' },
-  '3': { bg: '#fab005', border: '#f08c00', text: '#1a1a1a' },
-  '4': { bg: '#40c057', border: '#2f9e44', text: '#fff' },
-  '5': { bg: '#15aabf', border: '#1098ad', text: '#fff' },
-  '6': { bg: '#7950f2', border: '#6741d9', text: '#fff' },
-}
-
-const DEFAULT_WIDTH = 250
-const DEFAULT_HEIGHT = 120
-
-// ===== 解析 / 序列化 =====
-
-function parseCanvas(json: string): { nodes: CanvasNode[]; edges: CanvasEdge[] } {
-  if (!json.trim()) return { nodes: [], edges: [] }
-  const data = JSON.parse(json)
-  const nodes: CanvasNode[] = (data.nodes || []).map((n: Record<string, unknown>) => ({
-    id: String(n.id),
-    type: (n.type as string) || 'text',
-    x: typeof n.x === 'number' ? n.x : 0,
-    y: typeof n.y === 'number' ? n.y : 0,
-    width: typeof n.width === 'number' ? n.width : DEFAULT_WIDTH,
-    height: typeof n.height === 'number' ? n.height : DEFAULT_HEIGHT,
-    text: (n.text as string) || (n.label as string) || '',
-    color: (n.color as string) || undefined,
-  }))
-  const edges: CanvasEdge[] = (data.edges || []).map((e: Record<string, unknown>) => ({
-    id: String(e.id),
-    fromNode: String(e.fromNode),
-    toNode: String(e.toNode),
-    label: (e.label as string) || undefined,
-    color: (e.color as string) || undefined,
-    fromSide: (e.fromSide as string) || undefined,
-    toSide: (e.toSide as string) || undefined,
-  }))
-  return { nodes, edges }
-}
-
-function serializeCanvas(nodes: CanvasNode[], edges: CanvasEdge[]): string {
-  const data = {
-    nodes: nodes.map((n) => {
-      const o: Record<string, unknown> = {
-        id: n.id,
-        type: n.type || 'text',
-        x: Math.round(n.x),
-        y: Math.round(n.y),
-        width: Math.round(n.width),
-        height: Math.round(n.height),
-        text: n.text,
-      }
-      if (n.color) o.color = n.color
-      return o
-    }),
-    edges: edges.map((e) => {
-      const o: Record<string, unknown> = { id: e.id, fromNode: e.fromNode, toNode: e.toNode }
-      if (e.label) o.label = e.label
-      if (e.color) o.color = e.color
-      if (e.fromSide) o.fromSide = e.fromSide
-      if (e.toSide) o.toSide = e.toSide
-      return o
-    }),
-  }
-  return JSON.stringify(data, null, 2)
-}
-
-// ===== 力导向初始布局（一次性，之后固定） =====
-
-function runForceLayout(nodes: CanvasNode[], edges: CanvasEdge[]): void {
-  if (nodes.length === 0) return
-  const k = 280
-  nodes.forEach((n, i) => {
-    if (n.x === 0 && n.y === 0) {
-      const cols = Math.ceil(Math.sqrt(nodes.length))
-      n.x = (i % cols) * (DEFAULT_WIDTH + 80) + 50
-      n.y = Math.floor(i / cols) * (DEFAULT_HEIGHT + 60) + 50
-    }
-  })
-  const iters = 100
-  for (let it = 0; it < iters; it++) {
-    const fx = nodes.map(() => 0)
-    const fy = nodes.map(() => 0)
-    for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) {
-        const dx = nodes[i]!.x - nodes[j]!.x
-        const dy = nodes[i]!.y - nodes[j]!.y
-        const d = Math.sqrt(dx * dx + dy * dy) || 1
-        const f = (k * k) / d
-        fx[i]! += (dx / d) * f
-        fy[i]! += (dy / d) * f
-        fx[j]! -= (dx / d) * f
-        fy[j]! -= (dy / d) * f
-      }
-    }
-    for (const e of edges) {
-      const i = nodes.findIndex((n) => n.id === e.fromNode)
-      const j = nodes.findIndex((n) => n.id === e.toNode)
-      if (i < 0 || j < 0) continue
-      const dx = nodes[i]!.x - nodes[j]!.x
-      const dy = nodes[i]!.y - nodes[j]!.y
-      const d = Math.sqrt(dx * dx + dy * dy) || 1
-      const f = (d * d) / k
-      fx[i]! -= (dx / d) * f
-      fy[i]! -= (dy / d) * f
-      fx[j]! += (dx / d) * f
-      fy[j]! += (dy / d) * f
-    }
-    const temp = (1 - it / iters) * 35
-    for (let i = 0; i < nodes.length; i++) {
-      const mag = Math.sqrt(fx[i]! ** 2 + fy[i]! ** 2) || 1
-      const step = Math.min(mag, temp)
-      nodes[i]!.x += (fx[i]! / mag) * step
-      nodes[i]!.y += (fy[i]! / mag) * step
-    }
-  }
-}
-
-// ===== 连线几何 =====
-
-function getRectEdgePoint(node: CanvasNode, targetCx: number, targetCy: number): { x: number; y: number } {
-  const cx = node.x + node.width / 2
-  const cy = node.y + node.height / 2
-  const dx = targetCx - cx
-  const dy = targetCy - cy
-  if (dx === 0 && dy === 0) return { x: cx, y: cy }
-  const hw = node.width / 2
-  const hh = node.height / 2
-  const t = Math.min(
-    Math.abs(dx) > 0.01 ? hw / Math.abs(dx) : Infinity,
-    Math.abs(dy) > 0.01 ? hh / Math.abs(dy) : Infinity,
-  )
-  return { x: cx + dx * t, y: cy + dy * t }
-}
+const ALL_SIDES: NodeSide[] = ['top', 'right', 'bottom', 'left']
+const HISTORY_LIMIT = 80
 
 export function CanvasView(): React.ReactElement {
   const [content, setContent] = useAtom(canvasContentAtom)
@@ -189,44 +51,44 @@ export function CanvasView(): React.ReactElement {
   const [nodes, setNodes] = React.useState<CanvasNode[]>([])
   const [edges, setEdges] = React.useState<CanvasEdge[]>([])
   const [view, setView] = React.useState<ViewState>({ scale: 1, offsetX: 0, offsetY: 0 })
+  const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
   const [editingNodeId, setEditingNodeId] = React.useState<string | null>(null)
   const [editingEdgeId, setEditingEdgeId] = React.useState<string | null>(null)
+  const [hoveredNodeId, setHoveredNodeId] = React.useState<string | null>(null)
+  const [marquee, setMarquee] = React.useState<{ x: number; y: number; width: number; height: number } | null>(null)
+  const [pendingEdge, setPendingEdge] = React.useState<
+    { fromNode: string; fromSide: NodeSide; toX: number; toY: number } | null
+  >(null)
+  const [spaceDown, setSpaceDown] = React.useState(false)
+  const [canUndo, setCanUndo] = React.useState(false)
+  const [canRedo, setCanRedo] = React.useState(false)
 
   const containerRef = React.useRef<HTMLDivElement>(null)
   const lastSerializedRef = React.useRef<string>('')
+  const historyRef = React.useRef<string[]>([])
+  const historyIndexRef = React.useRef(-1)
+  // 当前正在编辑的输入元素（同时只会有一个），用于卸载前主动 flush
+  const editTextareaRef = React.useRef<HTMLTextAreaElement | null>(null)
+  const editInputRef = React.useRef<HTMLInputElement | null>(null)
+
+  // 用 ref 镜像最新值，供事件回调读取，避免闭包捕获旧值
   const nodesRef = React.useRef(nodes)
   nodesRef.current = nodes
+  const edgesRef = React.useRef(edges)
+  edgesRef.current = edges
   const viewRef = React.useRef(view)
   viewRef.current = view
+  const selectedRef = React.useRef(selectedIds)
+  selectedRef.current = selectedIds
+  const editingRef = React.useRef({ node: editingNodeId, edge: editingEdgeId })
+  editingRef.current = { node: editingNodeId, edge: editingEdgeId }
+  const spaceRef = React.useRef(spaceDown)
+  spaceRef.current = spaceDown
 
-  // ===== 从 atom 解析（仅外部变化时） =====
-  React.useEffect(() => {
-    if (!loaded) return
-    if (content === lastSerializedRef.current) return
-    try {
-      const parsed = parseCanvas(content)
-      const needLayout = parsed.nodes.length > 0 && parsed.nodes.every((n) => n.x === 0 && n.y === 0)
-      if (needLayout) {
-        runForceLayout(parsed.nodes, parsed.edges)
-      }
-      setNodes(parsed.nodes)
-      setEdges(parsed.edges)
-      // 记录本次序列化，避免解析结果回写触发死循环
-      lastSerializedRef.current = content
-      // 布局后居中
-      requestAnimationFrame(() => fitView(parsed.nodes))
-    } catch (err) {
-      console.error('[Canvas] 解析失败:', err)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [content, loaded])
-
-  // ===== 提交到 atom =====
-  const commit = React.useCallback((nextNodes: CanvasNode[], nextEdges: CanvasEdge[]): void => {
-    const json = serializeCanvas(nextNodes, nextEdges)
-    lastSerializedRef.current = json
-    setContent(json)
-  }, [setContent])
+  const syncHistoryFlags = React.useCallback((): void => {
+    setCanUndo(historyIndexRef.current > 0)
+    setCanRedo(historyIndexRef.current < historyRef.current.length - 1)
+  }, [])
 
   // ===== 视图居中 =====
   const fitView = React.useCallback((ns: CanvasNode[]): void => {
@@ -249,69 +111,200 @@ export function CanvasView(): React.ReactElement {
     })
   }, [])
 
-  // ===== 节点拖拽 =====
-  const handleNodeDragStart = React.useCallback((e: React.MouseEvent, nodeId: string): void => {
-    if (editingNodeId === nodeId) return
-    e.stopPropagation()
-    const startX = e.clientX
-    const startY = e.clientY
-    const node = nodesRef.current.find((n) => n.id === nodeId)
-    if (!node) return
-    const origX = node.x
-    const origY = node.y
+  // ===== 从 atom 解析（仅外部变化时） =====
+  React.useEffect(() => {
+    if (!loaded) return
+    if (content === lastSerializedRef.current) return
+    try {
+      const parsed = parseCanvas(content)
+      const needLayout = parsed.nodes.length > 0 && parsed.nodes.every((n) => n.x === 0 && n.y === 0)
+      if (needLayout) runForceLayout(parsed.nodes, parsed.edges)
+      setNodes(parsed.nodes)
+      setEdges(parsed.edges)
+      const json = needLayout ? serializeCanvas(parsed.nodes, parsed.edges) : content
+      lastSerializedRef.current = json
+      // 外部载入视为新的历史起点
+      historyRef.current = [json]
+      historyIndexRef.current = 0
+      syncHistoryFlags()
+      requestAnimationFrame(() => fitView(parsed.nodes))
+    } catch (err) {
+      console.error('[Canvas] 解析失败:', err)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [content, loaded])
 
-    const onMove = (ev: MouseEvent): void => {
-      const scale = viewRef.current.scale
-      const nx = origX + (ev.clientX - startX) / scale
-      const ny = origY + (ev.clientY - startY) / scale
-      setNodes((prev) => prev.map((n) => (n.id === nodeId ? { ...n, x: nx, y: ny } : n)))
-    }
-    const onUp = (): void => {
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
-      commit(nodesRef.current, edges)
-    }
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-  }, [commit, edges, editingNodeId])
+  // ===== 提交（写回 atom + 记历史） =====
+  const commit = React.useCallback(
+    (nextNodes: CanvasNode[], nextEdges: CanvasEdge[], recordHistory = true): void => {
+      const json = serializeCanvas(nextNodes, nextEdges)
+      if (json === lastSerializedRef.current) return
+      if (recordHistory) {
+        // 新操作截断 redo 分支
+        historyRef.current = historyRef.current.slice(0, historyIndexRef.current + 1)
+        historyRef.current.push(json)
+        if (historyRef.current.length > HISTORY_LIMIT) historyRef.current.shift()
+        historyIndexRef.current = historyRef.current.length - 1
+        syncHistoryFlags()
+      }
+      lastSerializedRef.current = json
+      setContent(json)
+    },
+    [setContent, syncHistoryFlags],
+  )
 
-  // ===== 节点 resize =====
-  const handleResizeStart = React.useCallback((e: React.MouseEvent, nodeId: string): void => {
-    e.stopPropagation()
-    const startX = e.clientX
-    const startY = e.clientY
-    const node = nodesRef.current.find((n) => n.id === nodeId)
-    if (!node) return
-    const origW = node.width
-    const origH = node.height
+  const applySnapshot = React.useCallback(
+    (json: string): void => {
+      const parsed = parseCanvas(json)
+      setNodes(parsed.nodes)
+      setEdges(parsed.edges)
+      setSelectedIds(new Set())
+      setEditingNodeId(null)
+      setEditingEdgeId(null)
+      lastSerializedRef.current = json
+      setContent(json)
+      syncHistoryFlags()
+    },
+    [setContent, syncHistoryFlags],
+  )
 
-    const onMove = (ev: MouseEvent): void => {
-      const scale = viewRef.current.scale
-      const nw = Math.max(80, origW + (ev.clientX - startX) / scale)
-      const nh = Math.max(48, origH + (ev.clientY - startY) / scale)
-      setNodes((prev) => prev.map((n) => (n.id === nodeId ? { ...n, width: nw, height: nh } : n)))
+  const undo = React.useCallback((): void => {
+    if (historyIndexRef.current <= 0) return
+    historyIndexRef.current -= 1
+    applySnapshot(historyRef.current[historyIndexRef.current]!)
+  }, [applySnapshot])
+
+  const redo = React.useCallback((): void => {
+    if (historyIndexRef.current >= historyRef.current.length - 1) return
+    historyIndexRef.current += 1
+    applySnapshot(historyRef.current[historyIndexRef.current]!)
+  }, [applySnapshot])
+
+  // ===== 新建节点 =====
+  const createNodeAt = React.useCallback(
+    (canvasX: number, canvasY: number): void => {
+      const node: CanvasNode = {
+        id: generateId(),
+        type: 'text',
+        x: Math.round(canvasX - NEW_NODE_WIDTH / 2),
+        y: Math.round(canvasY - NEW_NODE_HEIGHT / 2),
+        width: NEW_NODE_WIDTH,
+        height: NEW_NODE_HEIGHT,
+        text: '',
+      }
+      const next = [...nodesRef.current, node]
+      setNodes(next)
+      setSelectedIds(new Set([node.id]))
+      setEditingNodeId(node.id)
+      commit(next, edgesRef.current)
+    },
+    [commit],
+  )
+
+  // ===== 删除选中 =====
+  const deleteSelected = React.useCallback((): void => {
+    const sel = selectedRef.current
+    if (sel.size === 0) return
+    const nextNodes = nodesRef.current.filter((n) => !sel.has(n.id))
+    // 连带删除挂在被删节点上的边，以及被直接选中的边
+    const nextEdges = edgesRef.current.filter(
+      (e) => !sel.has(e.id) && !sel.has(e.fromNode) && !sel.has(e.toNode),
+    )
+    setNodes(nextNodes)
+    setEdges(nextEdges)
+    setSelectedIds(new Set())
+    commit(nextNodes, nextEdges)
+  }, [commit])
+
+  // ===== 编辑 flush：在 React 卸载 textarea 之前主动提交 =====
+  // React 在元素卸载时不会触发 onBlur，所以点空白导致 setEditing(null) 会丢失未提交的文字。
+  // 用 capture 阶段的 document mousedown（早于 React 合成事件）在点击外部时先 flush。
+  React.useEffect(() => {
+    if (!editingNodeId && !editingEdgeId) return
+    const onDocMouseDown = (e: MouseEvent): void => {
+      const target = e.target as Node
+      const ta = editTextareaRef.current
+      if (editingNodeId && ta && target !== ta && !ta.contains(target)) {
+        handleNodeTextCommit(editingNodeId, ta.value)
+      }
+      const inp = editInputRef.current
+      if (editingEdgeId && inp && target !== inp && !inp.contains(target)) {
+        handleEdgeLabelCommit(editingEdgeId, inp.value)
+      }
     }
-    const onUp = (): void => {
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
-      commit(nodesRef.current, edges)
+    document.addEventListener('mousedown', onDocMouseDown, true)
+    return () => document.removeEventListener('mousedown', onDocMouseDown, true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingNodeId, editingEdgeId])
+
+  // ===== 键盘 =====
+  React.useEffect(() => {
+    const isTypingTarget = (): boolean => {
+      const el = document.activeElement
+      if (!el) return false
+      const tag = el.tagName
+      return tag === 'INPUT' || tag === 'TEXTAREA' || (el as HTMLElement).isContentEditable
     }
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-  }, [commit, edges])
+
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.code === 'Space' && !isTypingTarget()) {
+        if (!spaceRef.current) setSpaceDown(true)
+        e.preventDefault()
+        return
+      }
+      // 编辑中把按键交给输入框（Escape 除外）
+      if (isTypingTarget()) {
+        if (e.key === 'Escape') {
+          setEditingNodeId(null)
+          setEditingEdgeId(null)
+          ;(document.activeElement as HTMLElement | null)?.blur()
+        }
+        return
+      }
+      const mod = e.metaKey || e.ctrlKey
+      if (mod && e.key.toLowerCase() === 'z') {
+        e.preventDefault()
+        if (e.shiftKey) redo()
+        else undo()
+        return
+      }
+      if (mod && e.key.toLowerCase() === 'a') {
+        e.preventDefault()
+        setSelectedIds(new Set(nodesRef.current.map((n) => n.id)))
+        return
+      }
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (selectedRef.current.size > 0) {
+          e.preventDefault()
+          deleteSelected()
+        }
+        return
+      }
+      if (e.key === 'Escape') {
+        setSelectedIds(new Set())
+      }
+    }
+
+    const onKeyUp = (e: KeyboardEvent): void => {
+      if (e.code === 'Space') setSpaceDown(false)
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+    }
+  }, [undo, redo, deleteSelected])
 
   // ===== 画布平移 =====
-  const handlePanStart = React.useCallback((e: React.MouseEvent): void => {
-    if ((e.target as HTMLElement).closest('.canvas-node')) return
+  const startPan = React.useCallback((e: React.MouseEvent | MouseEvent): void => {
     const startX = e.clientX
     const startY = e.clientY
-    const origOffsetX = viewRef.current.offsetX
-    const origOffsetY = viewRef.current.offsetY
-    setEditingNodeId(null)
-    setEditingEdgeId(null)
-
+    const origX = viewRef.current.offsetX
+    const origY = viewRef.current.offsetY
     const onMove = (ev: MouseEvent): void => {
-      setView((v) => ({ ...v, offsetX: origOffsetX + (ev.clientX - startX), offsetY: origOffsetY + (ev.clientY - startY) }))
+      setView((v) => ({ ...v, offsetX: origX + (ev.clientX - startX), offsetY: origY + (ev.clientY - startY) }))
     }
     const onUp = (): void => {
       window.removeEventListener('mousemove', onMove)
@@ -321,49 +314,284 @@ export function CanvasView(): React.ReactElement {
     window.addEventListener('mouseup', onUp)
   }, [])
 
-  // ===== 缩放 =====
-  const handleWheel = React.useCallback((e: React.WheelEvent): void => {
-    if (!containerRef.current) return
-    const rect = containerRef.current.getBoundingClientRect()
-    const mx = e.clientX - rect.left
-    const my = e.clientY - rect.top
-    setView((v) => {
-      const delta = e.deltaY > 0 ? 0.9 : 1.1
-      const ns = Math.max(0.2, Math.min(3, v.scale * delta))
-      return {
-        scale: ns,
-        offsetX: mx - (mx - v.offsetX) * (ns / v.scale),
-        offsetY: my - (my - v.offsetY) * (ns / v.scale),
+  // ===== 空白处按下：平移 或 框选 =====
+  const handleBackgroundMouseDown = React.useCallback(
+    (e: React.MouseEvent): void => {
+      if ((e.target as HTMLElement).closest('.canvas-node')) return
+      setEditingNodeId(null)
+      setEditingEdgeId(null)
+
+      // 中键 或 空格 → 平移
+      if (e.button === 1 || spaceRef.current) {
+        e.preventDefault()
+        startPan(e)
+        return
       }
-    })
+      if (e.button !== 0) return
+      if (!containerRef.current) return
+
+      // 左键 → 框选
+      const rect = containerRef.current.getBoundingClientRect()
+      const start = screenToCanvas(e.clientX, e.clientY, rect, viewRef.current)
+      const additive = e.shiftKey
+      const baseSelection = additive ? new Set(selectedRef.current) : new Set<string>()
+      if (!additive) setSelectedIds(new Set())
+      let moved = false
+
+      const onMove = (ev: MouseEvent): void => {
+        const cur = screenToCanvas(ev.clientX, ev.clientY, rect, viewRef.current)
+        const box = normalizeRect(start.x, start.y, cur.x, cur.y)
+        if (box.width > 3 || box.height > 3) moved = true
+        setMarquee(box)
+        const next = new Set(baseSelection)
+        for (const n of nodesRef.current) {
+          if (rectsIntersect(box, n)) next.add(n.id)
+        }
+        setSelectedIds(next)
+      }
+      const onUp = (): void => {
+        window.removeEventListener('mousemove', onMove)
+        window.removeEventListener('mouseup', onUp)
+        setMarquee(null)
+        if (!moved && !additive) setSelectedIds(new Set())
+      }
+      window.addEventListener('mousemove', onMove)
+      window.addEventListener('mouseup', onUp)
+    },
+    [startPan],
+  )
+
+  // ===== 空白双击 → 新建节点 =====
+  const handleBackgroundDoubleClick = React.useCallback(
+    (e: React.MouseEvent): void => {
+      if ((e.target as HTMLElement).closest('.canvas-node')) return
+      if (!containerRef.current) return
+      const rect = containerRef.current.getBoundingClientRect()
+      const pt = screenToCanvas(e.clientX, e.clientY, rect, viewRef.current)
+      createNodeAt(pt.x, pt.y)
+    },
+    [createNodeAt],
+  )
+
+  // ===== 节点拖拽（支持多选整体移动） =====
+  const handleNodeMouseDown = React.useCallback(
+    (e: React.MouseEvent, nodeId: string): void => {
+      if (editingRef.current.node === nodeId) return
+      if (e.button !== 0) return
+      e.stopPropagation()
+
+      // 选中逻辑：Shift 追加/取消；点未选中的节点则独占选中
+      let working = new Set(selectedRef.current)
+      if (e.shiftKey) {
+        if (working.has(nodeId)) working.delete(nodeId)
+        else working.add(nodeId)
+        setSelectedIds(new Set(working))
+      } else if (!working.has(nodeId)) {
+        working = new Set([nodeId])
+        setSelectedIds(working)
+      }
+
+      const movingIds = working.has(nodeId) ? Array.from(working) : [nodeId]
+      const origins = new Map<string, { x: number; y: number }>()
+      for (const id of movingIds) {
+        const n = nodesRef.current.find((x) => x.id === id)
+        if (n) origins.set(id, { x: n.x, y: n.y })
+      }
+      const startX = e.clientX
+      const startY = e.clientY
+      let moved = false
+
+      const onMove = (ev: MouseEvent): void => {
+        const scale = viewRef.current.scale
+        const dx = (ev.clientX - startX) / scale
+        const dy = (ev.clientY - startY) / scale
+        if (Math.abs(dx) > 1 || Math.abs(dy) > 1) moved = true
+        setNodes((prev) =>
+          prev.map((n) => {
+            const o = origins.get(n.id)
+            return o ? { ...n, x: o.x + dx, y: o.y + dy } : n
+          }),
+        )
+      }
+      const onUp = (): void => {
+        window.removeEventListener('mousemove', onMove)
+        window.removeEventListener('mouseup', onUp)
+        if (moved) commit(nodesRef.current, edgesRef.current)
+      }
+      window.addEventListener('mousemove', onMove)
+      window.addEventListener('mouseup', onUp)
+    },
+    [commit],
+  )
+
+  // ===== 节点 resize =====
+  const handleResizeStart = React.useCallback(
+    (e: React.MouseEvent, nodeId: string): void => {
+      e.stopPropagation()
+      const startX = e.clientX
+      const startY = e.clientY
+      const node = nodesRef.current.find((n) => n.id === nodeId)
+      if (!node) return
+      const origW = node.width
+      const origH = node.height
+
+      const onMove = (ev: MouseEvent): void => {
+        const scale = viewRef.current.scale
+        const nw = Math.max(80, origW + (ev.clientX - startX) / scale)
+        const nh = Math.max(40, origH + (ev.clientY - startY) / scale)
+        setNodes((prev) => prev.map((n) => (n.id === nodeId ? { ...n, width: nw, height: nh } : n)))
+      }
+      const onUp = (): void => {
+        window.removeEventListener('mousemove', onMove)
+        window.removeEventListener('mouseup', onUp)
+        commit(nodesRef.current, edgesRef.current)
+      }
+      window.addEventListener('mousemove', onMove)
+      window.addEventListener('mouseup', onUp)
+    },
+    [commit],
+  )
+
+  // ===== 从锚点拖出连线 =====
+  const handleAnchorMouseDown = React.useCallback(
+    (e: React.MouseEvent, nodeId: string, side: NodeSide): void => {
+      e.stopPropagation()
+      e.preventDefault()
+      if (!containerRef.current) return
+      const rect = containerRef.current.getBoundingClientRect()
+      const from = nodesRef.current.find((n) => n.id === nodeId)
+      if (!from) return
+      const anchor = getSidePoint(from, side)
+      setPendingEdge({ fromNode: nodeId, fromSide: side, toX: anchor.x, toY: anchor.y })
+
+      const onMove = (ev: MouseEvent): void => {
+        const pt = screenToCanvas(ev.clientX, ev.clientY, rect, viewRef.current)
+        setPendingEdge((p) => (p ? { ...p, toX: pt.x, toY: pt.y } : p))
+      }
+      const onUp = (ev: MouseEvent): void => {
+        window.removeEventListener('mousemove', onMove)
+        window.removeEventListener('mouseup', onUp)
+        const pt = screenToCanvas(ev.clientX, ev.clientY, rect, viewRef.current)
+        const target = hitTestNode(nodesRef.current, pt.x, pt.y)
+        setPendingEdge(null)
+
+        if (target && target.id !== nodeId) {
+          // 连到已有节点
+          const dup = edgesRef.current.some((x) => x.fromNode === nodeId && x.toNode === target.id)
+          if (dup) return
+          const tc = { x: target.x + target.width / 2, y: target.y + target.height / 2 }
+          const fc = { x: from.x + from.width / 2, y: from.y + from.height / 2 }
+          const edge: CanvasEdge = {
+            id: generateId(),
+            fromNode: nodeId,
+            toNode: target.id,
+            fromSide: side,
+            toSide: inferSide(fc.x - tc.x, fc.y - tc.y),
+          }
+          const nextEdges = [...edgesRef.current, edge]
+          setEdges(nextEdges)
+          commit(nodesRef.current, nextEdges)
+        } else if (!target) {
+          // 拖到空白 → 新建节点并连上（OB 同款手感）
+          const node: CanvasNode = {
+            id: generateId(),
+            type: 'text',
+            x: Math.round(pt.x - NEW_NODE_WIDTH / 2),
+            y: Math.round(pt.y - NEW_NODE_HEIGHT / 2),
+            width: NEW_NODE_WIDTH,
+            height: NEW_NODE_HEIGHT,
+            text: '',
+          }
+          const edge: CanvasEdge = {
+            id: generateId(),
+            fromNode: nodeId,
+            toNode: node.id,
+            fromSide: side,
+            toSide: inferSide(getSidePoint(from, side).x - pt.x, getSidePoint(from, side).y - pt.y),
+          }
+          const nextNodes = [...nodesRef.current, node]
+          const nextEdges = [...edgesRef.current, edge]
+          setNodes(nextNodes)
+          setEdges(nextEdges)
+          setSelectedIds(new Set([node.id]))
+          setEditingNodeId(node.id)
+          commit(nextNodes, nextEdges)
+        }
+      }
+      window.addEventListener('mousemove', onMove)
+      window.addEventListener('mouseup', onUp)
+    },
+    [commit],
+  )
+
+  // ===== 滚轮：平移；⌘/Ctrl+滚轮（含触控板捏合）：缩放 =====
+  React.useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent): void => {
+      e.preventDefault()
+      if (e.ctrlKey || e.metaKey) {
+        const rect = el.getBoundingClientRect()
+        const mx = e.clientX - rect.left
+        const my = e.clientY - rect.top
+        setView((v) => {
+          const ns = Math.max(0.1, Math.min(4, v.scale * Math.exp(-e.deltaY * 0.01)))
+          return {
+            scale: ns,
+            offsetX: mx - (mx - v.offsetX) * (ns / v.scale),
+            offsetY: my - (my - v.offsetY) * (ns / v.scale),
+          }
+        })
+      } else {
+        setView((v) => ({ ...v, offsetX: v.offsetX - e.deltaX, offsetY: v.offsetY - e.deltaY }))
+      }
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
   }, [])
 
-  // ===== 编辑节点文本 =====
-  const handleNodeTextCommit = React.useCallback((nodeId: string, text: string): void => {
-    const next = nodesRef.current.map((n) => (n.id === nodeId ? { ...n, text } : n))
-    setNodes(next)
-    commit(next, edges)
-    setEditingNodeId(null)
-  }, [commit, edges])
+  // ===== 编辑提交 =====
+  const handleNodeTextCommit = React.useCallback(
+    (nodeId: string, text: string): void => {
+      setEditingNodeId(null)
+      const cur = nodesRef.current.find((n) => n.id === nodeId)
+      if (!cur) return
+      // 新建后未输入内容 → 直接丢弃，避免留下空节点
+      if (!text.trim() && !cur.text.trim()) {
+        const nextNodes = nodesRef.current.filter((n) => n.id !== nodeId)
+        const nextEdges = edgesRef.current.filter((e) => e.fromNode !== nodeId && e.toNode !== nodeId)
+        setNodes(nextNodes)
+        setEdges(nextEdges)
+        commit(nextNodes, nextEdges)
+        return
+      }
+      if (text === cur.text) return
+      const next = nodesRef.current.map((n) => (n.id === nodeId ? { ...n, text } : n))
+      setNodes(next)
+      commit(next, edgesRef.current)
+    },
+    [commit],
+  )
 
-  // ===== 编辑连线标签 =====
-  const handleEdgeLabelCommit = React.useCallback((edgeId: string, label: string): void => {
-    const next = edges.map((e) => (e.id === edgeId ? { ...e, label } : e))
-    setEdges(next)
-    commit(nodesRef.current, next)
-    setEditingEdgeId(null)
-  }, [commit, edges])
+  const handleEdgeLabelCommit = React.useCallback(
+    (edgeId: string, label: string): void => {
+      setEditingEdgeId(null)
+      const next = edgesRef.current.map((e) => (e.id === edgeId ? { ...e, label: label || undefined } : e))
+      setEdges(next)
+      commit(nodesRef.current, next)
+    },
+    [commit],
+  )
 
-  // ===== 自动整理 =====
+  // ===== 工具栏动作 =====
   const handleAutoLayout = React.useCallback((): void => {
     const cloned = nodesRef.current.map((n) => ({ ...n, x: 0, y: 0 }))
-    runForceLayout(cloned, edges)
+    runForceLayout(cloned, edgesRef.current)
     setNodes(cloned)
-    commit(cloned, edges)
+    commit(cloned, edgesRef.current)
     requestAnimationFrame(() => fitView(cloned))
-  }, [commit, edges, fitView])
+  }, [commit, fitView])
 
-  // ===== 截图当前视口 =====
   const handleScreenshot = React.useCallback(async (): Promise<void> => {
     if (!containerRef.current || !window.electronAPI.captureCanvasRegion) return
     const rect = containerRef.current.getBoundingClientRect()
@@ -374,28 +602,45 @@ export function CanvasView(): React.ReactElement {
         width: rect.width,
         height: rect.height,
       })
-      if (dataUrl) {
-        toast.success('已截图并复制到剪贴板')
-      } else {
-        toast.error('截图失败')
-      }
+      if (dataUrl) toast.success('已截图并复制到剪贴板')
+      else toast.error('截图失败')
     } catch (err) {
       console.error('[Canvas] 截图失败:', err)
       toast.error('截图失败')
     }
   }, [])
 
-  // ===== 渲染连线 =====
+  // ===== SVG 画布范围（覆盖所有节点，保证连线可被点击） =====
+  const svgBox = React.useMemo(() => {
+    const PAD = 2000
+    if (nodes.length === 0) return { x: -PAD, y: -PAD, width: PAD * 2, height: PAD * 2 }
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const n of nodes) {
+      minX = Math.min(minX, n.x)
+      minY = Math.min(minY, n.y)
+      maxX = Math.max(maxX, n.x + n.width)
+      maxY = Math.max(maxY, n.y + n.height)
+    }
+    return { x: minX - PAD, y: minY - PAD, width: maxX - minX + PAD * 2, height: maxY - minY + PAD * 2 }
+  }, [nodes])
+
   const edgeColorFor = (color?: string): string =>
-    color && COLOR_PRESETS[color] ? COLOR_PRESETS[color].border : 'var(--canvas-edge, hsl(var(--border)))'
+    color && COLOR_PRESETS[color] ? COLOR_PRESETS[color].border : 'hsl(var(--muted-foreground) / 0.55)'
+
+  const pendingFrom = pendingEdge ? nodes.find((n) => n.id === pendingEdge.fromNode) : undefined
 
   return (
     <div className="relative flex h-full flex-col overflow-hidden bg-content-area">
       {/* 工具栏 */}
       <div className="flex h-[38px] flex-shrink-0 items-center gap-1 border-b border-border/30 px-3">
         <span className="text-xs text-muted-foreground">Canvas</span>
-        <span className="ml-1 text-[11px] text-muted-foreground/60">JSON Canvas · 自由画布</span>
+        <span className="ml-1 hidden text-[11px] text-muted-foreground/60 sm:inline">
+          双击空白新建 · 拖锚点连线 · 空格拖拽平移 · ⌘滚轮缩放
+        </span>
         <div className="ml-auto flex items-center gap-0.5">
+          <ToolbarButton label="撤销 (⌘Z)" onClick={undo} disabled={!canUndo} icon={<Undo2 className="size-3.5" />} />
+          <ToolbarButton label="重做 (⌘⇧Z)" onClick={redo} disabled={!canRedo} icon={<Redo2 className="size-3.5" />} />
+          <div className="mx-1 h-4 w-px bg-border/50" />
           <ToolbarButton label="自动整理" onClick={handleAutoLayout} icon={<LayoutGrid className="size-3.5" />} />
           <ToolbarButton label="回到中心" onClick={() => fitView(nodesRef.current)} icon={<Crosshair className="size-3.5" />} />
           <ToolbarButton label="截图当前视图到剪贴板" onClick={handleScreenshot} icon={<Camera className="size-3.5" />} />
@@ -405,158 +650,257 @@ export function CanvasView(): React.ReactElement {
       {/* 画布容器 */}
       <div
         ref={containerRef}
-        className="canvas-grid relative min-h-0 flex-1 cursor-grab overflow-hidden active:cursor-grabbing"
-        onMouseDown={handlePanStart}
-        onWheel={handleWheel}
+        className={`canvas-grid relative min-h-0 flex-1 overflow-hidden ${
+          spaceDown ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'
+        }`}
+        onMouseDown={handleBackgroundMouseDown}
+        onDoubleClick={handleBackgroundDoubleClick}
       >
         {!loaded ? (
           <div className="flex h-full items-center justify-center text-sm text-muted-foreground/40">加载中…</div>
-        ) : nodes.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-sm text-muted-foreground/50">
-            空画布 — 让 Agent 生成一个 canvas，或粘贴 JSON Canvas 数据
-          </div>
         ) : (
-          <div
-            className="absolute left-0 top-0 origin-top-left"
-            style={{ transform: `translate(${view.offsetX}px, ${view.offsetY}px) scale(${view.scale})` }}
-          >
-            {/* 连线层 */}
-            <svg className="pointer-events-none absolute left-0 top-0 overflow-visible" style={{ width: 1, height: 1 }}>
-              <defs>
-                <marker id="canvas-arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
-                  <polygon points="0 0, 7 3, 0 6" fill="var(--canvas-edge, hsl(var(--border)))" />
-                </marker>
-              </defs>
-              {edges.map((e) => {
-                const from = nodes.find((n) => n.id === e.fromNode)
-                const to = nodes.find((n) => n.id === e.toNode)
-                if (!from || !to) return null
-                const fromCx = from.x + from.width / 2
-                const fromCy = from.y + from.height / 2
-                const toCx = to.x + to.width / 2
-                const toCy = to.y + to.height / 2
-                const p1 = getRectEdgePoint(from, toCx, toCy)
-                const p2 = getRectEdgePoint(to, fromCx, fromCy)
-                const midX = (p1.x + p2.x) / 2
-                const midY = (p1.y + p2.y) / 2
-                const dx = p2.x - p1.x
-                const dy = p2.y - p1.y
-                const cpx = midX + dy * 0.08
-                const cpy = midY - dx * 0.08
-                return (
-                  <g key={e.id}>
-                    <path
-                      d={`M ${p1.x} ${p1.y} Q ${cpx} ${cpy} ${p2.x} ${p2.y}`}
-                      stroke={edgeColorFor(e.color)}
-                      strokeWidth={1.5}
-                      fill="none"
-                      markerEnd="url(#canvas-arrow)"
+          <>
+            {nodes.length === 0 && (
+              <div className="pointer-events-none flex h-full items-center justify-center text-sm text-muted-foreground/50">
+                双击空白处创建第一个节点
+              </div>
+            )}
+            <div
+              className="absolute left-0 top-0 origin-top-left"
+              style={{ transform: `translate(${view.offsetX}px, ${view.offsetY}px) scale(${view.scale})` }}
+            >
+              {/* 连线层 */}
+              <svg
+                className="absolute"
+                style={{
+                  left: svgBox.x,
+                  top: svgBox.y,
+                  width: svgBox.width,
+                  height: svgBox.height,
+                  pointerEvents: 'none',
+                  overflow: 'visible',
+                }}
+              >
+                <defs>
+                  <marker id="canvas-arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+                    <polygon points="0 0, 7 3, 0 6" fill="hsl(var(--muted-foreground) / 0.55)" />
+                  </marker>
+                </defs>
+                <g transform={`translate(${-svgBox.x}, ${-svgBox.y})`}>
+                  {edges.map((e) => {
+                    const from = nodes.find((n) => n.id === e.fromNode)
+                    const to = nodes.find((n) => n.id === e.toNode)
+                    if (!from || !to) return null
+                    const { d, midX, midY } = computeEdgePath(from, to, e.fromSide, e.toSide)
+                    const selected = selectedIds.has(e.id)
+                    return (
+                      <g key={e.id}>
+                        {/* 加宽的透明命中区，方便点中细线 */}
+                        <path
+                          d={d}
+                          stroke="transparent"
+                          strokeWidth={12}
+                          fill="none"
+                          style={{ pointerEvents: 'stroke', cursor: 'pointer' }}
+                          onMouseDown={(ev) => {
+                            ev.stopPropagation()
+                            setSelectedIds(new Set([e.id]))
+                          }}
+                          onDoubleClick={(ev) => {
+                            ev.stopPropagation()
+                            setEditingEdgeId(e.id)
+                          }}
+                        />
+                        <path
+                          d={d}
+                          stroke={selected ? 'hsl(var(--primary))' : edgeColorFor(e.color)}
+                          strokeWidth={selected ? 2.5 : 1.5}
+                          fill="none"
+                          markerEnd="url(#canvas-arrow)"
+                          style={{ pointerEvents: 'none' }}
+                        />
+                        {e.label && editingEdgeId !== e.id && (
+                          <text
+                            x={midX}
+                            y={midY + 1}
+                            textAnchor="middle"
+                            dominantBaseline="middle"
+                            className="canvas-edge-label"
+                            style={{ pointerEvents: 'auto', cursor: 'text' }}
+                            onDoubleClick={(ev) => {
+                              ev.stopPropagation()
+                              setEditingEdgeId(e.id)
+                            }}
+                          >
+                            {e.label}
+                          </text>
+                        )}
+                      </g>
+                    )
+                  })}
+
+                  {/* 正在拖拽的连线 */}
+                  {pendingEdge && pendingFrom && (
+                    (() => {
+                      const a = getSidePoint(pendingFrom, pendingEdge.fromSide)
+                      return (
+                        <path
+                          d={`M ${a.x} ${a.y} L ${pendingEdge.toX} ${pendingEdge.toY}`}
+                          stroke="hsl(var(--primary))"
+                          strokeWidth={1.5}
+                          strokeDasharray="4 3"
+                          fill="none"
+                          style={{ pointerEvents: 'none' }}
+                        />
+                      )
+                    })()
+                  )}
+
+                  {/* 框选矩形 */}
+                  {marquee && (
+                    <rect
+                      x={marquee.x}
+                      y={marquee.y}
+                      width={marquee.width}
+                      height={marquee.height}
+                      fill="hsl(var(--primary) / 0.08)"
+                      stroke="hsl(var(--primary) / 0.5)"
+                      strokeWidth={1}
+                      style={{ pointerEvents: 'none' }}
                     />
-                    {e.label && editingEdgeId !== e.id && (
-                      <text
-                        x={midX}
-                        y={midY + 1}
-                        textAnchor="middle"
-                        dominantBaseline="middle"
-                        className="canvas-edge-label pointer-events-auto cursor-text"
-                        onDoubleClick={(ev) => {
-                          ev.stopPropagation()
-                          setEditingEdgeId(e.id)
+                  )}
+                </g>
+              </svg>
+
+              {/* 连线标签编辑 */}
+              {editingEdgeId &&
+                (() => {
+                  const e = edges.find((x) => x.id === editingEdgeId)
+                  if (!e) return null
+                  const from = nodes.find((n) => n.id === e.fromNode)
+                  const to = nodes.find((n) => n.id === e.toNode)
+                  if (!from || !to) return null
+                  const { midX, midY } = computeEdgePath(from, to, e.fromSide, e.toSide)
+                  return (
+                    <input
+                      ref={editInputRef}
+                      autoFocus
+                      defaultValue={e.label || ''}
+                      className="absolute z-20 -translate-x-1/2 -translate-y-1/2 rounded border border-primary bg-background px-1.5 py-0.5 text-[11px] text-foreground outline-none"
+                      style={{ left: midX, top: midY }}
+                      onMouseDown={(ev) => ev.stopPropagation()}
+                      onBlur={(ev) => handleEdgeLabelCommit(e.id, ev.target.value)}
+                      onKeyDown={(ev) => {
+                        if (ev.key === 'Enter') (ev.target as HTMLInputElement).blur()
+                      }}
+                    />
+                  )
+                })()}
+
+              {/* 节点层 */}
+              {nodes.map((n) => {
+                const preset = n.color ? COLOR_PRESETS[n.color] : undefined
+                const isEditing = editingNodeId === n.id
+                const isSelected = selectedIds.has(n.id)
+                const showAnchors = (hoveredNodeId === n.id || isSelected) && !isEditing
+                return (
+                  <div
+                    key={n.id}
+                    className="canvas-node group absolute flex select-none items-center rounded-md border shadow-sm"
+                    style={{
+                      left: n.x,
+                      top: n.y,
+                      width: n.width,
+                      minHeight: n.height,
+                      background: preset ? preset.bg : 'hsl(var(--card))',
+                      borderColor: isSelected ? 'hsl(var(--primary))' : preset ? preset.border : 'hsl(var(--border))',
+                      borderWidth: isSelected ? 2 : 1,
+                      color: preset ? preset.text : 'hsl(var(--card-foreground))',
+                      cursor: isEditing ? 'text' : 'move',
+                      boxShadow: isSelected ? '0 0 0 3px hsl(var(--primary) / 0.15)' : undefined,
+                    }}
+                    onMouseDown={(e) => handleNodeMouseDown(e, n.id)}
+                    onMouseEnter={() => setHoveredNodeId(n.id)}
+                    onMouseLeave={() => setHoveredNodeId((cur) => (cur === n.id ? null : cur))}
+                    onDoubleClick={(e) => {
+                      e.stopPropagation()
+                      setEditingNodeId(n.id)
+                    }}
+                  >
+                    {isEditing ? (
+                      <textarea
+                        ref={editTextareaRef}
+                        autoFocus
+                        defaultValue={n.text}
+                        className="h-full min-h-[inherit] w-full resize-none bg-transparent p-2.5 text-[13px] leading-snug outline-none"
+                        style={{ color: 'inherit' }}
+                        onFocus={(ev) => ev.currentTarget.select()}
+                        onMouseDown={(ev) => ev.stopPropagation()}
+                        onBlur={(ev) => handleNodeTextCommit(n.id, ev.target.value)}
+                        onKeyDown={(ev) => {
+                          if (ev.key === 'Enter' && !ev.shiftKey) {
+                            ev.preventDefault()
+                            ;(ev.target as HTMLTextAreaElement).blur()
+                          }
                         }}
-                      >
-                        {e.label}
-                      </text>
+                      />
+                    ) : (
+                      <div className="w-full whitespace-pre-wrap break-words p-2.5 text-[13px] leading-snug">
+                        {n.text || <span className="text-muted-foreground/40">空节点</span>}
+                      </div>
                     )}
-                  </g>
+
+                    {/* 四边连线锚点 */}
+                    {showAnchors &&
+                      ALL_SIDES.map((side) => {
+                        const pos: React.CSSProperties =
+                          side === 'top'
+                            ? { left: '50%', top: -5, marginLeft: -5 }
+                            : side === 'bottom'
+                              ? { left: '50%', bottom: -5, marginLeft: -5 }
+                              : side === 'left'
+                                ? { top: '50%', left: -5, marginTop: -5 }
+                                : { top: '50%', right: -5, marginTop: -5 }
+                        return (
+                          <div
+                            key={side}
+                            className="absolute size-2.5 rounded-full border-2 transition-transform hover:scale-150"
+                            style={{
+                              ...pos,
+                              background: 'hsl(var(--background))',
+                              borderColor: 'hsl(var(--primary))',
+                              cursor: 'crosshair',
+                              zIndex: 10,
+                            }}
+                            onMouseDown={(e) => handleAnchorMouseDown(e, n.id, side)}
+                          />
+                        )
+                      })}
+
+                    {/* resize 手柄 */}
+                    <div
+                      className="absolute bottom-0 right-0 size-3.5 cursor-nwse-resize opacity-0 transition-opacity group-hover:opacity-60 hover:!opacity-100"
+                      style={{
+                        background: 'linear-gradient(135deg, transparent 50%, currentColor 50%)',
+                        borderBottomRightRadius: 6,
+                      }}
+                      onMouseDown={(e) => handleResizeStart(e, n.id)}
+                    />
+                  </div>
                 )
               })}
-            </svg>
-
-            {/* 连线标签编辑输入 */}
-            {editingEdgeId && (() => {
-              const e = edges.find((x) => x.id === editingEdgeId)
-              if (!e) return null
-              const from = nodes.find((n) => n.id === e.fromNode)
-              const to = nodes.find((n) => n.id === e.toNode)
-              if (!from || !to) return null
-              const midX = (from.x + from.width / 2 + to.x + to.width / 2) / 2
-              const midY = (from.y + from.height / 2 + to.y + to.height / 2) / 2
-              return (
-                <input
-                  autoFocus
-                  defaultValue={e.label || ''}
-                  className="absolute z-20 -translate-x-1/2 -translate-y-1/2 rounded border border-primary bg-background px-1.5 py-0.5 text-[11px] text-foreground outline-none"
-                  style={{ left: midX, top: midY }}
-                  onBlur={(ev) => handleEdgeLabelCommit(e.id, ev.target.value)}
-                  onKeyDown={(ev) => {
-                    ev.stopPropagation()
-                    if (ev.key === 'Enter') (ev.target as HTMLInputElement).blur()
-                    if (ev.key === 'Escape') setEditingEdgeId(null)
-                  }}
-                />
-              )
-            })()}
-
-            {/* 节点层 */}
-            {nodes.map((n) => {
-              const preset = n.color ? COLOR_PRESETS[n.color] : undefined
-              const isEditing = editingNodeId === n.id
-              return (
-                <div
-                  key={n.id}
-                  className="canvas-node group absolute flex select-none items-center rounded-md border shadow-sm transition-shadow hover:shadow-md"
-                  style={{
-                    left: n.x,
-                    top: n.y,
-                    width: n.width,
-                    minHeight: n.height,
-                    background: preset ? preset.bg : 'hsl(var(--card))',
-                    borderColor: preset ? preset.border : 'hsl(var(--border))',
-                    color: preset ? preset.text : 'hsl(var(--card-foreground))',
-                    cursor: isEditing ? 'text' : 'move',
-                  }}
-                  onMouseDown={(e) => handleNodeDragStart(e, n.id)}
-                  onDoubleClick={(e) => {
-                    e.stopPropagation()
-                    setEditingNodeId(n.id)
-                  }}
-                >
-                  {isEditing ? (
-                    <textarea
-                      autoFocus
-                      defaultValue={n.text}
-                      className="h-full w-full resize-none bg-transparent p-3 text-[13px] leading-snug outline-none"
-                      style={{ color: 'inherit' }}
-                      onBlur={(ev) => handleNodeTextCommit(n.id, ev.target.value)}
-                      onKeyDown={(ev) => {
-                        ev.stopPropagation()
-                        if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) (ev.target as HTMLTextAreaElement).blur()
-                        if (ev.key === 'Escape') setEditingNodeId(null)
-                      }}
-                      onMouseDown={(ev) => ev.stopPropagation()}
-                    />
-                  ) : (
-                    <div className="w-full whitespace-pre-wrap break-words p-3 text-[13px] leading-snug">{n.text}</div>
-                  )}
-                  {/* resize 手柄 */}
-                  <div
-                    className="absolute bottom-0 right-0 size-3.5 cursor-nwse-resize opacity-0 transition-opacity group-hover:opacity-60 hover:!opacity-100"
-                    style={{
-                      background: 'linear-gradient(135deg, transparent 50%, currentColor 50%)',
-                      borderBottomRightRadius: 6,
-                    }}
-                    onMouseDown={(e) => handleResizeStart(e, n.id)}
-                  />
-                </div>
-              )
-            })}
-          </div>
+            </div>
+          </>
         )}
 
-        {/* 缩放指示 */}
-        {loaded && nodes.length > 0 && (
-          <div className="absolute bottom-2.5 right-3 rounded border border-border/40 bg-background/80 px-2 py-0.5 text-[11px] text-muted-foreground">
-            {Math.round(view.scale * 100)}%
+        {/* 状态条 */}
+        {loaded && (
+          <div className="pointer-events-none absolute bottom-2.5 right-3 flex items-center gap-2 rounded border border-border/40 bg-background/80 px-2 py-0.5 text-[11px] text-muted-foreground">
+            {selectedIds.size > 0 && <span>已选 {selectedIds.size}</span>}
+            <span>
+              {nodes.length} 节点 · {edges.length} 连线
+            </span>
+            <span>{Math.round(view.scale * 100)}%</span>
           </div>
         )}
       </div>
@@ -568,16 +912,18 @@ interface ToolbarButtonProps {
   label: string
   onClick: () => void
   icon: React.ReactNode
+  disabled?: boolean
 }
 
-function ToolbarButton({ label, onClick, icon }: ToolbarButtonProps): React.ReactElement {
+function ToolbarButton({ label, onClick, icon, disabled }: ToolbarButtonProps): React.ReactElement {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <button
           type="button"
           onClick={onClick}
-          className="flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+          disabled={disabled}
+          className="flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground disabled:pointer-events-none disabled:opacity-30"
           aria-label={label}
         >
           {icon}

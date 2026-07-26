@@ -6,7 +6,7 @@
 
 import { ipcMain, nativeTheme, shell, dialog, BrowserWindow, app, clipboard, nativeImage } from 'electron'
 import { join, resolve, sep, dirname } from 'node:path'
-import { existsSync, realpathSync, rmSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs'
+import { existsSync, realpathSync, rmSync, readFileSync, writeFileSync, mkdirSync, statSync, watch as fsWatch, type FSWatcher } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, isPromaPermissionMode, normalizePathForCompare } from '@proma/shared'
@@ -278,6 +278,11 @@ import { wechatBridge } from './lib/wechat-bridge'
 
 /** 文件浏览器中需要隐藏的系统文件 */
 const HIDDEN_FS_ENTRIES = new Set(['.DS_Store', 'Thumbs.db'])
+
+/* ── Canvas 外部修改检测的模块级状态 ── */
+let canvasWatcher: FSWatcher | null = null
+let lastCanvasWriteAt = 0
+let canvasWatchDebounce: ReturnType<typeof setTimeout> | null = null
 
 /** 已知编辑器应用名称白名单（macOS） */
 const KNOWN_EDITORS = [
@@ -1686,12 +1691,42 @@ export function registerIpcHandlers(): void {
 
   // ===== Canvas 画布持久化 =====
 
+  // ===== Canvas 外部修改检测 =====
+  // 用 fs.watch 监听 canvas 文件；若变更不是来自我们自己的保存（时间窗口区分），
+  // 读取新内容广播给渲染进程，由前端提示「重新加载 / 保留当前」。
+  function ensureCanvasWatcher(): void {
+    if (canvasWatcher) return
+    const path = getCanvasPath()
+    if (!existsSync(path)) return
+    try {
+      canvasWatcher = fsWatch(path, () => {
+        // 自身保存后的 2s 内的变更事件忽略（写文件也会触发 watch）
+        if (Date.now() - lastCanvasWriteAt < 2000) return
+        if (canvasWatchDebounce) clearTimeout(canvasWatchDebounce)
+        canvasWatchDebounce = setTimeout(() => {
+          try {
+            if (!existsSync(path)) return
+            const content = readFileSync(path, 'utf-8')
+            for (const win of BrowserWindow.getAllWindows()) {
+              win.webContents.send(CANVAS_IPC_CHANNELS.EXTERNAL_CHANGED, content)
+            }
+          } catch (err) {
+            console.error('[Canvas] 读取外部变更失败:', err)
+          }
+        }, 300)
+      })
+    } catch (err) {
+      console.error('[Canvas] 监听文件失败:', err)
+    }
+  }
+
   // 从磁盘加载 canvas.canvas（JSON Canvas 格式）
   ipcMain.handle(
     CANVAS_IPC_CHANNELS.LOAD,
     async (): Promise<string> => {
       const path = getCanvasPath()
       try {
+        ensureCanvasWatcher()
         if (!existsSync(path)) return ''
         return readFileSync(path, 'utf-8')
       } catch (err) {
@@ -1707,7 +1742,10 @@ export function registerIpcHandlers(): void {
     async (_, content: string): Promise<boolean> => {
       const path = getCanvasPath()
       try {
+        lastCanvasWriteAt = Date.now()
         await writeFile(path, content, 'utf-8')
+        lastCanvasWriteAt = Date.now()
+        ensureCanvasWatcher()
         return true
       } catch (err) {
         console.error('[Canvas] 保存失败:', err)
@@ -1721,7 +1759,9 @@ export function registerIpcHandlers(): void {
     CANVAS_IPC_CHANNELS.SAVE_SYNC,
     (event, content: string) => {
       try {
+        lastCanvasWriteAt = Date.now()
         writeFileSync(getCanvasPath(), content, 'utf-8')
+        lastCanvasWriteAt = Date.now()
         event.returnValue = true
       } catch (err) {
         console.error('[Canvas] 同步保存失败:', err)

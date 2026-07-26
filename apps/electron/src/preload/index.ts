@@ -378,6 +378,9 @@ export interface ElectronAPI {
   /** 截图当前画布区域到剪贴板，返回 dataURL */
   captureCanvasRegion: (rect: { x: number; y: number; width: number; height: number }) => Promise<string | null>
 
+  /** 订阅 canvas 文件被外部修改事件，返回取消订阅函数 */
+  onCanvasExternalChanged: (callback: (content: string) => void) => () => void
+
   // ===== 浏览器 =====
 
   /** 从磁盘加载最后访问的 URL */
@@ -1421,6 +1424,12 @@ const electronAPI: ElectronAPI = {
 
   captureCanvasRegion: (rect: { x: number; y: number; width: number; height: number }) => {
     return ipcRenderer.invoke(CANVAS_IPC_CHANNELS.CAPTURE, rect)
+  },
+
+  onCanvasExternalChanged: (callback: (content: string) => void) => {
+    const listener = (_event: unknown, content: string): void => callback(content)
+    ipcRenderer.on(CANVAS_IPC_CHANNELS.EXTERNAL_CHANGED, listener)
+    return () => ipcRenderer.removeListener(CANVAS_IPC_CHANNELS.EXTERNAL_CHANGED, listener)
   },
 
   // 浏览器 URL 持久化

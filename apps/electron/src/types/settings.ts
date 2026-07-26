@@ -331,6 +331,8 @@ export const CANVAS_IPC_CHANNELS = {
   SAVE_SYNC: 'canvas:save-sync',
   /** 截图当前画布区域（复制到剪贴板） */
   CAPTURE: 'canvas:capture-region',
+  /** 主进程 → 渲染进程：canvas 文件被外部修改 */
+  EXTERNAL_CHANGED: 'canvas:external-changed',
 } as const
 
 /** 浏览器 IPC 通道 */
