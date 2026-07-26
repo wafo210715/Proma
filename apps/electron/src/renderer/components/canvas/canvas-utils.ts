@@ -271,6 +271,88 @@ export function computeEdgePath(
   return { d, midX, midY }
 }
 
+// ===== 簇导出 =====
+
+/** 给定选中节点 id 集，抽取子集（选中节点 + 两端都在集内的边）并平移到原点附近 */
+export function extractCluster(
+  allNodes: CanvasNode[],
+  allEdges: CanvasEdge[],
+  selectedIds: Set<string>,
+): { nodes: CanvasNode[]; edges: CanvasEdge[] } {
+  const nodes = allNodes.filter((n) => selectedIds.has(n.id))
+  const idSet = new Set(nodes.map((n) => n.id))
+  const edges = allEdges.filter((e) => idSet.has(e.fromNode) && idSet.has(e.toNode))
+  // 平移到左上角附近，保留相对布局
+  let minX = Infinity, minY = Infinity
+  for (const n of nodes) {
+    minX = Math.min(minX, n.x)
+    minY = Math.min(minY, n.y)
+  }
+  const dx = minX === Infinity ? 0 : minX - 40
+  const dy = minY === Infinity ? 0 : minY - 40
+  return {
+    nodes: nodes.map((n) => ({ ...n, x: n.x - dx, y: n.y - dy })),
+    edges: edges.map((e) => ({ ...e })),
+  }
+}
+
+/** 由节点/边生成 .md 伴侣内容（agent 可搜索） */
+export function buildClusterMarkdown(
+  name: string,
+  context: string,
+  nodes: CanvasNode[],
+  edges: CanvasEdge[],
+): string {
+  const lines: string[] = [`# ${name}`, '']
+  if (context.trim()) {
+    lines.push(context.trim(), '')
+  }
+  const textNodes = nodes.filter((n) => n.type !== 'group')
+  if (textNodes.length > 0) {
+    lines.push('## 节点', '')
+    for (const n of textNodes) {
+      const t = (n.text || '').replace(/\n+/g, ' ').trim()
+      if (t) lines.push(`- ${t}`)
+    }
+    lines.push('')
+  }
+  if (edges.length > 0) {
+    const nameOf = (id: string): string => {
+      const n = nodes.find((x) => x.id === id)
+      return (n?.text || id).replace(/\n+/g, ' ').trim().slice(0, 40)
+    }
+    lines.push('## 连线', '')
+    for (const e of edges) {
+      const label = e.label ? ` 【${e.label}】` : ''
+      lines.push(`- ${nameOf(e.fromNode)} →${label} ${nameOf(e.toNode)}`)
+    }
+    lines.push('')
+  }
+  return lines.join('\n')
+}
+
+/** 用选中节点的包围盒创建一个 group 节点（包住选中，带 padding） */
+export function makeGroupForSelection(nodes: CanvasNode[], label: string): CanvasNode {
+  const PAD = 24
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (const n of nodes) {
+    minX = Math.min(minX, n.x)
+    minY = Math.min(minY, n.y)
+    maxX = Math.max(maxX, n.x + n.width)
+    maxY = Math.max(maxY, n.y + n.height)
+  }
+  return {
+    id: generateId(),
+    type: 'group',
+    x: Math.round(minX - PAD),
+    y: Math.round(minY - PAD - 22), // 预留顶部标题空间
+    width: Math.round(maxX - minX + PAD * 2),
+    height: Math.round(maxY - minY + PAD * 2 + 22),
+    text: '',
+    label,
+  }
+}
+
 // ===== 力导向初始布局（一次性，之后固定） =====
 
 export function runForceLayout(nodes: CanvasNode[], edges: CanvasEdge[]): void {

@@ -196,7 +196,7 @@ import { runAgent, stopAgent, generateAgentTitle, saveFilesToAgentSession, saveF
 import { permissionService } from './lib/agent-permission-service'
 import { askUserService } from './lib/agent-ask-user-service'
 import { exitPlanService } from './lib/agent-exit-plan-service'
-import { getAgentSessionWorkspacePath, getAgentWorkspacesDir, getWorkspaceSkillsDir, getWorkspaceFilesDir, getScratchPadPath, getCanvasPath, getBrowserUrlPath, getBrowserScreenshotsDir } from './lib/config-paths'
+import { getAgentSessionWorkspacePath, getAgentWorkspacesDir, getWorkspaceSkillsDir, getWorkspaceFilesDir, getScratchPadPath, getCanvasPath, getCanvasExportsDir, getBrowserUrlPath, getBrowserScreenshotsDir } from './lib/config-paths'
 import { getCachedDefaultAppInfo, saveCachedDefaultAppInfo } from './lib/default-app-cache'
 import { calculateStorageStats, cleanupStorage, cleanupTempFiles } from './lib/storage-service'
 import type { CleanupOptions } from './lib/storage-service'
@@ -1766,6 +1766,34 @@ export function registerIpcHandlers(): void {
       } catch (err) {
         console.error('[Canvas] 同步保存失败:', err)
         event.returnValue = false
+      }
+    }
+  )
+
+  // 导出选中簇：写 {name}.canvas + {name}.md 到 ~/.proma/canvas-exports/，重名自动加序号
+  ipcMain.handle(
+    CANVAS_IPC_CHANNELS.EXPORT,
+    async (
+      _,
+      payload: { name: string; canvasJson: string; markdown: string },
+    ): Promise<{ ok: boolean; canvasPath?: string; mdPath?: string; error?: string }> => {
+      try {
+        const dir = getCanvasExportsDir()
+        // 清理非法文件名字符
+        const safeBase = (payload.name || 'canvas').replace(/[/\\:*?"<>|]/g, '_').trim() || 'canvas'
+        let base = safeBase
+        let n = 1
+        while (existsSync(join(dir, `${base}.canvas`)) || existsSync(join(dir, `${base}.md`))) {
+          base = `${safeBase}-${n++}`
+        }
+        const canvasPath = join(dir, `${base}.canvas`)
+        const mdPath = join(dir, `${base}.md`)
+        await writeFile(canvasPath, payload.canvasJson, 'utf-8')
+        await writeFile(mdPath, payload.markdown, 'utf-8')
+        return { ok: true, canvasPath, mdPath }
+      } catch (err) {
+        console.error('[Canvas] 导出失败:', err)
+        return { ok: false, error: String(err) }
       }
     }
   )

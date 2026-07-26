@@ -381,6 +381,14 @@ export interface ElectronAPI {
   /** 订阅 canvas 文件被外部修改事件，返回取消订阅函数 */
   onCanvasExternalChanged: (callback: (content: string) => void) => () => void
 
+  /** 导出选中簇为独立 .canvas + .md 文件到 ~/.proma/canvas-exports/ */
+  exportCanvasCluster: (payload: { name: string; canvasJson: string; markdown: string }) => Promise<{
+    ok: boolean
+    canvasPath?: string
+    mdPath?: string
+    error?: string
+  }>
+
   // ===== 浏览器 =====
 
   /** 从磁盘加载最后访问的 URL */
@@ -1430,6 +1438,10 @@ const electronAPI: ElectronAPI = {
     const listener = (_event: unknown, content: string): void => callback(content)
     ipcRenderer.on(CANVAS_IPC_CHANNELS.EXTERNAL_CHANGED, listener)
     return () => ipcRenderer.removeListener(CANVAS_IPC_CHANNELS.EXTERNAL_CHANGED, listener)
+  },
+
+  exportCanvasCluster: (payload: { name: string; canvasJson: string; markdown: string }) => {
+    return ipcRenderer.invoke(CANVAS_IPC_CHANNELS.EXPORT, payload)
   },
 
   // 浏览器 URL 持久化

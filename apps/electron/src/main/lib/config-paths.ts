@@ -677,6 +677,19 @@ export function getCanvasPath(): string {
 }
 
 /**
+ * 获取 Canvas 导出目录（与 session jsonl 同级，属于 Proma 备份范畴，不进 OB vault）
+ *
+ * 如果目录不存在则自动创建。
+ *
+ * @returns ~/.proma/canvas-exports/
+ */
+export function getCanvasExportsDir(): string {
+  const dir = join(getConfigDir(), 'canvas-exports')
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+/**
  * 获取浏览器截图目录
  *
  * @returns ~/.proma/browser-screenshots

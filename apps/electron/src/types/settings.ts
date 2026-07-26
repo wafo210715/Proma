@@ -333,6 +333,8 @@ export const CANVAS_IPC_CHANNELS = {
   CAPTURE: 'canvas:capture-region',
   /** 主进程 → 渲染进程：canvas 文件被外部修改 */
   EXTERNAL_CHANGED: 'canvas:external-changed',
+  /** 导出选中簇为独立 .canvas + .md 文件 */
+  EXPORT: 'canvas:export-cluster',
 } as const
 
 /** 浏览器 IPC 通道 */

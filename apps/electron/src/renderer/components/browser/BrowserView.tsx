@@ -271,6 +271,8 @@ function BrowserCore({ variant, onClose }: BrowserCoreProps): React.ReactElement
       </div>
 
       {/* webview 容器 */}
+      {/* 用 absolute inset-0 而非 h-full：Electron webview 在 flexbox + height:100% 下有
+          高度感知 bug，guest 内容只渲染头部一截 */}
       <div ref={viewportRef} className="relative min-h-0 flex-1 overflow-hidden" onContextMenu={handleContextMenu}>
         {!loaded || initialSrcRef.current === null ? (
           <div className="flex h-full items-center justify-center text-sm text-muted-foreground/40">
@@ -281,7 +283,7 @@ function BrowserCore({ variant, onClose }: BrowserCoreProps): React.ReactElement
           <webview
             ref={handleWebviewRef}
             src={initialSrcRef.current}
-            className="h-full w-full"
+            className="absolute inset-0 h-full w-full border-none"
             allowpopups={true}
             webpreferences="contextIsolation=yes, nodeIntegration=no"
           />

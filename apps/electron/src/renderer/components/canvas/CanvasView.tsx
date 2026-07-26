@@ -16,7 +16,7 @@
 
 import * as React from 'react'
 import { useAtom, useAtomValue } from 'jotai'
-import { Camera, LayoutGrid, Crosshair, Undo2, Redo2 } from 'lucide-react'
+import { Camera, LayoutGrid, Crosshair, Undo2, Redo2, Group, Upload, Mic, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { canvasContentAtom, canvasLoadedAtom } from '@/atoms/tab-atoms'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -24,11 +24,14 @@ import {
   COLOR_PRESETS,
   NEW_NODE_WIDTH,
   NEW_NODE_HEIGHT,
+  buildClusterMarkdown,
   computeEdgePath,
+  extractCluster,
   generateId,
   getSidePoint,
   hitTestNode,
   inferSide,
+  makeGroupForSelection,
   normalizeRect,
   parseCanvas,
   rectsIntersect,
@@ -40,6 +43,13 @@ import {
   type NodeSide,
   type ViewState,
 } from './canvas-utils'
+
+/** 今日 YYMMDD，作为导出默认名 */
+function todayStamp(): string {
+  const d = new Date()
+  const p = (n: number): string => String(n).padStart(2, '0')
+  return `${String(d.getFullYear()).slice(2)}${p(d.getMonth() + 1)}${p(d.getDate())}`
+}
 
 const ALL_SIDES: NodeSide[] = ['top', 'right', 'bottom', 'left']
 const HISTORY_LIMIT = 80
@@ -62,6 +72,7 @@ export function CanvasView(): React.ReactElement {
   const [spaceDown, setSpaceDown] = React.useState(false)
   const [canUndo, setCanUndo] = React.useState(false)
   const [canRedo, setCanRedo] = React.useState(false)
+  const [exportOpen, setExportOpen] = React.useState(false)
 
   const containerRef = React.useRef<HTMLDivElement>(null)
   const lastSerializedRef = React.useRef<string>('')
@@ -609,6 +620,51 @@ export function CanvasView(): React.ReactElement {
       toast.error('截图失败')
     }
   }, [])
+
+  // ===== 成组 =====
+  const handleGroup = React.useCallback((): void => {
+    const sel = selectedRef.current
+    const members = nodesRef.current.filter((n) => sel.has(n.id) && n.type !== 'group')
+    if (members.length === 0) return
+    const group = makeGroupForSelection(members, '')
+    // group 放到数组最前（渲染在最底层）
+    const next = [group, ...nodesRef.current]
+    setNodes(next)
+    setSelectedIds(new Set([group.id]))
+    setEditingNodeId(group.id)
+    commit(next, edgesRef.current)
+  }, [commit])
+
+  // ===== 导出 =====
+  const selectedTextCount = React.useMemo(
+    () => nodes.filter((n) => selectedIds.has(n.id) && n.type !== 'group').length,
+    [nodes, selectedIds],
+  )
+
+  const handleExport = React.useCallback(
+    async (name: string, context: string): Promise<void> => {
+      const cluster = extractCluster(nodesRef.current, edgesRef.current, selectedRef.current)
+      if (cluster.nodes.length === 0) {
+        toast.error('没有选中可导出的节点')
+        return
+      }
+      const canvasJson = serializeCanvas(cluster.nodes, cluster.edges)
+      const markdown = buildClusterMarkdown(name, context, cluster.nodes, cluster.edges)
+      try {
+        const res = await window.electronAPI.exportCanvasCluster?.({ name, canvasJson, markdown })
+        if (res?.ok) {
+          toast.success('已导出到 canvas-exports', { description: res.mdPath })
+          setExportOpen(false)
+        } else {
+          toast.error('导出失败', { description: res?.error })
+        }
+      } catch (err) {
+        console.error('[Canvas] 导出失败:', err)
+        toast.error('导出失败')
+      }
+    },
+    [],
+  )
 
   // ===== SVG 画布范围（覆盖所有节点，保证连线可被点击） =====
   const svgBox = React.useMemo(() => {
