@@ -16,6 +16,10 @@ import {
   scratchPadPanelOpenAtom,
   BROWSER_ID,
   BROWSER_TITLE,
+  SCRATCH_PAD_ID,
+  SCRATCH_PAD_TITLE,
+  CANVAS_ID,
+  CANVAS_TITLE,
   tabsAtom,
   type TabItem,
 } from '@/atoms/tab-atoms'
@@ -106,5 +110,17 @@ export function closeBrowserInSplit(store: JotaiStore): void {
   store.set(browserPanelOpenAtom, false)
 
   if (tabs.some((tab) => tab.id === BROWSER_ID)) return
-  store.set(tabsAtom, [createBrowserTabItem(), ...tabs])
+
+  // 恢复固定 tab 顺序：草稿 → Canvas → Browser → 会话 tabs
+  // 不能简单 prepend，否则 Browser 会跑到草稿前面
+  const nonPinnedTabs = tabs.filter(
+    (t) => t.id !== SCRATCH_PAD_ID && t.id !== CANVAS_ID && t.id !== BROWSER_ID
+  )
+  const scratchTab: TabItem = tabs.find((t) => t.id === SCRATCH_PAD_ID) ?? {
+    id: SCRATCH_PAD_ID, type: 'scratch', sessionId: SCRATCH_PAD_ID, title: SCRATCH_PAD_TITLE,
+  }
+  const canvasTab: TabItem = tabs.find((t) => t.id === CANVAS_ID) ?? {
+    id: CANVAS_ID, type: 'canvas', sessionId: CANVAS_ID, title: CANVAS_TITLE,
+  }
+  store.set(tabsAtom, [scratchTab, canvasTab, createBrowserTabItem(), ...nonPinnedTabs])
 }

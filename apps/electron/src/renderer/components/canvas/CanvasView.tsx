@@ -567,7 +567,15 @@ export function CanvasView(): React.ReactElement {
       setEditingNodeId(null)
       const cur = nodesRef.current.find((n) => n.id === nodeId)
       if (!cur) return
-      // 新建后未输入内容 → 直接丢弃，避免留下空节点
+      // group 节点：写 label，空 label 也合法（不自动删除）
+      if (cur.type === 'group') {
+        if (text === (cur.label || '')) return
+        const next = nodesRef.current.map((n) => (n.id === nodeId ? { ...n, label: text || undefined } : n))
+        setNodes(next)
+        commit(next, edgesRef.current)
+        return
+      }
+      // 普通节点：新建后未输入内容 → 直接丢弃，避免留下空节点
       if (!text.trim() && !cur.text.trim()) {
         const nextNodes = nodesRef.current.filter((n) => n.id !== nodeId)
         const nextEdges = edgesRef.current.filter((e) => e.fromNode !== nodeId && e.toNode !== nodeId)
@@ -694,6 +702,17 @@ export function CanvasView(): React.ReactElement {
           双击空白新建 · 拖锚点连线 · 空格拖拽平移 · ⌘滚轮缩放
         </span>
         <div className="ml-auto flex items-center gap-0.5">
+          {selectedTextCount > 0 && (
+            <>
+              <ToolbarButton label="成组 (包住选中)" onClick={handleGroup} icon={<Group className="size-3.5" />} />
+              <ToolbarButton
+                label={`导出选中 ${selectedTextCount} 个节点为独立文件`}
+                onClick={() => setExportOpen(true)}
+                icon={<Upload className="size-3.5" />}
+              />
+              <div className="mx-1 h-4 w-px bg-border/50" />
+            </>
+          )}
           <ToolbarButton label="撤销 (⌘Z)" onClick={undo} disabled={!canUndo} icon={<Undo2 className="size-3.5" />} />
           <ToolbarButton label="重做 (⌘⇧Z)" onClick={redo} disabled={!canRedo} icon={<Redo2 className="size-3.5" />} />
           <div className="mx-1 h-4 w-px bg-border/50" />
@@ -859,6 +878,64 @@ export function CanvasView(): React.ReactElement {
                 const isEditing = editingNodeId === n.id
                 const isSelected = selectedIds.has(n.id)
                 const showAnchors = (hoveredNodeId === n.id || isSelected) && !isEditing
+
+                // group 节点：半透明包围框 + 顶部标题，渲染在最底层
+                if (n.type === 'group') {
+                  return (
+                    <div
+                      key={n.id}
+                      className="canvas-node absolute rounded-lg border-2 border-dashed"
+                      style={{
+                        left: n.x,
+                        top: n.y,
+                        width: n.width,
+                        height: n.height,
+                        borderColor: isSelected ? 'hsl(var(--primary))' : 'hsl(var(--muted-foreground) / 0.4)',
+                        background: 'hsl(var(--muted-foreground) / 0.05)',
+                        cursor: isEditing ? 'text' : 'move',
+                      }}
+                      onMouseDown={(e) => handleNodeMouseDown(e, n.id)}
+                      onDoubleClick={(e) => {
+                        e.stopPropagation()
+                        setEditingNodeId(n.id)
+                      }}
+                    >
+                      {isEditing ? (
+                        <textarea
+                          ref={editTextareaRef}
+                          autoFocus
+                          rows={1}
+                          defaultValue={n.label || ''}
+                          placeholder="簇名称"
+                          className="absolute left-2 top-1 w-[calc(100%-1rem)] resize-none bg-transparent text-[12px] font-medium text-muted-foreground outline-none"
+                          onFocus={(ev) => ev.currentTarget.select()}
+                          onMouseDown={(ev) => ev.stopPropagation()}
+                          onBlur={(ev) => handleNodeTextCommit(n.id, ev.target.value)}
+                          onKeyDown={(ev) => {
+                            if (ev.key === 'Enter') {
+                              ev.preventDefault()
+                              ;(ev.target as HTMLTextAreaElement).blur()
+                            }
+                          }}
+                        />
+                      ) : (
+                        <div className="absolute left-2 top-1 truncate text-[12px] font-medium text-muted-foreground">
+                          {n.label || <span className="text-muted-foreground/40">双击命名簇</span>}
+                        </div>
+                      )}
+                      {/* resize 手柄 */}
+                      <div
+                        className="absolute bottom-0 right-0 size-3.5 cursor-nwse-resize opacity-40 hover:opacity-100"
+                        style={{
+                          background: 'linear-gradient(135deg, transparent 50%, hsl(var(--muted-foreground) / 0.5) 50%)',
+                          borderBottomRightRadius: 8,
+                        }}
+                        onMouseDown={(e) => handleResizeStart(e, n.id)}
+                      />
+                    </div>
+                  )
+                }
+
                 return (
                   <div
                     key={n.id}
@@ -949,6 +1026,16 @@ export function CanvasView(): React.ReactElement {
           </>
         )}
 
+        {/* 导出对话框 */}
+        {exportOpen && (
+          <ExportDialog
+            count={selectedTextCount}
+            defaultName={todayStamp()}
+            onCancel={() => setExportOpen(false)}
+            onExport={handleExport}
+          />
+        )}
+
         {/* 状态条 */}
         {loaded && (
           <div className="pointer-events-none absolute bottom-2.5 right-3 flex items-center gap-2 rounded border border-border/40 bg-background/80 px-2 py-0.5 text-[11px] text-muted-foreground">
@@ -969,6 +1056,113 @@ interface ToolbarButtonProps {
   onClick: () => void
   icon: React.ReactNode
   disabled?: boolean
+}
+
+interface ExportDialogProps {
+  count: number
+  defaultName: string
+  onCancel: () => void
+  onExport: (name: string, context: string) => void | Promise<void>
+}
+
+/** 导出对话框：名称 + context（支持语音听写插入） */
+function ExportDialog({ count, defaultName, onCancel, onExport }: ExportDialogProps): React.ReactElement {
+  const [name, setName] = React.useState(defaultName)
+  const [context, setContext] = React.useState('')
+  const [busy, setBusy] = React.useState(false)
+  const contextRef = React.useRef<HTMLTextAreaElement>(null)
+
+  // 接住全局语音听写：派发 proma:insert-voice-dictation-text 时插入到 context 光标处
+  React.useEffect(() => {
+    const onInsert = (e: Event): void => {
+      const ce = e as CustomEvent<{ text: string }>
+      const ta = contextRef.current
+      if (!ta || !ce.detail?.text) return
+      e.preventDefault()
+      const start = ta.selectionStart ?? ta.value.length
+      const end = ta.selectionEnd ?? ta.value.length
+      const next = ta.value.slice(0, start) + ce.detail.text + ta.value.slice(end)
+      setContext(next)
+      requestAnimationFrame(() => {
+        ta.focus()
+        const pos = start + ce.detail.text.length
+        ta.setSelectionRange(pos, pos)
+      })
+    }
+    window.addEventListener('proma:insert-voice-dictation-text', onInsert)
+    return () => window.removeEventListener('proma:insert-voice-dictation-text', onInsert)
+  }, [])
+
+  const doExport = async (): Promise<void> => {
+    setBusy(true)
+    await onExport(name.trim() || defaultName, context)
+    setBusy(false)
+  }
+
+  return (
+    <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/30" onMouseDown={onCancel}>
+      <div
+        className="w-[440px] max-w-[90%] rounded-lg border border-border bg-background p-4 shadow-xl"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm font-medium text-foreground">导出选中簇（{count} 个节点）</h3>
+          <button type="button" onClick={onCancel} className="text-muted-foreground hover:text-foreground" aria-label="关闭">
+            <X className="size-4" />
+          </button>
+        </div>
+
+        <label className="mb-1 block text-[12px] text-muted-foreground">文件名</label>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          className="mb-3 w-full rounded border border-border bg-card px-2 py-1.5 text-[13px] text-foreground outline-none focus:border-primary"
+          placeholder="YYMMDD"
+        />
+
+        <div className="mb-1 flex items-center justify-between">
+          <label className="text-[12px] text-muted-foreground">这个簇在讲什么（可口述）</label>
+          <button
+            type="button"
+            onClick={() => window.electronAPI.toggleVoiceDictation?.().catch(console.error)}
+            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+          >
+            <Mic className="size-3" />
+            语音
+          </button>
+        </div>
+        <textarea
+          ref={contextRef}
+          value={context}
+          onChange={(e) => setContext(e.target.value)}
+          rows={5}
+          className="mb-1 w-full resize-none rounded border border-border bg-card px-2 py-1.5 text-[13px] leading-relaxed text-foreground outline-none focus:border-primary"
+          placeholder="对着这个思维导图口述它在讲什么，会写进伴侣 .md，供 agent 搜索。"
+        />
+        <p className="mb-3 text-[11px] text-muted-foreground/60">
+          导出到 ~/.proma/canvas-exports/（.canvas + .md）。语音先存原始转写，tone 改写待后续。
+        </p>
+
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded px-3 py-1.5 text-[13px] text-muted-foreground hover:bg-muted/50"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            onClick={doExport}
+            disabled={busy}
+            className="rounded bg-primary px-3 py-1.5 text-[13px] text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+          >
+            {busy ? '导出中…' : '导出'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function ToolbarButton({ label, onClick, icon, disabled }: ToolbarButtonProps): React.ReactElement {
