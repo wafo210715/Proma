@@ -186,6 +186,29 @@ function BrowserCore({ variant, onClose }: BrowserCoreProps): React.ReactElement
   // 父容器引用：截图时需要读取实际渲染尺寸
   const viewportRef = React.useRef<HTMLDivElement>(null)
 
+  // Electron webview 在 flexbox 容器里不自动感知尺寸变化。
+  // 用 ResizeObserver 监听容器尺寸，强制同步 webview 的 width/height。
+  React.useEffect(() => {
+    const vp = viewportRef.current
+    if (!vp) return
+
+    const syncSize = (): void => {
+      const cw = vp.clientWidth
+      const ch = vp.clientHeight
+      vp.querySelectorAll('webview').forEach((el) => {
+        const node = el as HTMLElement
+        node.style.width = cw + 'px'
+        node.style.height = ch + 'px'
+      })
+    }
+
+    // 初始同步
+    syncSize()
+    const observer = new ResizeObserver(syncSize)
+    observer.observe(vp)
+    return () => observer.disconnect()
+  }, [loaded, webviewEl])
+
   const handleScreenshot = React.useCallback(async (): Promise<void> => {
     if (!webviewEl) return
     try {

@@ -193,6 +193,23 @@ export function getRectEdgePoint(
   return { x: cx + dx * t, y: cy + dy * t }
 }
 
+/** 判断点离节点哪条边最近（拖拽落点开始时选入边） */
+export function nearestSide(
+  node: { x: number; y: number; width: number; height: number },
+  px: number,
+  py: number,
+): NodeSide {
+  const dTop = Math.abs(py - node.y)
+  const dBottom = Math.abs(py - (node.y + node.height))
+  const dLeft = Math.abs(px - node.x)
+  const dRight = Math.abs(px - (node.x + node.width))
+  const min = Math.min(dTop, dBottom, dLeft, dRight)
+  if (min === dTop) return 'top'
+  if (min === dBottom) return 'bottom'
+  if (min === dLeft) return 'left'
+  return 'right'
+}
+
 /** 取节点某一边的中点（连线锚点位置） */
 export function getSidePoint(
   node: { x: number; y: number; width: number; height: number },
@@ -251,6 +268,7 @@ export function computeEdgePath(
   to: Rect,
   explicitFromSide?: string,
   explicitToSide?: string,
+  bowOffset = 0,
 ): { d: string; midX: number; midY: number } {
   const auto = autoSides(from, to)
   const fromSide = (explicitFromSide as NodeSide) || auto.fromSide
@@ -262,13 +280,59 @@ export function computeEdgePath(
   const dist = Math.hypot(a2.x - a1.x, a2.y - a1.y)
   // 曲率随间距增长，夹在 [30,160]，避免近距离打结、远距离过直
   const curve = Math.min(Math.max(dist * 0.4, 30), 160)
-  const c1 = { x: a1.x + n1.x * curve, y: a1.y + n1.y * curve }
-  const c2 = { x: a2.x + n2.x * curve, y: a2.y + n2.y * curve }
+  let c1 = { x: a1.x + n1.x * curve, y: a1.y + n1.y * curve }
+  let c2 = { x: a2.x + n2.x * curve, y: a2.y + n2.y * curve }
+  // 平行/双向边的横向错开：沿两锚点连线的垂直方向弯曲（规范化 perp 保证同一通道多条边一致错开）
+  if (bowOffset !== 0 && dist > 0.01) {
+    // 用排序后的锚点向量作为规范方向，与边的方向（正/反）无关
+    const swap = a1.x !== a2.x ? a1.x > a2.x : a1.y > a2.y
+    const s = swap ? { x: a2.x, y: a2.y } : { x: a1.x, y: a1.y }
+    const t = swap ? { x: a1.x, y: a1.y } : { x: a2.x, y: a2.y }
+    const len = Math.hypot(t.x - s.x, t.y - s.y) || 1
+    const perp = { x: -(t.y - s.y) / len, y: (t.x - s.x) / len }
+    c1 = { x: c1.x + perp.x * bowOffset, y: c1.y + perp.y * bowOffset }
+    c2 = { x: c2.x + perp.x * bowOffset, y: c2.y + perp.y * bowOffset }
+  }
   // 三次贝塞尔 t=0.5 处的点，作为标签锚点
   const midX = 0.125 * a1.x + 0.375 * c1.x + 0.375 * c2.x + 0.125 * a2.x
   const midY = 0.125 * a1.y + 0.375 * c1.y + 0.375 * c2.y + 0.125 * a2.y
   const d = `M ${a1.x} ${a1.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${a2.x} ${a2.y}`
   return { d, midX, midY }
+}
+
+/**
+ * 为所有 edge 计算横向弯曲偏移：同一“通道”（无序的锚点对）上的多条边扇开。
+ * 通道签名用 (nodeId:side) 的无序对，确保 a→s 与 s→a 被归为同组。
+ */
+export function computeEdgeBows(edges: CanvasEdge[], nodes: CanvasNode[]): Map<string, number> {
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]))
+  const auto = (e: CanvasEdge): { fromSide: NodeSide; toSide: NodeSide } => {
+    const f = nodeMap.get(e.fromNode)
+    const t = nodeMap.get(e.toNode)
+    if (!f || !t) return { fromSide: 'right', toSide: 'left' }
+    const a = autoSides(f, t)
+    return { fromSide: (e.fromSide as NodeSide) || a.fromSide, toSide: (e.toSide as NodeSide) || a.toSide }
+  }
+  // 分组
+  const groups = new Map<string, string[]>()
+  for (const e of edges) {
+    const { fromSide, toSide } = auto(e)
+    const endA = `${e.fromNode}:${fromSide}`
+    const endB = `${e.toNode}:${toSide}`
+    const key = endA < endB ? `${endA}|${endB}` : `${endB}|${endA}`
+    const arr = groups.get(key)
+    if (arr) arr.push(e.id)
+    else groups.set(key, [e.id])
+  }
+  const SPACING = 26
+  const bows = new Map<string, number>()
+  for (const [, ids] of groups) {
+    const count = ids.length
+    ids.forEach((id, i) => {
+      bows.set(id, count === 1 ? 0 : (i - (count - 1) / 2) * SPACING)
+    })
+  }
+  return bows
 }
 
 // ===== 簇导出 =====

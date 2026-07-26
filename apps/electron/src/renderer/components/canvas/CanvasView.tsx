@@ -25,6 +25,7 @@ import {
   NEW_NODE_WIDTH,
   NEW_NODE_HEIGHT,
   buildClusterMarkdown,
+  computeEdgeBows,
   computeEdgePath,
   extractCluster,
   generateId,
@@ -32,6 +33,7 @@ import {
   hitTestNode,
   inferSide,
   makeGroupForSelection,
+  nearestSide,
   normalizeRect,
   parseCanvas,
   rectsIntersect,
@@ -487,17 +489,13 @@ export function CanvasView(): React.ReactElement {
         setPendingEdge(null)
 
         if (target && target.id !== nodeId) {
-          // 连到已有节点
-          const dup = edgesRef.current.some((x) => x.fromNode === nodeId && x.toNode === target.id)
-          if (dup) return
-          const tc = { x: target.x + target.width / 2, y: target.y + target.height / 2 }
-          const fc = { x: from.x + from.width / 2, y: from.y + from.height / 2 }
+          // 连到已有节点：允许一对节点间多条边（不去重）；toSide 取落点最近的边
           const edge: CanvasEdge = {
             id: generateId(),
             fromNode: nodeId,
             toNode: target.id,
             fromSide: side,
-            toSide: inferSide(fc.x - tc.x, fc.y - tc.y),
+            toSide: nearestSide(target, pt.x, pt.y),
           }
           const nextEdges = [...edgesRef.current, edge]
           setEdges(nextEdges)
@@ -688,6 +686,9 @@ export function CanvasView(): React.ReactElement {
     return { x: minX - PAD, y: minY - PAD, width: maxX - minX + PAD * 2, height: maxY - minY + PAD * 2 }
   }, [nodes])
 
+  // 多条平行/双向边的横向错开量
+  const edgeBows = React.useMemo(() => computeEdgeBows(edges, nodes), [edges, nodes])
+
   const edgeColorFor = (color?: string): string =>
     color && COLOR_PRESETS[color] ? COLOR_PRESETS[color].border : 'hsl(var(--muted-foreground) / 0.55)'
 
@@ -766,7 +767,7 @@ export function CanvasView(): React.ReactElement {
                     const from = nodes.find((n) => n.id === e.fromNode)
                     const to = nodes.find((n) => n.id === e.toNode)
                     if (!from || !to) return null
-                    const { d, midX, midY } = computeEdgePath(from, to, e.fromSide, e.toSide)
+                    const { d, midX, midY } = computeEdgePath(from, to, e.fromSide, e.toSide, edgeBows.get(e.id) || 0)
                     const selected = selectedIds.has(e.id)
                     return (
                       <g key={e.id}>
@@ -855,7 +856,7 @@ export function CanvasView(): React.ReactElement {
                   const from = nodes.find((n) => n.id === e.fromNode)
                   const to = nodes.find((n) => n.id === e.toNode)
                   if (!from || !to) return null
-                  const { midX, midY } = computeEdgePath(from, to, e.fromSide, e.toSide)
+                  const { midX, midY } = computeEdgePath(from, to, e.fromSide, e.toSide, edgeBows.get(e.id) || 0)
                   return (
                     <input
                       ref={editInputRef}
