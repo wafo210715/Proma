@@ -343,6 +343,12 @@ export const CANVAS_IPC_CHANNELS = {
   SAVE_SESSION_SYNC: 'canvas:save-session-sync',
 } as const
 
+/** 屏幕区域截图 IPC 通道（微信式十字框选，供输入框附件用） */
+export const SCREEN_CAPTURE_IPC_CHANNELS = {
+  /** 交互式框选屏幕区域，返回裸 base64 PNG（取消/失败返回 cancelled/error） */
+  CAPTURE_REGION: 'screen-capture:region',
+} as const
+
 /** 浏览器 IPC 通道 */
 export const BROWSER_IPC_CHANNELS = {
   /** 从磁盘加载最后访问的 URL */

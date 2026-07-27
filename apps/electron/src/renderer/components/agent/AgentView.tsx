@@ -17,7 +17,7 @@ import * as React from 'react'
 import { unstable_batchedUpdates } from 'react-dom'
 import { useAtom, useAtomValue, useSetAtom, useStore } from 'jotai'
 import { toast } from 'sonner'
-import { Box, CornerDownLeft, Square, Settings, Paperclip, FolderPlus, X, Copy, Check, Brain, Sparkles, Eye, ChevronDown } from 'lucide-react'
+import { Box, CornerDownLeft, Square, Settings, Paperclip, FolderPlus, Crop, X, Copy, Check, Brain, Sparkles, Eye, ChevronDown } from 'lucide-react'
 import { AgentMessages } from './AgentMessages'
 import { AgentHeader } from './AgentHeader'
 import { AgentMessageQueue } from './AgentMessageQueue'
@@ -1673,6 +1673,43 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     }
   }, [sessionId, setAttachedDirsMap])
 
+  /** 微信式屏幕截图：交互框选一块屏幕区域 → 作为图片附件加入输入框 */
+  const handleCaptureScreenRegion = React.useCallback(async (): Promise<void> => {
+    if (!window.electronAPI.captureScreenRegion) {
+      toast.error('当前版本不支持屏幕截图')
+      return
+    }
+    try {
+      const res = await window.electronAPI.captureScreenRegion()
+      if (res.cancelled) return // 用户 Esc 取消，不提示
+      if (res.error || !res.base64) {
+        toast.error(res.error || '截图失败')
+        return
+      }
+      const base64 = res.base64
+      const p = (n: number): string => String(n).padStart(2, '0')
+      const t = new Date()
+      const stamp = `${String(t.getFullYear()).slice(2)}${p(t.getMonth() + 1)}${p(t.getDate())}-${p(t.getHours())}${p(t.getMinutes())}${p(t.getSeconds())}`
+      const filename = makeUniqueFilename(`screenshot-${stamp}.png`, pendingFilesRef.current.map((f) => f.filename))
+      const pending: AgentPendingFile = {
+        id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        filename,
+        mediaType: 'image/png',
+        size: Math.round(base64.length * 0.75),
+        previewUrl: `data:image/png;base64,${base64}`,
+      }
+      // 存裸 base64（与 __pendingAgentFileData 约定一致，发送时按 base64 落盘）
+      if (!window.__pendingAgentFileData) {
+        window.__pendingAgentFileData = new Map<string, string>()
+      }
+      window.__pendingAgentFileData.set(pending.id, base64)
+      addPendingFile(pending)
+    } catch (err) {
+      console.error('[AgentView] 屏幕截图失败:', err)
+      toast.error('屏幕截图失败')
+    }
+  }, [addPendingFile, makeUniqueFilename])
+
   /** 移除待发送文件；联动开启时同步移除 partner 的镜像草稿。 */
   const handleRemoveFile = React.useCallback((id: string): void => {
     removePendingFile(id)
@@ -2822,6 +2859,27 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       ),
     },
     {
+      key: 'capture-screen',
+      node: (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className={inputToolbarButtonClass}
+              onClick={handleCaptureScreenRegion}
+            >
+              <Crop className="size-5" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="top">
+            <p>截图（框选屏幕区域）</p>
+          </TooltipContent>
+        </Tooltip>
+      ),
+    },
+    {
       key: 'attach-folder',
       node: (
         <Tooltip>
@@ -2882,6 +2940,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     agentThinking,
     setAgentThinking,
     handleOpenFileDialog,
+    handleCaptureScreenRegion,
     handleAttachFolder,
     contextStatus.inputTokens,
     contextStatus.outputTokens,
