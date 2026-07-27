@@ -869,6 +869,10 @@ export function CanvasView({
         return
       }
       // 将 dataURL 转为 AgentPendingFile
+      // 关键：__pendingAgentFileData 的约定是「裸 base64」（不含 data:image/png;base64, 前缀），
+      // 发送落盘时会按 base64 解码。若存完整 dataURL，前缀会被当作 base64 一并解码，
+      // 导致 PNG 头损坏（下游 qwen-vision/sips/zlib 均无法解析）。
+      const base64 = dataUrl.includes(',') ? dataUrl.slice(dataUrl.indexOf(',') + 1) : dataUrl
       const timestamp = new Date()
       const p = (n: number): string => String(n).padStart(2, '0')
       const stamp = `${String(timestamp.getFullYear()).slice(2)}${p(timestamp.getMonth() + 1)}${p(timestamp.getDate())}-${p(timestamp.getHours())}${p(timestamp.getMinutes())}`
@@ -877,14 +881,14 @@ export function CanvasView({
         id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
         filename,
         mediaType: 'image/png',
-        size: Math.round(dataUrl.length * 0.75), // base64 估算
+        size: Math.round(base64.length * 0.75), // base64 估算
         previewUrl: dataUrl,
       }
-      // 存 base64 data 供发送时读取
+      // 存裸 base64 供发送时读取（与 AgentView/fileToBase64 约定一致）
       if (!window.__pendingAgentFileData) {
         window.__pendingAgentFileData = new Map<string, string>()
       }
-      window.__pendingAgentFileData.set(pending.id, dataUrl)
+      window.__pendingAgentFileData.set(pending.id, base64)
       // 写入 session pending files atom
       storeSetPendingFiles(sessionId, (prev) => [...prev, pending])
       toast.success(`已添加到 Agent 输入：${filename}`)
