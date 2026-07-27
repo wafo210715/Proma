@@ -17,7 +17,7 @@ import * as React from 'react'
 import { unstable_batchedUpdates } from 'react-dom'
 import { useAtom, useAtomValue, useSetAtom, useStore } from 'jotai'
 import { toast } from 'sonner'
-import { CornerDownLeft, Square, Settings, X, Copy, Check, Brain, Sparkles, ListTodo, Paperclip } from 'lucide-react'
+import { CornerDownLeft, Square, Settings, X, Copy, Check, Brain, Sparkles, ListTodo, Paperclip, Crop } from 'lucide-react'
 import { AgentMessages, type AgentHistoryQuoteNavigationRequest } from './AgentMessages'
 import { AgentHeader } from './AgentHeader'
 import { AgentMessageQueue } from './AgentMessageQueue'
@@ -1357,6 +1357,43 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const makeUniqueFilename = React.useCallback((originalName: string, existingNames: string[]): string => {
     return makeUniqueAttachmentName(originalName, existingNames)
   }, [])
+
+  /** 微信式屏幕截图：交互框选一块屏幕区域 → 作为图片附件加入输入框 */
+  const handleCaptureScreenRegion = React.useCallback(async (): Promise<void> => {
+    if (!window.electronAPI.captureScreenRegion) {
+      toast.error('当前版本不支持屏幕截图')
+      return
+    }
+    try {
+      const res = await window.electronAPI.captureScreenRegion()
+      if (res.cancelled) return // 用户 Esc 取消，不提示
+      if (res.error || !res.base64) {
+        toast.error(res.error || '截图失败')
+        return
+      }
+      const base64 = res.base64
+      const p = (n: number): string => String(n).padStart(2, '0')
+      const t = new Date()
+      const stamp = `${String(t.getFullYear()).slice(2)}${p(t.getMonth() + 1)}${p(t.getDate())}-${p(t.getHours())}${p(t.getMinutes())}${p(t.getSeconds())}`
+      const filename = makeUniqueFilename(`screenshot-${stamp}.png`, pendingFilesRef.current.map((f) => f.filename))
+      const pending: AgentPendingFile = {
+        id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        filename,
+        mediaType: 'image/png',
+        size: Math.round(base64.length * 0.75),
+        previewUrl: `data:image/png;base64,${base64}`,
+      }
+      // 存裸 base64（与 __pendingAgentFileData 约定一致，发送时按 base64 落盘）
+      if (!window.__pendingAgentFileData) {
+        window.__pendingAgentFileData = new Map<string, string>()
+      }
+      window.__pendingAgentFileData.set(pending.id, base64)
+      setPendingFiles((prev) => [...prev, pending])
+    } catch (err) {
+      console.error('[AgentView] 屏幕截图失败:', err)
+      toast.error('屏幕截图失败')
+    }
+  }, [makeUniqueFilename])
 
   const attachSessionFile = React.useCallback(async (filePath: string): Promise<void> => {
     const updated = await window.electronAPI.attachFile({ sessionId, filePath })
@@ -2900,6 +2937,26 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       ),
     },
     {
+      key: 'capture-screen',
+      node: (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className={inputToolbarButtonClass}
+              onClick={() => void handleCaptureScreenRegion()}
+              aria-label="截图并附加"
+            >
+              <Crop className="size-[17px]" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="top"><p>截图并附加</p></TooltipContent>
+        </Tooltip>
+      ),
+    },
+    {
       key: 'context-usage',
       node: (
         <ContextUsageBadge
@@ -2925,6 +2982,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     sessionId,
     agentThinking,
     setAgentThinking,
+
     streaming,
     handleAttachContent,
     handleCompact,

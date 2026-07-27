@@ -442,6 +442,7 @@ export const CANVAS_IPC_CHANNELS = {
   SAVE_SESSION_SYNC: 'canvas:save-session-sync',
 } as const
 
+
 /** 应用图标 IPC 通道 */
 export const APP_ICON_IPC_CHANNELS = {
   /** 设置应用图标（variant ID） */
@@ -592,4 +593,10 @@ export const STORAGE_IPC_CHANNELS = {
   CLEANUP: 'storage:cleanup',
   /** 仅清理临时文件（启动时/快速清理） */
   CLEANUP_TEMP: 'storage:cleanup-temp',
+} as const
+
+/** 屏幕区域截图 IPC 通道（微信式十字框选，供输入框附件用） */
+export const SCREEN_CAPTURE_IPC_CHANNELS = {
+  /** 交互式框选屏幕区域，返回裸 base64 PNG（取消/失败返回 cancelled/error） */
+  CAPTURE_REGION: 'screen-capture:region',
 } as const
