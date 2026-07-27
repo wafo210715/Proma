@@ -505,10 +505,18 @@ export function MainArea(): React.ReactElement {
                 )}
                 {showCanvasPanel && (
                   <div className="min-w-[280px] h-full overflow-hidden" style={secondaryPaneStyle}>
-                    <CanvasPane
-                      sessionId={canvasPanelSessionId ?? undefined}
-                      onClose={handleCloseCanvasPanel}
-                    />
+                    {/* key 按会话 remount：切换 session 时重建干净的 nodes/history/refs/view，
+                        避免复用同一实例带旧会话遗留状态（新会话双击建 node 白屏）。
+                        TabErrorBoundary：画布渲染异常时降级为错误卡片，不再整树白屏。 */}
+                    <TabErrorBoundary
+                      key={canvasPanelSessionId ?? 'canvas-global'}
+                      sessionId={canvasPanelSessionId ?? 'canvas-global'}
+                    >
+                      <CanvasPane
+                        sessionId={canvasPanelSessionId ?? undefined}
+                        onClose={handleCloseCanvasPanel}
+                      />
+                    </TabErrorBoundary>
                   </div>
                 )}
               </div>

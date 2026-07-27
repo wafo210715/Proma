@@ -965,6 +965,8 @@ export function CanvasView({
     let changed = false
     const next = nodesRef.current.map((n) => {
       if (n.type === 'group') return n // group 高度显式管理，不测量
+      // 正在编辑的节点：textarea 高度随输入瞬变，编辑结束后再测量，避免编辑态下反复回写
+      if (n.id === editingRef.current.node) return n
       const el = nodeElsRef.current.get(n.id)
       if (!el) return n
       const h = el.offsetHeight // 不受画布 scale transform 影响，返回布局高度
