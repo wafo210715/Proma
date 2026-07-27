@@ -329,8 +329,6 @@ export const CANVAS_IPC_CHANNELS = {
   SAVE: 'canvas:save',
   /** 同步保存（beforeunload 场景） */
   SAVE_SYNC: 'canvas:save-sync',
-  /** 截图当前画布区域（复制到剪贴板） */
-  CAPTURE: 'canvas:capture-region',
   /** 主进程 → 渲染进程：canvas 文件被外部修改 */
   EXTERNAL_CHANGED: 'canvas:external-changed',
   /** 导出选中簇为独立 .canvas + .md 文件 */

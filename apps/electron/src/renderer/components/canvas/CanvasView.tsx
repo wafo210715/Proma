@@ -16,7 +16,7 @@
 
 import * as React from 'react'
 import { useAtom, useAtomValue, useStore } from 'jotai'
-import { Camera, LayoutGrid, Crosshair, Undo2, Redo2, Group, Upload, Mic, X, PanelRight, Send } from 'lucide-react'
+import { LayoutGrid, Crosshair, Undo2, Redo2, Group, Upload, Mic, X, PanelRight } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   canvasContentAtom,
@@ -24,8 +24,6 @@ import {
   sessionCanvasContentsAtom,
   sessionCanvasLoadedAtom,
 } from '@/atoms/tab-atoms'
-import { agentPendingFilesAtomFamily } from '@/atoms/agent-atoms'
-import type { AgentPendingFile } from '@proma/shared'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { tearOffCanvasToSplit, closeCanvasInSplit } from './canvas-opener'
 import {
@@ -819,84 +817,11 @@ export function CanvasView({
     requestAnimationFrame(() => fitView(cloned))
   }, [commit, fitView])
 
-  const handleScreenshot = React.useCallback(async (): Promise<void> => {
-    if (!containerRef.current || !window.electronAPI.captureCanvasRegion) return
-    const rect = containerRef.current.getBoundingClientRect()
-    try {
-      const dataUrl = await window.electronAPI.captureCanvasRegion({
-        x: rect.left,
-        y: rect.top,
-        width: rect.width,
-        height: rect.height,
-      })
-      if (dataUrl) toast.success('已截图并复制到剪贴板')
-      else toast.error('截图失败')
-    } catch (err) {
-      console.error('[Canvas] 截图失败:', err)
-      toast.error('截图失败')
-    }
-  }, [])
-
-  // Page 模式：拖到分屏 + session canvas 截图发给 agent 所需的 store 引用
-  // 注意：必须在 handleSendToAgent 之前定义，避免 TDZ
+  // Page 模式：拖到右侧分屏所需的 store 引用
   const store = useStore()
   const handleTearOff = React.useCallback((): void => {
     tearOffCanvasToSplit(store)
   }, [store])
-
-  // 用于 session canvas 截图发给 agent
-  const storeSetPendingFiles = React.useCallback(
-    (sid: string, updater: (prev: AgentPendingFile[]) => AgentPendingFile[]) => {
-      const pendingAtom = agentPendingFilesAtomFamily(sid)
-      store.set(pendingAtom, updater)
-    },
-    [store],
-  )
-
-  // ===== 截图发给 Agent（仅 session canvas 模式） =====
-  const handleSendToAgent = React.useCallback(async (): Promise<void> => {
-    if (!isSession || !sessionId || !containerRef.current || !window.electronAPI.captureCanvasRegion) return
-    const rect = containerRef.current.getBoundingClientRect()
-    try {
-      const dataUrl = await window.electronAPI.captureCanvasRegion({
-        x: rect.left,
-        y: rect.top,
-        width: rect.width,
-        height: rect.height,
-      })
-      if (!dataUrl) {
-        toast.error('截图失败')
-        return
-      }
-      // 将 dataURL 转为 AgentPendingFile
-      // 关键：__pendingAgentFileData 的约定是「裸 base64」（不含 data:image/png;base64, 前缀），
-      // 发送落盘时会按 base64 解码。若存完整 dataURL，前缀会被当作 base64 一并解码，
-      // 导致 PNG 头损坏（下游 qwen-vision/sips/zlib 均无法解析）。
-      const base64 = dataUrl.includes(',') ? dataUrl.slice(dataUrl.indexOf(',') + 1) : dataUrl
-      const timestamp = new Date()
-      const p = (n: number): string => String(n).padStart(2, '0')
-      const stamp = `${String(timestamp.getFullYear()).slice(2)}${p(timestamp.getMonth() + 1)}${p(timestamp.getDate())}-${p(timestamp.getHours())}${p(timestamp.getMinutes())}`
-      const filename = `canvas-${stamp}.png`
-      const pending: AgentPendingFile = {
-        id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        filename,
-        mediaType: 'image/png',
-        size: Math.round(base64.length * 0.75), // base64 估算
-        previewUrl: dataUrl,
-      }
-      // 存裸 base64 供发送时读取（与 AgentView/fileToBase64 约定一致）
-      if (!window.__pendingAgentFileData) {
-        window.__pendingAgentFileData = new Map<string, string>()
-      }
-      window.__pendingAgentFileData.set(pending.id, base64)
-      // 写入 session pending files atom
-      storeSetPendingFiles(sessionId, (prev) => [...prev, pending])
-      toast.success(`已添加到 Agent 输入：${filename}`)
-    } catch (err) {
-      console.error('[Canvas] 发送给 Agent 失败:', err)
-      toast.error('发送给 Agent 失败')
-    }
-  }, [isSession, sessionId, storeSetPendingFiles])
 
   // ===== 成组 =====
   const handleGroup = React.useCallback((): void => {
@@ -1019,10 +944,6 @@ export function CanvasView({
           <div className="mx-1 h-4 w-px bg-border/50" />
           <ToolbarButton label="自动整理" onClick={handleAutoLayout} icon={<LayoutGrid className="size-3.5" />} />
           <ToolbarButton label="回到中心" onClick={() => fitView(nodesRef.current)} icon={<Crosshair className="size-3.5" />} />
-          <ToolbarButton label="截图当前视图到剪贴板" onClick={handleScreenshot} icon={<Camera className="size-3.5" />} />
-          {isSession && (
-            <ToolbarButton label="截图并发送给 Agent" onClick={handleSendToAgent} icon={<Send className="size-3.5" />} />
-          )}
           {!isPane && (
             <ToolbarButton label="拖到 Agent 右侧分屏" onClick={handleTearOff} icon={<PanelRight className="size-3.5" />} />
           )}

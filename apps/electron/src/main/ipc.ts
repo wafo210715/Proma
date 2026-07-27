@@ -1807,28 +1807,6 @@ export function registerIpcHandlers(): void {
     }
   )
 
-  // 截图当前画布区域：按 rect 截取焦点窗口的可见像素（已缩放好的视图），复制到剪贴板
-  ipcMain.handle(
-    CANVAS_IPC_CHANNELS.CAPTURE,
-    async (_, rect: { x: number; y: number; width: number; height: number }): Promise<string | null> => {
-      const win = BrowserWindow.getFocusedWindow()
-      if (!win) return null
-      try {
-        const image = await win.webContents.capturePage({
-          x: Math.round(rect.x),
-          y: Math.round(rect.y),
-          width: Math.round(rect.width),
-          height: Math.round(rect.height),
-        })
-        clipboard.writeImage(image)
-        return image.toDataURL()
-      } catch (err) {
-        console.error('[Canvas] 截图失败:', err)
-        return null
-      }
-    }
-  )
-
   // ===== Session Canvas 画布持久化 =====
 
   // 从磁盘加载 session 专属画布

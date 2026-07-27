@@ -375,8 +375,6 @@ export interface ElectronAPI {
   /** 同步保存内容到 canvas.canvas（beforeunload 场景） */
   saveCanvasSync: (content: string) => boolean
 
-  /** 截图当前画布区域到剪贴板，返回 dataURL */
-  captureCanvasRegion: (rect: { x: number; y: number; width: number; height: number }) => Promise<string | null>
   /** 微信式屏幕区域截图：交互框选，返回裸 base64 PNG / 取消 / 错误 */
   captureScreenRegion: () => Promise<{ base64?: string; cancelled?: boolean; error?: string }>
 
@@ -1439,10 +1437,6 @@ const electronAPI: ElectronAPI = {
 
   saveCanvasSync: (content: string) => {
     return ipcRenderer.sendSync(CANVAS_IPC_CHANNELS.SAVE_SYNC, content)
-  },
-
-  captureCanvasRegion: (rect: { x: number; y: number; width: number; height: number }) => {
-    return ipcRenderer.invoke(CANVAS_IPC_CHANNELS.CAPTURE, rect)
   },
 
   captureScreenRegion: () => {
