@@ -174,6 +174,8 @@ export function CanvasView({
   const lastMouseCanvasRef = React.useRef<{ x: number; y: number }>({ x: 0, y: 0 })
 
   const containerRef = React.useRef<HTMLDivElement>(null)
+  // 文本节点 DOM 引用表：用于测量真实渲染高度（节点用 minHeight，多行文字会撑高）
+  const nodeElsRef = React.useRef<Map<string, HTMLDivElement>>(new Map())
   const lastSerializedRef = React.useRef<string>('')
   const historyRef = React.useRef<string[]>([])
   const historyIndexRef = React.useRef(-1)
@@ -953,6 +955,32 @@ export function CanvasView({
   // 多条平行/双向边的横向错开量
   const edgeBows = React.useMemo(() => computeEdgeBows(edges, nodes), [edges, nodes])
 
+  // ===== 同步节点真实高度 =====
+  // 文本节点用 minHeight 渲染，多行文字会把节点撑高，但 n.height 仍是初始值。
+  // 若不同步，连线锚点（getSidePoint 用 height）会偏移、命中测试（hitTestNode 用 height）
+  // 会在节点下半部分失效，导致“连线终点偏移”和“从某方向连线变成新建节点”。
+  // 这里在每次渲染后测量真实 offsetHeight 并回写，宽度固定 → 换行确定 → 高度收敛，不会死循环。
+  React.useLayoutEffect(() => {
+    if (!loaded) return
+    let changed = false
+    const next = nodesRef.current.map((n) => {
+      if (n.type === 'group') return n // group 高度显式管理，不测量
+      const el = nodeElsRef.current.get(n.id)
+      if (!el) return n
+      const h = el.offsetHeight // 不受画布 scale transform 影响，返回布局高度
+      if (h > 0 && Math.abs(h - n.height) > 0.5) {
+        changed = true
+        return { ...n, height: h }
+      }
+      return n
+    })
+    if (changed) {
+      setNodes(next)
+      // 静默持久化（不记历史）：让磁盘与命中测试用到的高度一致，重载后几何正确
+      commit(next, edgesRef.current, false)
+    }
+  }, [nodes, loaded, commit])
+
   const edgeColorFor = (color?: string): string =>
     color && COLOR_PRESETS[color] ? COLOR_PRESETS[color].border : 'hsl(var(--muted-foreground) / 0.55)'
 
@@ -1177,6 +1205,8 @@ export function CanvasView({
                       onMouseDown={(ev) => ev.stopPropagation()}
                       onBlur={(ev) => handleEdgeLabelCommit(e.id, ev.target.value)}
                       onKeyDown={(ev) => {
+                        // 输入法 composing（Enter 选词）阶段不提交
+                        if (ev.nativeEvent.isComposing || ev.keyCode === 229) return
                         if (ev.key === 'Enter') (ev.target as HTMLInputElement).blur()
                       }}
                     />
@@ -1223,6 +1253,8 @@ export function CanvasView({
                           onMouseDown={(ev) => ev.stopPropagation()}
                           onBlur={(ev) => handleNodeTextCommit(n.id, ev.target.value)}
                           onKeyDown={(ev) => {
+                            // 输入法 composing（Enter 选词）阶段不提交
+                            if (ev.nativeEvent.isComposing || ev.keyCode === 229) return
                             if (ev.key === 'Enter') {
                               ev.preventDefault()
                               ;(ev.target as HTMLTextAreaElement).blur()
@@ -1250,6 +1282,10 @@ export function CanvasView({
                 return (
                   <div
                     key={n.id}
+                    ref={(el) => {
+                      if (el) nodeElsRef.current.set(n.id, el)
+                      else nodeElsRef.current.delete(n.id)
+                    }}
                     className="canvas-node group absolute flex select-none items-center rounded-md border shadow-sm"
                     style={{
                       left: n.x,
@@ -1282,6 +1318,8 @@ export function CanvasView({
                         onMouseDown={(ev) => ev.stopPropagation()}
                         onBlur={(ev) => handleNodeTextCommit(n.id, ev.target.value)}
                         onKeyDown={(ev) => {
+                          // 中文输入法 composing 阶段（含用 Enter 选词）不当作提交
+                          if (ev.nativeEvent.isComposing || ev.keyCode === 229) return
                           if (ev.key === 'Enter' && !ev.shiftKey) {
                             ev.preventDefault()
                             ;(ev.target as HTMLTextAreaElement).blur()
