@@ -987,8 +987,8 @@ export function CanvasView({
   const pendingFrom = pendingEdge ? nodes.find((n) => n.id === pendingEdge.fromNode) : undefined
 
   return (
-    <div className="relative flex h-full flex-col overflow-hidden bg-content-area">
-      {/* 工具栏 */}
+    <div className="relative flex h-full flex-col overflow-hidden bg-content-area titlebar-no-drag">
+      {/* 工具栏（titlebar-no-drag：pane 模式下工具栏位于窗口顶部 50px 拖拽带内，不标 no-drag 会被 OS 拖拽区吞掉点击/hover） */}
       <div className={`flex ${isPane ? 'h-[34px]' : 'h-[38px]'} flex-shrink-0 items-center gap-1 border-b border-border/30 px-3`}>
         <span className="text-xs text-muted-foreground">{isPane ? (isSession ? '会话画布' : 'Canvas') : 'Canvas'}</span>
         {!isPane && (
