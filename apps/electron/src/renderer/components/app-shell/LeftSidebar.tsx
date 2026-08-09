@@ -3995,6 +3995,24 @@ const AgentSessionItem = React.memo(function AgentSessionItem({
   const interfaceVariant = useAtomValue(interfaceVariantAtom)
   const isClassic = interfaceVariant === 'classic'
 
+  const [exporting, setExporting] = React.useState(false)
+  const handleExport = React.useCallback(async (): Promise<void> => {
+    if (exporting) return
+    setExporting(true)
+    try {
+      const result = await window.electronAPI.exportAgentSession(session.id)
+      if (result.success) {
+        toast.success('已导出', { description: result.filePath })
+      } else if (result.error) {
+        toast.error('导出失败', { description: result.error })
+      }
+    } catch (err) {
+      toast.error('导出失败', { description: err instanceof Error ? err.message : String(err) })
+    } finally {
+      setExporting(false)
+    }
+  }, [exporting, session.id])
+
   const startEdit = (): void => {
     setEditTitle(session.title)
     setEditing(true)
@@ -4066,6 +4084,10 @@ const AgentSessionItem = React.memo(function AgentSessionItem({
       <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => startEdit()}>
         <Pencil size={14} />
         重命名
+      </MenuItem>
+      <MenuItem className="text-xs py-1 [&>svg]:size-3.5" disabled={exporting} onSelect={() => void handleExport()}>
+        {exporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+        {exporting ? '导出中…' : '导出会话'}
       </MenuItem>
       <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => onToggleArchive(session.id)}>
         {session.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />}

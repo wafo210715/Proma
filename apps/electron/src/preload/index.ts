@@ -581,6 +581,9 @@ export interface ElectronAPI {
   /** 快照回退（同一会话内回退到指定点，恢复文件 + 截断对话） */
   rewindSession: (input: RewindSessionInput) => Promise<RewindSessionResult>
 
+  /** 导出会话为完整 Markdown（含思考过程 + 工具调用 + 工具输出 + 回答） */
+  exportAgentSession: (sessionId: string) => Promise<{ success: boolean; filePath?: string; error?: string }>
+
   /** 生成 Agent 会话标题 */
   generateAgentTitle: (input: AgentGenerateTitleInput) => Promise<string | null>
 
@@ -1811,6 +1814,10 @@ const electronAPI: ElectronAPI = {
 
   rewindSession: (input: RewindSessionInput) => {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.REWIND_SESSION, input)
+  },
+
+  exportAgentSession: (sessionId: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.EXPORT_SESSION, sessionId)
   },
 
   generateAgentTitle: (input: AgentGenerateTitleInput) => {

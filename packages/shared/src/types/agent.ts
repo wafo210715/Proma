@@ -1683,6 +1683,8 @@ export const AGENT_IPC_CHANNELS = {
   FORK_SESSION: 'agent:fork-session',
   /** 快照回退（同一会话内回退到指定点，恢复文件 + 截断对话） */
   REWIND_SESSION: 'agent:rewind-session',
+  /** 导出会话为完整 Markdown（含思考过程 + 工具调用 + 工具输出 + 回答） */
+  EXPORT_SESSION: 'agent:export-session',
 
   // 工作区管理
   /** 获取工作区列表 */

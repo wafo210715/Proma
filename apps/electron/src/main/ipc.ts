@@ -283,7 +283,9 @@ import { runAgent, stopAgent, generateAgentTitle, saveFilesToAgentSession, saveF
 import { permissionService } from './lib/agent-permission-service'
 import { askUserService } from './lib/agent-ask-user-service'
 import { exitPlanService } from './lib/agent-exit-plan-service'
-import { getAgentSessionWorkspacePath, getAgentWorkspacesDir, getConfigDir, getWorkspaceSkillsDir, getWorkspaceFilesDir, getScratchPadPath, getCanvasPath } from './lib/config-paths'
+import { getAgentSessionWorkspacePath, getAgentWorkspacesDir, getConfigDir, getWorkspaceSkillsDir, getWorkspaceFilesDir, getScratchPadPath, getCanvasPath, getCanvasExportsDir, getSessionCanvasPath, getAgentSessionMessagesPath } from './lib/config-paths'
+import { readSessionMessages } from '@proma/session-core/node'
+import { groupIntoTurns, renderFullTranscriptMarkdown } from '@proma/session-core'
 import { getCachedDefaultAppInfo, saveCachedDefaultAppInfo } from './lib/default-app-cache'
 import { calculateStorageStats, cleanupStorage, cleanupTempFiles } from './lib/storage-service'
 import type { CleanupOptions } from './lib/storage-service'
@@ -2431,6 +2433,50 @@ export function registerIpcHandlers(): void {
         input.sessionId,
         input.assistantMessageUuid,
       )
+    }
+  )
+
+  // 导出会话为完整 Markdown（含思考过程 + 工具调用 + 工具输出 + 回答）
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.EXPORT_SESSION,
+    async (event, sessionId: string): Promise<{ success: boolean; filePath?: string; error?: string }> => {
+      const { dialog, BrowserWindow } = await import('electron')
+      const { writeFileSync } = await import('node:fs')
+      try {
+        const meta = getAgentSessionMeta(sessionId)
+        const sessionTitle = meta?.title ?? sessionId
+        const jsonlPath = getAgentSessionMessagesPath(sessionId)
+        const messages = readSessionMessages(jsonlPath)
+        const groups = groupIntoTurns(messages, meta?.modelId)
+        const markdown = renderFullTranscriptMarkdown(groups, {
+          sessionId,
+          sessionTitle,
+        })
+
+        const win = BrowserWindow.fromWebContents(event.sender)
+        const safeFileName = sessionTitle
+          .replace(/[\\/:*?"<>|]/g, '_')
+          .slice(0, 60)
+        const result = await dialog.showSaveDialog(win ?? BrowserWindow.getFocusedWindow()!, {
+          defaultPath: `${safeFileName || sessionId}.md`,
+          filters: [
+            { name: 'Markdown', extensions: ['md'] },
+            { name: '所有文件', extensions: ['*'] },
+          ],
+        })
+
+        if (result.canceled || !result.filePath) {
+          return { success: false }
+        }
+
+        writeFileSync(result.filePath, markdown, 'utf-8')
+        console.log(`[Agent 会话] 已导出: ${result.filePath}`)
+        return { success: true, filePath: result.filePath }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error(`[Agent 会话] 导出失败: ${msg}`)
+        return { success: false, error: msg }
+      }
     }
   )
 
