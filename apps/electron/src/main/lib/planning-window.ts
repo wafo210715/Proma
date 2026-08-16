@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import type { MainWindowState } from '../../types'
 import { getPersistableMainWindowState } from './main-window-lifecycle'
 import { getSettings, updateSettings } from './settings-service'
+import { DEV_SERVER_ORIGIN, rendererDevUrl } from './dev-server'
 
 const DEFAULT_WIDTH = 1180
 const DEFAULT_HEIGHT = 820
@@ -60,7 +61,7 @@ function ensureWindowOnScreen(win: BrowserWindow): void {
 
 function isDevServerNavigation(url: string): boolean {
   try {
-    return new URL(url).origin === 'http://127.0.0.1:5173'
+    return new URL(url).origin === DEV_SERVER_ORIGIN
   } catch {
     return false
   }
@@ -109,7 +110,7 @@ function createPlanningWindow(): BrowserWindow {
 
   const isDev = !app.isPackaged
   if (isDev) {
-    void win.loadURL('http://127.0.0.1:5173?window=planning')
+    void win.loadURL(rendererDevUrl('?window=planning'))
   } else {
     void win.loadFile(join(__dirname, 'renderer', 'index.html'), { query: { window: 'planning' } })
   }

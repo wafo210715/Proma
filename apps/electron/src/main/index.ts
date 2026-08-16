@@ -55,6 +55,7 @@ function registerProtocolsAndHandlers(): void {
 
 
 
+import { DEV_SERVER_ORIGIN } from './lib/dev-server'
 import { getSettings, updateSettings } from './lib/settings-service'
 import { handlePromaFileRequest } from './lib/local-file-protocol'
 
@@ -396,7 +397,7 @@ function saveMainWindowState(): void {
 
 function isDevServerNavigation(url: string): boolean {
   try {
-    return new URL(url).origin === 'http://127.0.0.1:5173'
+    return new URL(url).origin === DEV_SERVER_ORIGIN
   } catch {
     return false
   }
@@ -453,7 +454,7 @@ function createWindow(): void {
   // Load the renderer
   const isDev = !app.isPackaged
   const rendererPath = join(__dirname, 'renderer', 'index.html')
-  const rendererEntryUrl = isDev ? 'http://127.0.0.1:5173' : pathToFileURL(rendererPath).toString()
+  const rendererEntryUrl = isDev ? DEV_SERVER_ORIGIN : pathToFileURL(rendererPath).toString()
   const loadMainRenderer = (): Promise<void> => {
     if (!mainWindow || mainWindow.isDestroyed()) {
       return Promise.reject(new Error('主窗口已销毁'))

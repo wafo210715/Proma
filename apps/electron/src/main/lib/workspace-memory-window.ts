@@ -2,6 +2,7 @@ import { app, BrowserWindow, screen, shell } from 'electron'
 import { existsSync } from 'node:fs'
 import { AGENT_IPC_CHANNELS } from '@proma/shared'
 import { join } from 'node:path'
+import { DEV_SERVER_ORIGIN, rendererDevUrl } from './dev-server'
 
 const DEFAULT_WIDTH = 980
 const DEFAULT_HEIGHT = 720
@@ -39,7 +40,7 @@ function getInitialBounds(): Electron.Rectangle {
 
 function isDevServerNavigation(url: string): boolean {
   try {
-    return new URL(url).origin === 'http://127.0.0.1:5173'
+    return new URL(url).origin === DEV_SERVER_ORIGIN
   } catch {
     return false
   }
@@ -76,7 +77,7 @@ function createWorkspaceMemoryWindow(workspaceSlug: string, relativePath?: strin
 
   const isDev = !app.isPackaged
   if (isDev) {
-    void win.loadURL(`http://127.0.0.1:5173?window=workspace-memory&workspace=${encodeURIComponent(workspaceSlug)}${relativePath ? `&file=${encodeURIComponent(relativePath)}` : ''}`)
+    void win.loadURL(rendererDevUrl(`?window=workspace-memory&workspace=${encodeURIComponent(workspaceSlug)}${relativePath ? `&file=${encodeURIComponent(relativePath)}` : ''}`))
   } else {
     void win.loadFile(join(__dirname, 'renderer', 'index.html'), {
       query: { window: 'workspace-memory', workspace: workspaceSlug, ...(relativePath ? { file: relativePath } : {}) },

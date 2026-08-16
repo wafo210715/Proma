@@ -24,7 +24,8 @@ export default defineConfig({
     // Chromium can resolve localhost to IPv4 while Vite binds only ::1 on macOS.
     // Use the same explicit IPv4 loopback address as Electron's dev windows.
     host: '127.0.0.1',
-    port: 5173,
+    // PROMA_DEV_PORT：多 dev 检出并行时的端口隔离（主进程 dev-server.ts 同源读取）
+    port: Number(process.env.PROMA_DEV_PORT) || 5173,
     strictPort: true, // 确保使用指定端口，如被占用则报错
     open: false,
   },

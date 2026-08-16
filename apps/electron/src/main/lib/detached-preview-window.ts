@@ -9,6 +9,7 @@ import { app, BrowserWindow, screen, shell } from 'electron'
 import type { Rectangle } from 'electron'
 import { basename, join } from 'path'
 import type { DetachedPreviewWindowData, DetachedPreviewWindowInput } from '@proma/shared'
+import { DEV_SERVER_ORIGIN, rendererDevUrl } from './dev-server'
 
 const previewDataById = new Map<string, DetachedPreviewWindowData>()
 const previewWindowsById = new Map<string, BrowserWindow>()
@@ -16,7 +17,7 @@ const previewIdBySignature = new Map<string, string>()
 
 function isDevServerNavigation(url: string): boolean {
   try {
-    return new URL(url).origin === 'http://127.0.0.1:5173'
+    return new URL(url).origin === DEV_SERVER_ORIGIN
   } catch {
     return false
   }
@@ -118,7 +119,7 @@ export function openDetachedPreviewWindow(
 
   const isDev = !app.isPackaged
   if (isDev) {
-    win.loadURL(`http://127.0.0.1:5173?window=detached-preview&previewId=${encodeURIComponent(id)}`)
+    win.loadURL(rendererDevUrl(`?window=detached-preview&previewId=${encodeURIComponent(id)}`))
   } else {
     win.loadFile(join(__dirname, 'renderer', 'index.html'), {
       query: { window: 'detached-preview', previewId: id },

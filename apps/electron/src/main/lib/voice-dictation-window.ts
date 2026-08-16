@@ -16,6 +16,7 @@ import {
   releaseVoiceDictationOutputContext,
 } from './text-output-service'
 import { getMainWindow } from '../index'
+import { DEV_SERVER_ORIGIN, rendererDevUrl } from './dev-server'
 
 const INDICATOR_WIDTH = 360
 const INDICATOR_HEIGHT = 110
@@ -186,7 +187,7 @@ function getOrCreateVoiceIndicatorWindow(): BrowserWindow {
       query: { window: 'voice-dictation-indicator' },
     })
   } else {
-    indicator.loadURL('http://127.0.0.1:5173?window=voice-dictation-indicator')
+    indicator.loadURL(rendererDevUrl('?window=voice-dictation-indicator'))
   }
 
   voiceIndicatorWindow = indicator
@@ -251,7 +252,7 @@ function isTrustedVoiceDictationUrl(rawUrl: string | undefined): boolean {
 
   try {
     const parsed = new URL(rawUrl)
-    if (!app.isPackaged && parsed.origin === 'http://127.0.0.1:5173') return true
+    if (!app.isPackaged && parsed.origin === DEV_SERVER_ORIGIN) return true
     return parsed.protocol === 'file:'
   } catch {
     return false

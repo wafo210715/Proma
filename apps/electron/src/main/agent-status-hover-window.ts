@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { WINDOWS_AGENT_ISLAND_IPC_CHANNELS } from '../types'
 import type { NativeAgentIslandSnapshot } from '@proma/shared'
 import { calculateHoverWindowBounds } from './agent-status-hover-bounds'
+import { rendererDevUrl } from './lib/dev-server'
 
 const HOVER_WINDOW_WIDTH = 320
 
@@ -70,7 +71,7 @@ export class AgentStatusHoverWindow {
         query: { window: 'agent-status-hover' },
       })
     } else {
-      this.win.loadURL('http://127.0.0.1:5173?window=agent-status-hover')
+      this.win.loadURL(rendererDevUrl('?window=agent-status-hover'))
     }
   }
 
