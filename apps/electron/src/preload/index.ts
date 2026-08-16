@@ -454,8 +454,25 @@ export interface ElectronAPI {
   /** 同步保存内容到 canvas.canvas（beforeunload 场景） */
   saveCanvasSync: (content: string) => boolean
 
-  /** 截图当前画布区域到剪贴板，返回 dataURL */
-  captureCanvasRegion: (rect: { x: number; y: number; width: number; height: number }) => Promise<string | null>
+  /** 订阅 canvas 文件被外部修改事件，返回取消订阅函数 */
+  onCanvasExternalChanged: (callback: (content: string) => void) => () => void
+
+  /** 导出选中簇为独立 .canvas + .md 文件到 ~/.proma/canvas-exports/ */
+  exportCanvasCluster: (payload: { name: string; canvasJson: string; markdown: string }) => Promise<{
+    ok: boolean
+    canvasPath?: string
+    mdPath?: string
+    error?: string
+  }>
+
+  /** 从磁盘加载 session 专属画布内容 */
+  loadSessionCanvas: (sessionId: string) => Promise<string>
+
+  /** 异步保存 session 专属画布 */
+  saveSessionCanvas: (sessionId: string, content: string) => Promise<boolean>
+
+  /** 同步保存 session 专属画布（beforeunload 场景） */
+  saveSessionCanvasSync: (sessionId: string, content: string) => boolean
 
   // ===== 应用图标切换 =====
 
@@ -1643,8 +1660,27 @@ const electronAPI: ElectronAPI = {
     return ipcRenderer.sendSync(CANVAS_IPC_CHANNELS.SAVE_SYNC, content)
   },
 
-  captureCanvasRegion: (rect: { x: number; y: number; width: number; height: number }) => {
-    return ipcRenderer.invoke(CANVAS_IPC_CHANNELS.CAPTURE, rect)
+  onCanvasExternalChanged: (callback: (content: string) => void) => {
+    const listener = (_event: unknown, content: string): void => callback(content)
+    ipcRenderer.on(CANVAS_IPC_CHANNELS.EXTERNAL_CHANGED, listener)
+    return () => ipcRenderer.removeListener(CANVAS_IPC_CHANNELS.EXTERNAL_CHANGED, listener)
+  },
+
+  exportCanvasCluster: (payload: { name: string; canvasJson: string; markdown: string }) => {
+    return ipcRenderer.invoke(CANVAS_IPC_CHANNELS.EXPORT, payload)
+  },
+
+  // Session Canvas 画布持久化
+  loadSessionCanvas: (sessionId: string) => {
+    return ipcRenderer.invoke(CANVAS_IPC_CHANNELS.LOAD_SESSION, sessionId)
+  },
+
+  saveSessionCanvas: (sessionId: string, content: string) => {
+    return ipcRenderer.invoke(CANVAS_IPC_CHANNELS.SAVE_SESSION, sessionId, content)
+  },
+
+  saveSessionCanvasSync: (sessionId: string, content: string) => {
+    return ipcRenderer.sendSync(CANVAS_IPC_CHANNELS.SAVE_SESSION_SYNC, sessionId, content)
   },
 
   chooseExportPath: (defaultName: string) => {

@@ -1120,8 +1120,41 @@ function CanvasPersistence(): null {
     }
     window.addEventListener('beforeunload', handleBeforeUnload)
 
+    // 外部修改检测：canvas 文件被 Proma 之外的程序（如 Obsidian）改动时提示
+    let externalUnsub: (() => void) | undefined
+    if (window.electronAPI.onCanvasExternalChanged) {
+      externalUnsub = window.electronAPI.onCanvasExternalChanged((incoming) => {
+        const current = store.get(canvasContentAtom)
+        if (incoming === current) return
+        toast.warning('Canvas 文件被外部修改', {
+          description: '检测到 Obsidian 等程序改动了此文件。重新加载会丢弃当前未保存的改动。',
+          duration: Infinity,
+          action: {
+            label: '重新加载',
+            onClick: () => {
+              loadedRef.current = false
+              store.set(canvasLoadedAtom, false)
+              store.set(canvasContentAtom, incoming)
+              store.set(canvasLoadedAtom, true)
+              loadedRef.current = true
+            },
+          },
+          cancel: {
+            label: '保留当前',
+            onClick: () => {
+              // 用当前内容覆盖磁盘，压过外部改动
+              if (window.electronAPI.saveCanvas) {
+                window.electronAPI.saveCanvas(store.get(canvasContentAtom)).catch(console.error)
+              }
+            },
+          },
+        })
+      })
+    }
+
     return () => {
       unsub()
+      externalUnsub?.()
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
       window.removeEventListener('beforeunload', handleBeforeUnload)
     }

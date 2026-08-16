@@ -6,7 +6,7 @@
 
 import { ipcMain, nativeTheme, shell, dialog, BrowserWindow, app, clipboard, nativeImage } from 'electron'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { existsSync, realpathSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs'
+import { existsSync, realpathSync, readFileSync, writeFileSync, mkdirSync, statSync, watch as fsWatch, type FSWatcher } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, PLANNING_CONFLICT_ERROR, MAX_ATTACHMENT_SIZE, isPromaPermissionMode, normalizePathForCompare } from '@proma/shared'
@@ -340,6 +340,11 @@ import {
 import { movePathSafely } from './lib/file-move-service'
 import { subscribeWorkspaceMemoryChanges } from './lib/workspace-memory-change-watcher'
 import { confirmWorkspaceMemoryWindowClose, markWorkspaceMemoryWindowReady } from './lib/workspace-memory-window'
+
+/* ── Canvas 外部修改检测的模块级状态 ── */
+let canvasWatcher: FSWatcher | null = null
+let lastCanvasWriteAt = 0
+let canvasWatchDebounce: ReturnType<typeof setTimeout> | null = null
 
 /** Renderer-scoped subscriptions; disposed on explicit tab cleanup or renderer destruction. */
 const workspaceMemoryWatchSubscriptions = new Map<number, Map<string, () => void>>()
@@ -1933,6 +1938,35 @@ export function registerIpcHandlers(): void {
 
   // ===== Canvas 画布持久化 =====
 
+  // ===== Canvas 外部修改检测 =====
+  // 用 fs.watch 监听 canvas 文件；若变更不是来自我们自己的保存（时间窗口区分），
+  // 读取新内容广播给渲染进程，由前端提示「重新加载 / 保留当前」。
+  function ensureCanvasWatcher(): void {
+    if (canvasWatcher) return
+    const path = getCanvasPath()
+    if (!existsSync(path)) return
+    try {
+      canvasWatcher = fsWatch(path, () => {
+        // 自身保存后的 2s 内的变更事件忽略（写文件也会触发 watch）
+        if (Date.now() - lastCanvasWriteAt < 2000) return
+        if (canvasWatchDebounce) clearTimeout(canvasWatchDebounce)
+        canvasWatchDebounce = setTimeout(() => {
+          try {
+            if (!existsSync(path)) return
+            const content = readFileSync(path, 'utf-8')
+            for (const win of BrowserWindow.getAllWindows()) {
+              win.webContents.send(CANVAS_IPC_CHANNELS.EXTERNAL_CHANGED, content)
+            }
+          } catch (err) {
+            console.error('[Canvas] 读取外部变更失败:', err)
+          }
+        }, 300)
+      })
+    } catch (err) {
+      console.error('[Canvas] 监听文件失败:', err)
+    }
+  }
+
   // 从磁盘加载 canvas.canvas（JSON Canvas 格式）
   ipcMain.handle(
     CANVAS_IPC_CHANNELS.LOAD,
@@ -1954,7 +1988,10 @@ export function registerIpcHandlers(): void {
     async (_, content: string): Promise<boolean> => {
       const path = getCanvasPath()
       try {
+        lastCanvasWriteAt = Date.now()
         await writeFile(path, content, 'utf-8')
+        lastCanvasWriteAt = Date.now()
+        ensureCanvasWatcher()
         return true
       } catch (err) {
         console.error('[Canvas] 保存失败:', err)
@@ -1968,7 +2005,9 @@ export function registerIpcHandlers(): void {
     CANVAS_IPC_CHANNELS.SAVE_SYNC,
     (event, content: string) => {
       try {
+        lastCanvasWriteAt = Date.now()
         writeFileSync(getCanvasPath(), content, 'utf-8')
+        lastCanvasWriteAt = Date.now()
         event.returnValue = true
       } catch (err) {
         console.error('[Canvas] 同步保存失败:', err)
@@ -1977,24 +2016,91 @@ export function registerIpcHandlers(): void {
     }
   )
 
-  // 截图当前画布区域：按 rect 截取焦点窗口的可见像素（已缩放好的视图），复制到剪贴板
+
+
+  // 导出选中簇：写 {name}.canvas + {name}.md 到 ~/.proma/canvas-exports/，重名自动加序号
   ipcMain.handle(
-    CANVAS_IPC_CHANNELS.CAPTURE,
-    async (_, rect: { x: number; y: number; width: number; height: number }): Promise<string | null> => {
-      const win = BrowserWindow.getFocusedWindow()
-      if (!win) return null
+    CANVAS_IPC_CHANNELS.EXPORT,
+    async (
+      _,
+      payload: { name: string; canvasJson: string; markdown: string },
+    ): Promise<{ ok: boolean; canvasPath?: string; mdPath?: string; error?: string }> => {
       try {
-        const image = await win.webContents.capturePage({
-          x: Math.round(rect.x),
-          y: Math.round(rect.y),
-          width: Math.round(rect.width),
-          height: Math.round(rect.height),
-        })
-        clipboard.writeImage(image)
-        return image.toDataURL()
+        const dir = getCanvasExportsDir()
+        // 清理非法文件名字符
+        const safeBase = (payload.name || 'canvas').replace(/[/\\:*?"<>|]/g, '_').trim() || 'canvas'
+        let base = safeBase
+        let n = 1
+        while (existsSync(join(dir, `${base}.canvas`)) || existsSync(join(dir, `${base}.md`))) {
+          base = `${safeBase}-${n++}`
+        }
+        const canvasPath = join(dir, `${base}.canvas`)
+        const mdPath = join(dir, `${base}.md`)
+        await writeFile(canvasPath, payload.canvasJson, 'utf-8')
+        await writeFile(mdPath, payload.markdown, 'utf-8')
+        return { ok: true, canvasPath, mdPath }
       } catch (err) {
-        console.error('[Canvas] 截图失败:', err)
-        return null
+        console.error('[Canvas] 导出失败:', err)
+        return { ok: false, error: String(err) }
+      }
+    }
+  )
+
+  // ===== Session Canvas 画布持久化 =====
+
+  // 从磁盘加载 session 专属画布
+  ipcMain.handle(
+    CANVAS_IPC_CHANNELS.LOAD_SESSION,
+    async (_, sessionId: string): Promise<string> => {
+      try {
+        const meta = getAgentSessionMeta(sessionId)
+        if (!meta?.workspaceId) return ''
+        const workspace = getAgentWorkspace(meta.workspaceId)
+        if (!workspace) return ''
+        const path = getSessionCanvasPath(workspace.slug, sessionId)
+        if (!existsSync(path)) return ''
+        return readFileSync(path, 'utf-8')
+      } catch (err) {
+        console.error('[Canvas] 加载 session 画布失败:', err)
+        return ''
+      }
+    }
+  )
+
+  // 异步保存 session 专属画布
+  ipcMain.handle(
+    CANVAS_IPC_CHANNELS.SAVE_SESSION,
+    async (_, sessionId: string, content: string): Promise<boolean> => {
+      try {
+        const meta = getAgentSessionMeta(sessionId)
+        if (!meta?.workspaceId) return false
+        const workspace = getAgentWorkspace(meta.workspaceId)
+        if (!workspace) return false
+        const path = getSessionCanvasPath(workspace.slug, sessionId)
+        await writeFile(path, content, 'utf-8')
+        return true
+      } catch (err) {
+        console.error('[Canvas] 保存 session 画布失败:', err)
+        return false
+      }
+    }
+  )
+
+  // 同步保存 session 专属画布（beforeunload 场景）
+  ipcMain.on(
+    CANVAS_IPC_CHANNELS.SAVE_SESSION_SYNC,
+    (event, sessionId: string, content: string) => {
+      try {
+        const meta = getAgentSessionMeta(sessionId)
+        if (!meta?.workspaceId) return
+        const workspace = getAgentWorkspace(meta.workspaceId)
+        if (!workspace) return
+        const path = getSessionCanvasPath(workspace.slug, sessionId)
+        writeFileSync(path, content, 'utf-8')
+        event.returnValue = true
+      } catch (err) {
+        console.error('[Canvas] 同步保存 session 画布失败:', err)
+        event.returnValue = false
       }
     }
   )

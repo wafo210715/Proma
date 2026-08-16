@@ -9,6 +9,7 @@ import type { useStore } from 'jotai'
 import {
   activeTabIdAtom,
   scratchPadPanelOpenAtom,
+  canvasPanelOpenAtom,
   SCRATCH_PAD_ID,
   SCRATCH_PAD_TITLE,
   tabsAtom,
@@ -86,6 +87,8 @@ export function openScratchInSplit(store: JotaiStore): boolean {
     }).catch(console.error)
   }
 
+  // 草稿与画布互斥：右侧槽位同时塞两个重面板会把内容挤到不可用宽度
+  store.set(canvasPanelOpenAtom, false)
   store.set(scratchPadPanelOpenAtom, true)
   return true
 }

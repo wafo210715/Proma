@@ -14,8 +14,13 @@ import {
   activeTabIdAtom,
   activeTabAtom,
   scratchPadPanelOpenAtom,
+  canvasPanelOpenAtom,
+  canvasPanelSessionIdAtom,
   rightWorkspaceSplitRatioAtom,
 } from '@/atoms/tab-atoms'
+import { CanvasPane } from '@/components/canvas/CanvasView'
+import { closeCanvasInSplit } from '@/components/canvas/canvas-opener'
+import { TabErrorBoundary } from './TabErrorBoundary'
 import { Panel } from '@/components/app-shell/Panel'
 import { WelcomeView } from '@/components/welcome/WelcomeView'
 import { previewPanelOpenMapAtom, previewSplitRatioAtom } from '@/atoms/preview-atoms'
@@ -102,6 +107,10 @@ export function MainArea(): React.ReactElement {
   const scratchPanelOpen = useAtomValue(scratchPadPanelOpenAtom)
   const showScratchPanel =
     activeTab?.type === 'agent' && scratchPanelOpen && activeView === 'conversations' && !showBrowserPanel
+  const canvasPanelOpen = useAtomValue(canvasPanelOpenAtom)
+  const canvasPanelSessionId = useAtomValue(canvasPanelSessionIdAtom)
+  const showCanvasPanel =
+    activeTab?.type === 'agent' && canvasPanelOpen && activeView === 'conversations'
 
   // 关闭动画状态：当 previewOpen 从 true → false 时，播放退出动画再移除 DOM
   // 在 render 阶段同步派生 closing，避免中间帧出现 flex: 1 1 auto 导致左侧瞬间跳到 100% 宽
@@ -234,7 +243,7 @@ export function MainArea(): React.ReactElement {
 
   // 左侧容器宽度：右侧工作区打开时固定占 splitRatio；其他情况（含 closing 动画期间）
   // 直接 1 1 auto 占满——closing 时右侧 absolute 脱离 flex 流，所以左侧自然占 100%。
-  const showRightPanel = showBrowserPanel || showScratchPanel || showPreviewPane
+  const showRightPanel = showBrowserPanel || showScratchPanel || showPreviewPane || showCanvasPanel
   const leftFlexStyle: React.CSSProperties = showRightPanel
     ? { flex: `0 0 calc(${splitRatio * 100}% - 6px)` }
     : { flex: '1 1 auto' }
@@ -330,6 +339,22 @@ export function MainArea(): React.ReactElement {
                 {showScratchPanel && (
                   <div className="min-w-0 h-full overflow-hidden" style={scratchPaneStyle}>
                     <ScratchPadPane onClose={handleCloseScratchPanel} />
+                  </div>
+                )}
+                {showCanvasPanel && (
+                  <div className="min-w-[280px] h-full overflow-hidden" style={scratchPaneStyle}>
+                    {/* key 按会话 remount：切换 session 时重建干净的 nodes/history/refs/view，
+                        避免复用同一实例带旧会话遗留状态（新会话双击建 node 白屏）。
+                        TabErrorBoundary：画布渲染异常时降级为错误卡片，不再整树白屏。 */}
+                    <TabErrorBoundary
+                      key={canvasPanelSessionId ?? 'canvas-global'}
+                      sessionId={canvasPanelSessionId ?? 'canvas-global'}
+                    >
+                      <CanvasPane
+                        sessionId={canvasPanelSessionId ?? undefined}
+                        onClose={() => closeCanvasInSplit(store)}
+                      />
+                    </TabErrorBoundary>
                   </div>
                 )}
               </div>

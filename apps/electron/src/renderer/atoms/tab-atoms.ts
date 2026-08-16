@@ -166,6 +166,14 @@ export const scratchPadLoadedAtom = atom<boolean>(false)
 export const canvasContentAtom = atom<string>('')
 /** Canvas 内容是否已从磁盘加载 */
 export const canvasLoadedAtom = atom<boolean>(false)
+/** Canvas 是否固定在 Agent 右侧分屏；通过拖出 Canvas Tab 或 session 按钮打开 */
+export const canvasPanelOpenAtom = atom<boolean>(false)
+/** 当前分屏画布对应的 session ID（null = 全局画布，string = session 专属画布） */
+export const canvasPanelSessionIdAtom = atom<string | null>(null)
+/** Per-session canvas 内容缓存：sessionId → JSON Canvas 字符串 */
+export const sessionCanvasContentsAtom = atom<Map<string, string>>(new Map())
+/** Per-session canvas 是否已加载：sessionId → boolean */
+export const sessionCanvasLoadedAtom = atom<Map<string, boolean>>(new Map())
 /** Scratch Pad 是否固定在 Agent 右侧分屏；通过拖出 Scratch Tab 打开 */
 export const scratchPadPanelOpenAtom = atom<boolean>(false)
 /** 右侧工作区中 Preview 与 Scratch 并排时，Preview 占比 */

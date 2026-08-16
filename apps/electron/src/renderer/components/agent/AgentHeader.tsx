@@ -6,10 +6,11 @@
  */
 
 import * as React from 'react'
-import { useAtomValue, useSetAtom } from 'jotai'
-import { Pencil, Check, X } from 'lucide-react'
+import { useAtomValue, useSetAtom, useStore } from 'jotai'
+import { Pencil, Check, X, Shapes } from 'lucide-react'
 import { agentSessionsAtom } from '@/atoms/agent-atoms'
-import { tabsAtom, updateTabTitle } from '@/atoms/tab-atoms'
+import { tabsAtom, updateTabTitle, canvasPanelOpenAtom, canvasPanelSessionIdAtom } from '@/atoms/tab-atoms'
+import { toggleSessionCanvas } from '@/components/canvas/canvas-opener'
 import { replaceAgentSessionInFreshnessOrder } from '@/lib/agent-session-list'
 import { detectIsWindows, WINDOW_CONTROLS_INSET_RIGHT } from '@/lib/platform'
 import { cn } from '@/lib/utils'
@@ -28,6 +29,11 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
   const [editing, setEditing] = React.useState(false)
   const [editTitle, setEditTitle] = React.useState('')
   const inputRef = React.useRef<HTMLInputElement>(null)
+  // Canvas 分屏按钮状态
+  const canvasPanelOpen = useAtomValue(canvasPanelOpenAtom)
+  const canvasPanelSessionId = useAtomValue(canvasPanelSessionIdAtom)
+  const store = useStore()
+  const canvasActive = canvasPanelOpen && canvasPanelSessionId === sessionId
 
   if (!session) return null
 
@@ -113,6 +119,21 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
             aria-label="编辑标题"
           >
             <Pencil className="size-3.5" />
+          </button>
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => toggleSessionCanvas(store, sessionId)}
+            className={cn(
+              'titlebar-no-drag p-1 transition-colors',
+              canvasActive
+                ? 'text-primary hover:text-primary'
+                : 'text-muted-foreground hover:text-foreground',
+            )}
+            aria-label={canvasActive ? '关闭画布分屏' : '打开画布分屏'}
+            title={canvasActive ? '关闭画布分屏' : '打开画布分屏'}
+          >
+            <Shapes className="size-3.5" />
           </button>
         </div>
       )}
