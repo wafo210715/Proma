@@ -11,13 +11,14 @@
 import * as React from 'react'
 import { useAtom, useSetAtom, useAtomValue, useStore } from 'jotai'
 import { toast } from 'sonner'
-import { Pin, PinOff, Star, Settings, Plus, Trash2, Pencil, PanelLeftClose, PanelLeftOpen, ArrowRightLeft, Search, Archive, ArchiveRestore, ArrowLeft, Bot, MessageSquare, MoreHorizontal, FolderOpen, FolderInput, FolderPlus, GripVertical, Clock, AlarmClock, ChevronRight, ChevronDown, ChevronUp, Blocks, GitBranch, Download, Loader2, RotateCw } from 'lucide-react'
+import { Pin, PinOff, Star, Settings, Plus, Trash2, Pencil, PanelLeftClose, PanelLeftOpen, ArrowRightLeft, Search, Archive, ArchiveRestore, ArrowLeft, Bot, MessageSquare, MoreHorizontal, FolderOpen, FolderInput, FolderPlus, GripVertical, Clock, AlarmClock, ChevronRight, ChevronDown, ChevronUp, Blocks, GitBranch, Download, Loader2, RotateCw, Columns2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { ModeSwitcher } from './ModeSwitcher'
 import { SearchDialog } from './SearchDialog'
 import { UserAvatar } from '@/components/chat/UserAvatar'
 import { activeViewAtom, agentSkillsTabAtom } from '@/atoms/active-view'
+import { comparePairsAtom, compareLinkedAtom, addPair, getComparePartner, getCompareColor } from '@/atoms/compare-atoms'
 import { automationFormAtom, automationsAtom } from '@/atoms/automation-atoms'
 import { appModeAtom, type AppMode } from '@/atoms/app-mode'
 import { settingsOpenAtom, settingsTabAtom } from '@/atoms/settings-tab'
@@ -3995,6 +3996,34 @@ const AgentSessionItem = React.memo(function AgentSessionItem({
   const interfaceVariant = useAtomValue(interfaceVariantAtom)
   const isClassic = interfaceVariant === 'classic'
 
+  // 进入分屏（不绑定）：把当前活跃会话与本会话并排，联动关闭
+  const currentAgentSessionId = useAtomValue(currentAgentSessionIdAtom)
+  const setComparePairs = useSetAtom(comparePairsAtom)
+  const setCompareLinked = useSetAtom(compareLinkedAtom)
+  const comparePairs = useAtomValue(comparePairsAtom)
+  const comparePartnerId = getComparePartner(comparePairs, session.id)
+  const inComparePair = comparePartnerId !== null
+  const compareColor = getCompareColor(comparePairs, session.id)
+  // tailwind safelist：动态类名必须出现在源码里才会被 JIT 编译
+  const COMPARE_ICON_CLASS: Record<string, string> = {
+    'violet-500': 'text-violet-500/70',
+    'sky-500': 'text-sky-500/70',
+    'amber-500': 'text-amber-500/70',
+    'emerald-500': 'text-emerald-500/70',
+    'rose-500': 'text-rose-500/70',
+    'indigo-500': 'text-indigo-500/70',
+  }
+  const compareIconClass = compareColor ? (COMPARE_ICON_CLASS[compareColor.tw] ?? 'text-violet-500/70') : ''
+  const handleEnterSplit = React.useCallback((): void => {
+    if (!currentAgentSessionId || currentAgentSessionId === session.id) {
+      // 没有已打开的会话，或右键的就是当前会话：直接打开它，不分屏
+      onSelect(session.id, session.title)
+      return
+    }
+    setComparePairs((prev) => addPair(prev, currentAgentSessionId, session.id))
+    setCompareLinked(false)
+  }, [currentAgentSessionId, session.id, session.title, onSelect, setComparePairs, setCompareLinked])
+
   const [exporting, setExporting] = React.useState(false)
   const handleExport = React.useCallback(async (): Promise<void> => {
     if (exporting) return
@@ -4084,6 +4113,10 @@ const AgentSessionItem = React.memo(function AgentSessionItem({
       <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => startEdit()}>
         <Pencil size={14} />
         重命名
+      </MenuItem>
+      <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => handleEnterSplit()}>
+        <Columns2 size={14} />
+        进入分屏
       </MenuItem>
       <MenuItem className="text-xs py-1 [&>svg]:size-3.5" disabled={exporting} onSelect={() => void handleExport()}>
         {exporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
@@ -4212,6 +4245,9 @@ const AgentSessionItem = React.memo(function AgentSessionItem({
                   <span className="flex-shrink-0 text-[11px] leading-4 text-foreground/45">
                     {delegationSummary.completed}/{delegationSummary.total}
                   </span>
+                )}
+                {inComparePair && (
+                  <Columns2 size={11} className={cn('flex-shrink-0', compareIconClass)} />
                 )}
               </div>
             )}

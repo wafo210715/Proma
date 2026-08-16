@@ -18,6 +18,7 @@ import { unstable_batchedUpdates } from 'react-dom'
 import { useAtom, useAtomValue, useSetAtom, useStore } from 'jotai'
 import { toast } from 'sonner'
 import { CornerDownLeft, Square, Settings, X, Copy, Check, Brain, Sparkles, ListTodo, Paperclip, Crop } from 'lucide-react'
+import { comparePairsAtom, compareFocusedSessionIdAtom, compareLinkedAtom, compareBroadcastAtom, getComparePartner } from '@/atoms/compare-atoms'
 import { AgentMessages, type AgentHistoryQuoteNavigationRequest } from './AgentMessages'
 import { AgentHeader } from './AgentHeader'
 import { AgentMessageQueue } from './AgentMessageQueue'
@@ -420,7 +421,7 @@ function AgentThinkingPopover({ agentThinking, onToggle, codexConfig }: AgentThi
   )
 }
 
-export function AgentView({ sessionId }: { sessionId: string }): React.ReactElement {
+export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessionId: string; sharedModelSelectorOpen?: boolean }): React.ReactElement {
   const store = useStore()
   const initialCachedMessages = store.get(agentSDKMessagesCacheAtom).get(sessionId)
   const [persistedSDKMessages, setPersistedSDKMessages] = React.useState<SDKMessage[]>(
@@ -487,6 +488,13 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   }, [sessionMeta, globalWorkspaceId])
   const [pendingPrompt, setPendingPrompt] = useAtom(agentPendingPromptAtom)
   const [pendingFiles, setPendingFiles] = useAtom(agentPendingFilesAtomFamily(sessionId))
+  // 双开对比：本 session 的配对 partner + 联动开关 + 广播信号
+  const comparePairs = useAtomValue(comparePairsAtom)
+  const compareLinked = useAtomValue(compareLinkedAtom)
+  const comparePartnerId = getComparePartner(comparePairs, sessionId)
+  const setCompareFocusedSessionId = useSetAtom(compareFocusedSessionIdAtom)
+  const [compareBroadcast, setCompareBroadcast] = useAtom(compareBroadcastAtom)
+  const lastBroadcastNonceRef = React.useRef<string | null>(null)
   const [queuedMessages, setQueuedMessages] = useAtom(agentMessageQueueAtomFamily(sessionId))
   const workspaces = useAtomValue(agentWorkspacesAtom)
   const setWorkspaces = useSetAtom(agentWorkspacesAtom)
@@ -2129,7 +2137,18 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const externalSelectedModel = computedSelectedModel ?? stableSelectedModelRef.current
 
   /** 发送消息 */
-  const handleSend = React.useCallback(async (overrideText?: string, fromEditor = false): Promise<void> => {
+  // 双开对比·联动广播：焦点侧发送时把同一段文本广播给 partner（附件镜像暂不联动）。
+  const broadcastComparePrompt = React.useCallback((text: string, fromBroadcast?: boolean): void => {
+    if (fromBroadcast || !compareLinked || !comparePartnerId) return
+    if (!text) return
+    setCompareBroadcast({
+      targetSessionId: comparePartnerId,
+      text,
+      nonce: crypto.randomUUID(),
+    })
+  }, [compareLinked, comparePartnerId, setCompareBroadcast])
+
+  const handleSend = React.useCallback(async (overrideText?: string, fromEditor = false, opts?: { fromBroadcast?: boolean }): Promise<void> => {
     const currentDraft = store.get(agentSessionDraftsAtom).get(sessionId) ?? ''
     const text = (overrideText ?? currentDraft).trim()
     // 如果输入为空但有建议，使用建议内容
@@ -2151,6 +2170,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       return
     }
     const additionalDirectoriesForRun = createBaseAdditionalDirectories()
+    broadcastComparePrompt(effectiveText, opts?.fromBroadcast)
 
     if (streaming) {
       // Agent 正在输出时，用户消息默认进入 Proma 托管队列，不打断当前 turn。
@@ -2381,7 +2401,23 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         return map
       })
     })
-  }, [createBaseAdditionalDirectories, preparePendingFilesForSend, restoreQueuedAttachmentsToPending, sessionId, agentChannelId, agentModelId, agentChannelProvider, currentWorkspaceId, streaming, backgroundWaiting, suggestion, hasAvailableModel, store, consumeQuotedSelection, setStreamingStates, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, permissionMode, messagesLoaded, setQueuedMessages, setQuotedSelectionMap, sendPlainTextAgentMessage, isLegacyTranscript, isStopping])
+  }, [createBaseAdditionalDirectories, preparePendingFilesForSend, restoreQueuedAttachmentsToPending, sessionId, agentChannelId, agentModelId, agentChannelProvider, currentWorkspaceId, streaming, backgroundWaiting, suggestion, hasAvailableModel, store, consumeQuotedSelection, setStreamingStates, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, permissionMode, messagesLoaded, setQueuedMessages, setQuotedSelectionMap, sendPlainTextAgentMessage, isLegacyTranscript, isStopping, broadcastComparePrompt])
+
+  // 双开对比·联动接收：监听广播信号，目标为本 session 且 nonce 未消费时，
+  // 走自己的 handleSend（fromBroadcast=true 避免回环）独立发送同一段文本。
+  React.useEffect(() => {
+    if (!compareBroadcast) return
+    if (compareBroadcast.targetSessionId !== sessionId) return
+    if (compareBroadcast.nonce === lastBroadcastNonceRef.current) return
+    // 目标会话尚未可接收时保留广播；状态变化后 effect 会再次尝试。
+    if (!messagesLoaded || !agentChannelId || !hasAvailableModel) return
+    if (!streaming && messagesRefreshingRef.current) return
+    lastBroadcastNonceRef.current = compareBroadcast.nonce
+    const event = compareBroadcast
+    // 消费后立即清空，避免 AgentView 解绑重挂时重放旧 prompt。
+    setCompareBroadcast((current) => current === event ? null : current)
+    void handleSend(event.text, false, { fromBroadcast: true })
+  }, [agentChannelId, compareBroadcast, handleSend, hasAvailableModel, messagesLoaded, sessionId, setCompareBroadcast, streaming])
 
   /** 停止生成 */
   const handleStop = React.useCallback((): void => {
@@ -3041,7 +3077,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
           externalSelectedModel={externalSelectedModel}
           onModelSelect={handleModelSelect}
           showChannelInTrigger
-          useSharedOpenState
+          useSharedOpenState={sharedModelSelectorOpen}
         />
       </div>
       {sendControl}
@@ -3065,7 +3101,15 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   return (
     <>
     <AgentSessionProvider sessionId={sessionId}>
-      <div className="flex h-full min-h-0 flex-1 min-w-0 max-w-[min(72rem,100%)] flex-col overflow-hidden mx-auto">
+      <div
+        className="flex h-full min-h-0 flex-1 min-w-0 max-w-[min(72rem,100%)] flex-col overflow-hidden mx-auto"
+        onPointerDownCapture={() => {
+          if (comparePartnerId) setCompareFocusedSessionId(sessionId)
+        }}
+        onFocusCapture={() => {
+          if (comparePartnerId) setCompareFocusedSessionId(sessionId)
+        }}
+      >
         {/* Agent Header */}
         <AgentHeader sessionId={sessionId} />
 

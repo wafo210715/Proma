@@ -21,6 +21,8 @@ import {
 import { CanvasPane } from '@/components/canvas/CanvasView'
 import { closeCanvasInSplit } from '@/components/canvas/canvas-opener'
 import { TabErrorBoundary } from './TabErrorBoundary'
+import { toast } from 'sonner'
+import { Loader2 } from 'lucide-react'
 import { Panel } from '@/components/app-shell/Panel'
 import { WelcomeView } from '@/components/welcome/WelcomeView'
 import { previewPanelOpenMapAtom, previewSplitRatioAtom } from '@/atoms/preview-atoms'
@@ -28,6 +30,19 @@ import { PreviewPanel } from '@/components/diff/PreviewPanel'
 import { ScratchPadPane } from '@/components/scratch-pad/ScratchPadView'
 import { closeScratchInSplit } from '@/components/scratch-pad/scratch-pad-opener'
 import { useTrackSessionView } from '@/hooks/useTrackSessionView'
+import { AgentView } from '@/components/agent'
+import { agentSessionsAtom, agentStreamingStatesAtom } from '@/atoms/agent-atoms'
+import {
+  compareBroadcastAtom,
+  compareFocusedSessionIdAtom,
+  compareLinkedAtom,
+  comparePairsAtom,
+  comparePendingFileLinksAtom,
+  compareSplitRatioAtom,
+  findPairContaining,
+  pendingInheritAtom,
+} from '@/atoms/compare-atoms'
+import { useCompareActions } from '@/hooks/useCompareActions'
 import { TabBar } from './TabBar'
 import { TabContent } from './TabContent'
 import { AutomationFormView } from '@/components/automation/AutomationFormView'
@@ -72,6 +87,22 @@ export function MainArea(): React.ReactElement {
   const rightWorkspaceDragging = React.useRef(false)
   const browserSessionId = activeTab?.type === 'agent' ? activeTab.sessionId : null
 
+  // ── 双开对比（compare）状态 ──
+  const agentSessions = useAtomValue(agentSessionsAtom)
+  const streamingStates = useAtomValue(agentStreamingStatesAtom)
+  const [comparePairs, setComparePairs] = useAtom(comparePairsAtom)
+  const setCompareFocusedSessionId = useSetAtom(compareFocusedSessionIdAtom)
+  const compareLinked = useAtomValue(compareLinkedAtom)
+  const [compareSplitRatio, setCompareSplitRatio] = useAtom(compareSplitRatioAtom)
+  const setCompareBroadcast = useSetAtom(compareBroadcastAtom)
+  const setComparePendingFileLinks = useSetAtom(comparePendingFileLinksAtom)
+  const [pendingInherit, setPendingInherit] = useAtom(pendingInheritAtom)
+  const { executeInherit } = useCompareActions()
+  const compareDragging = React.useRef(false)
+  const pendingInheritInFlightRef = React.useRef<typeof pendingInherit>(null)
+  const previousComparePairsRef = React.useRef(comparePairs)
+  const previousCompareLinkedRef = React.useRef(compareLinked)
+
   const publishBrowserState = React.useCallback((state: BrowserViewState) => {
     setBrowserStateMap((previous) => { const next = new Map(previous); next.set(state.sessionId, state); return next })
     setBrowserOpenMap((previous) => { const next = new Map(previous); next.set(state.sessionId, true); return next })
@@ -98,6 +129,99 @@ export function MainArea(): React.ReactElement {
       .catch(() => undefined)
     return () => { cancelled = true }
   }, [browserSessionId, publishBrowserState])
+
+  // 当前活跃 tab 对应的配对信息：activePair = 配对对象，activeCompareRole = 当前 session 是 left 还是 right
+  const activeSessionId = browserSessionId
+  const activeCompareMatch = activeSessionId
+    ? findPairContaining(comparePairs, activeSessionId)
+    : null
+  const activeComparePair = activeCompareMatch?.pair ?? null
+  // partner = 当前 tab 的分屏另一侧 session
+  const comparePartnerId = activeCompareMatch
+    ? (activeCompareMatch.role === 'left' ? activeCompareMatch.pair.right : activeCompareMatch.pair.left)
+    : null
+  const showComparePane =
+    !!activeComparePair &&
+    !!comparePartnerId &&
+    activeView === 'conversations'
+
+  // 延迟挂载右栏 AgentView：左栏先渲染完毕，下一帧再挂右栏，避免两个重组件同时初始化。
+  const [partnerPaneReady, setPartnerPaneReady] = React.useState(false)
+  React.useEffect(() => {
+    setPartnerPaneReady(false)
+    if (!comparePartnerId) return
+    const raf = requestAnimationFrame(() => setPartnerPaneReady(true))
+    return () => cancelAnimationFrame(raf)
+  }, [comparePartnerId])
+
+  // 配对数组变化时丢弃尚未消费的旧广播，防止解绑/重绑后重放旧 prompt。
+  React.useEffect(() => {
+    if (previousComparePairsRef.current === comparePairs) return
+    previousComparePairsRef.current = comparePairs
+    setCompareFocusedSessionId(activeSessionId)
+    setCompareBroadcast(null)
+    setComparePendingFileLinks(new Map())
+  }, [comparePairs, activeSessionId, setCompareBroadcast, setCompareFocusedSessionId, setComparePendingFileLinks])
+
+  // 关闭联动即切断现有附件镜像关系；草稿保留在两侧，重新开启时不自动合并。
+  React.useEffect(() => {
+    const wasLinked = previousCompareLinkedRef.current
+    previousCompareLinkedRef.current = compareLinked
+    if (wasLinked && !compareLinked) {
+      setCompareBroadcast(null)
+      setComparePendingFileLinks(new Map())
+    }
+  }, [compareLinked, setCompareBroadcast, setComparePendingFileLinks])
+
+  // 配对中的 session 被删除时自动清理对应配对。
+  // 注意：只检查「之前存在但现在不在列表中」的 session，避免 agentSessions 短暂空窗时误删。
+  const previousSessionIdsRef = React.useRef<Set<string>>(new Set())
+  React.useEffect(() => {
+    if (comparePairs.length === 0) {
+      previousSessionIdsRef.current = new Set(agentSessions.map((s) => s.id))
+      return
+    }
+    const currentSessionIds = new Set(agentSessions.map((s) => s.id))
+    const prevIds = previousSessionIdsRef.current
+    // 只清理「上一轮存在、这一轮消失了」的 session，不因列表短暂空窗误删
+    const deletedIds = new Set<string>()
+    for (const id of prevIds) {
+      if (!currentSessionIds.has(id)) deletedIds.add(id)
+    }
+    if (deletedIds.size > 0) {
+      setComparePairs((prev) =>
+        prev.filter((p) => !deletedIds.has(p.left) && !deletedIds.has(p.right)),
+      )
+    }
+    previousSessionIdsRef.current = currentSessionIds
+  }, [agentSessions, comparePairs.length, setComparePairs])
+
+  // 待办继承由常驻 MainArea 观察全局流状态，切换 tab 后也能在源会话完成时执行。
+  React.useEffect(() => {
+    if (!pendingInherit) return
+    const source = agentSessions.find((session) => session.id === pendingInherit.sourceSessionId)
+    if (!source) {
+      setPendingInherit((current) => current === pendingInherit ? null : current)
+      toast.error('待办继承已取消', { description: '源会话已不存在。' })
+      return
+    }
+    if (streamingStates.get(source.id)?.running) return
+    if (pendingInheritInFlightRef.current === pendingInherit) return
+
+    const task = pendingInherit
+    pendingInheritInFlightRef.current = task
+    void executeInherit(source, task.targetChannelId, task.targetModelId)
+      .then((completed) => {
+        if (completed) {
+          setPendingInherit((current) => current === task ? null : current)
+        }
+      })
+      .finally(() => {
+        if (pendingInheritInFlightRef.current === task) {
+          pendingInheritInFlightRef.current = null
+        }
+      })
+  }, [agentSessions, executeInherit, pendingInherit, setPendingInherit, streamingStates])
 
   const showBrowserPanel = !!browserSessionId && (browserOpenMap.get(browserSessionId) ?? false) && activeView === 'conversations'
   const browserState = browserSessionId ? browserStateMap.get(browserSessionId) ?? null : null
@@ -175,6 +299,42 @@ export function MainArea(): React.ReactElement {
     document.addEventListener('mouseup', onMouseUp)
   }, [splitRatio, setSplitRatio])
 
+  const handleCompareDragStart = React.useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    compareDragging.current = true
+    const startX = e.clientX
+    const startRatio = compareSplitRatio
+    const containerEl = (e.currentTarget as HTMLElement).closest('[data-split-container]') as HTMLElement | null
+    const containerWidth = containerEl?.clientWidth ?? 1
+    let rafId = 0
+
+    document.body.style.userSelect = 'none'
+    document.body.style.cursor = 'col-resize'
+    document.querySelectorAll('iframe').forEach((f) => { (f as HTMLElement).style.pointerEvents = 'none' })
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!compareDragging.current) return
+      if (rafId) return
+      rafId = requestAnimationFrame(() => {
+        rafId = 0
+        const delta = ev.clientX - startX
+        const newRatio = Math.max(0.3, Math.min(0.7, startRatio + delta / containerWidth))
+        setCompareSplitRatio(newRatio)
+      })
+    }
+    const onMouseUp = () => {
+      compareDragging.current = false
+      if (rafId) cancelAnimationFrame(rafId)
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+      document.querySelectorAll('iframe').forEach((f) => { (f as HTMLElement).style.pointerEvents = '' })
+      document.removeEventListener('mousemove', onMouseMove)
+      document.removeEventListener('mouseup', onMouseUp)
+    }
+    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('mouseup', onMouseUp)
+  }, [compareSplitRatio, setCompareSplitRatio])
+
   const handleRightWorkspaceDragStart = React.useCallback((e: React.MouseEvent) => {
     e.preventDefault()
     rightWorkspaceDragging.current = true
@@ -243,10 +403,13 @@ export function MainArea(): React.ReactElement {
 
   // 左侧容器宽度：右侧工作区打开时固定占 splitRatio；其他情况（含 closing 动画期间）
   // 直接 1 1 auto 占满——closing 时右侧 absolute 脱离 flex 流，所以左侧自然占 100%。
-  const showRightPanel = showBrowserPanel || showScratchPanel || showPreviewPane || showCanvasPanel
-  const leftFlexStyle: React.CSSProperties = showRightPanel
-    ? { flex: `0 0 calc(${splitRatio * 100}% - 6px)` }
-    : { flex: '1 1 auto' }
+  // 对比态优先接管右 slot：此时不显示 preview/scratch/canvas 右面板
+  const showRightPanel = !showComparePane && (showBrowserPanel || showScratchPanel || showPreviewPane || showCanvasPanel)
+  const leftFlexStyle: React.CSSProperties = showComparePane
+    ? { flex: `0 0 calc(${compareSplitRatio * 100}% - 6px)` }
+    : showRightPanel
+      ? { flex: `0 0 calc(${splitRatio * 100}% - 6px)` }
+      : { flex: '1 1 auto' }
   const previewPaneStyle: React.CSSProperties = showBothRightPanels
     ? { flex: `0 0 calc(${rightWorkspaceRatio * 100}% - 4px)` }
     : { flex: '1 1 auto' }
@@ -295,6 +458,33 @@ export function MainArea(): React.ReactElement {
               </>
             )}
           </div>
+
+          {/* 右侧：双开对比栏（partner 的 AgentView）。对比态接管右 slot，优先于 preview/scratch/canvas。 */}
+          {/* 右栏延迟一帧挂载：左栏先渲染完，避免两个重组件同时初始化导致卡顿。 */}
+          {showComparePane && comparePartnerId && (
+            <>
+              <div
+                className="w-[8px] cursor-col-resize bg-border/40 hover:bg-primary/30 active:bg-primary/50 transition-colors flex-shrink-0 self-stretch"
+                onMouseDown={handleCompareDragStart}
+              />
+              <div className="flex flex-col min-w-[260px] h-full overflow-hidden" style={{ flex: '1 1 auto' }}>
+                {/* 补一条与左栏 TabBar 等高（34px）的顶栏，使右栏 AgentHeader 与左栏对齐 */}
+                <div className="h-[34px] tabbar-bg flex-shrink-0" />
+                <div className="flex-1 min-h-0">
+                  {partnerPaneReady ? (
+                    <TabErrorBoundary key={comparePartnerId} sessionId={comparePartnerId}>
+                      <AgentView sessionId={comparePartnerId} sharedModelSelectorOpen={false} />
+                    </TabErrorBoundary>
+                  ) : (
+                    <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
+                      <Loader2 className="size-4 animate-spin mr-2" />
+                      加载中…
+                    </div>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
 
           {/* 右侧：预览/草稿工作区。Preview 和草稿可在同一右侧槽位内并排显示。 */}
           {showRightPanel && (

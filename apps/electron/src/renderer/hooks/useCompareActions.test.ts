@@ -24,11 +24,12 @@ const channels = [
 ] as unknown as Channel[]
 
 describe('跨 Provider 对比会话继承', () => {
-  test('given a Claude SDK session on the same channel when inheriting then uses native fork', () => {
+  test('given a legacy SDK session on the same channel when inheriting then still uses text injection (Pi-only)', () => {
+    // Pi-only 架构下 Claude SDK session 已不存在，历史 sdkSessionId 字段不触发 native fork。
     expect(shouldForkInheritedSession(
       session({ sdkSessionId: 'sdk-session' }),
       'anthropic-channel',
-    )).toBe(true)
+    )).toBe(false)
   })
 
   test('given no SDK session, Pi runtime, or a different channel when inheriting then uses text injection', () => {

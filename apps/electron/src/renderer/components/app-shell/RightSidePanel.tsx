@@ -15,11 +15,21 @@ import {
   agentDiffPanelTabAtom,
 } from '@/atoms/agent-atoms'
 import type { AgentSidePanelTab } from '@/atoms/agent-atoms'
+import { compareFocusedSessionIdAtom, comparePairsAtom, findPairContaining } from '@/atoms/compare-atoms'
 import { SidePanel } from '@/components/agent/SidePanel'
 
 export function RightSidePanel({ width }: { width?: number }): React.ReactElement | null {
   const appMode = useAtomValue(appModeAtom)
-  const currentSessionId = useAtomValue(currentAgentSessionIdAtom)
+  const primarySessionId = useAtomValue(currentAgentSessionIdAtom)
+  const comparePairs = useAtomValue(comparePairsAtom)
+  const compareFocusedSessionId = useAtomValue(compareFocusedSessionIdAtom)
+  // 当前活跃 session 属于某配对时，焦点 session 可以在配对两侧间切换
+  const compareMatch = primarySessionId ? findPairContaining(comparePairs, primarySessionId) : null
+  const currentSessionId = compareMatch
+    && compareFocusedSessionId
+    && (compareFocusedSessionId === compareMatch.pair.left || compareFocusedSessionId === compareMatch.pair.right)
+    ? compareFocusedSessionId
+    : primarySessionId
   const sessionPathMap = useAtomValue(agentSessionPathMapAtom)
   const diffPanelTabMap = useAtomValue(agentDiffPanelTabAtom)
   const setDiffPanelTabMap = useSetAtom(agentDiffPanelTabAtom)
