@@ -239,7 +239,7 @@ export interface ElectronAPI {
   goForwardAgentBrowser: (sessionId: string) => Promise<import('@proma/shared').BrowserViewState>
   reloadAgentBrowser: (sessionId: string) => Promise<import('@proma/shared').BrowserViewState>
   closeAgentBrowser: (sessionId: string) => Promise<void>
-  onAgentBrowserStateChanged: (callback: (state: import('@proma/shared').BrowserViewState) => void) => () => void
+  onAgentBrowserStateChanged: (callback: (state: import('@proma/shared').BrowserStateChange) => void) => () => void
 
   // ===== 通用工具 =====
 
@@ -541,6 +541,15 @@ export interface ElectronAPI {
 
   /** 获取 Agent 会话列表 */
   listAgentSessions: () => Promise<AgentSessionMeta[]>
+
+  /** 获取未归档会话列表，供左侧 active 视图使用 */
+  listActiveAgentSessions: () => Promise<AgentSessionMeta[]>
+
+  /** 获取归档会话列表，进入归档视图时按需调用 */
+  listArchivedAgentSessions: () => Promise<AgentSessionMeta[]>
+
+  /** 获取归档会话数量，不返回归档元数据 */
+  countArchivedAgentSessions: () => Promise<number>
 
   /** 创建 Agent 会话 */
   createAgentSession: (title?: string, channelId?: string, workspaceId?: string, modelId?: string) => Promise<AgentSessionMeta>
@@ -1379,8 +1388,8 @@ const electronAPI: ElectronAPI = {
   goForwardAgentBrowser: (sessionId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.GO_FORWARD_BROWSER, sessionId),
   reloadAgentBrowser: (sessionId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.RELOAD_BROWSER, sessionId),
   closeAgentBrowser: (sessionId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.CLOSE_BROWSER, sessionId),
-  onAgentBrowserStateChanged: (callback: (state: import('@proma/shared').BrowserViewState) => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, state: import('@proma/shared').BrowserViewState) => callback(state)
+  onAgentBrowserStateChanged: (callback: (state: import('@proma/shared').BrowserStateChange) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, state: import('@proma/shared').BrowserStateChange) => callback(state)
     ipcRenderer.on(AGENT_IPC_CHANNELS.BROWSER_STATE_CHANGED, listener)
     return () => ipcRenderer.removeListener(AGENT_IPC_CHANNELS.BROWSER_STATE_CHANGED, listener)
   },
@@ -1779,6 +1788,18 @@ const electronAPI: ElectronAPI = {
   // Agent 会话管理
   listAgentSessions: () => {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.LIST_SESSIONS)
+  },
+
+  listActiveAgentSessions: () => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.LIST_ACTIVE_SESSIONS)
+  },
+
+  listArchivedAgentSessions: () => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.LIST_ARCHIVED_SESSIONS)
+  },
+
+  countArchivedAgentSessions: () => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.COUNT_ARCHIVED_SESSIONS)
   },
 
   createAgentSession: (title?: string, channelId?: string, workspaceId?: string, modelId?: string) => {

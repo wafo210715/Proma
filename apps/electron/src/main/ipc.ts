@@ -266,6 +266,9 @@ import {
 import { runPlanningNativeSync } from './lib/planning-native-sync-coordinator'
 import {
   listAgentSessions,
+  listActiveAgentSessions,
+  listArchivedAgentSessions,
+  countArchivedAgentSessions,
   createAgentSession,
   getAgentSessionMeta,
   getAgentSessionSDKMessages,
@@ -2239,6 +2242,24 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.LIST_SESSIONS,
     async (): Promise<AgentSessionMeta[]> => listAgentSessions()
+  )
+
+  // 获取未归档会话列表（侧栏 active 视图）
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.LIST_ACTIVE_SESSIONS,
+    async (): Promise<AgentSessionMeta[]> => listActiveAgentSessions(),
+  )
+
+  // 获取归档会话列表（进入归档视图时按需加载）
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.LIST_ARCHIVED_SESSIONS,
+    async (): Promise<AgentSessionMeta[]> => listArchivedAgentSessions(),
+  )
+
+  // 获取归档会话数量（active 视图只展示计数）
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.COUNT_ARCHIVED_SESSIONS,
+    async (): Promise<number> => countArchivedAgentSessions(),
   )
 
   // 创建 Agent 会话
