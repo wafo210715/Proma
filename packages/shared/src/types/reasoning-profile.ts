@@ -89,14 +89,22 @@ export interface ResolveReasoningProfileInput {
 const DEEPSEEK_V4_LEVELS = ['off', 'low', 'high', 'xhigh', 'max'] as const satisfies readonly AgentThinkingLevel[]
 const K3_LEVELS = ['off', 'low', 'high', 'max'] as const satisfies readonly AgentThinkingLevel[]
 const GLM_52_LEVELS = ['off', 'high', 'max'] as const satisfies readonly AgentThinkingLevel[]
-const GLM_53_LEVELS = ['off', 'high'] as const satisfies readonly AgentThinkingLevel[]
-/** GLM-5.3 官方端点只支持思考开关，不接受 reasoning_effort；其余档位必须从 UI 隐藏。 */
-const GLM_53_THINKING_LEVEL_MAP: ReasoningEffortMap = {
-  minimal: null,
-  low: null,
-  medium: null,
-  xhigh: null,
-  max: null,
+/**
+ * GLM-5.3 官方语义（docs.bigmodel.cn / z.ai，2026-08）：思考常开，thinking 仅接受
+ * enabled；reasoning_effort 取 low / high / max，默认 max，编程任务官方推荐 max。
+ * 官方端点不接受 thinking.disabled，因此不暴露 off 档；旧会话存的 off 会被
+ * capability clamp 与 profile.normalize 归一到 low（Coding Plan 适配层同样将
+ * disabled 类输入转译为 low）。#1708 曾按 Pi catalog 空白降级为思考开关（off/high），
+ * 与官方文档冲突，此处按官方语义恢复 effort 三档。
+ */
+const GLM_53_LEVELS = ['low', 'high', 'max'] as const satisfies readonly AgentThinkingLevel[]
+const GLM_53_EFFORT_MAP: ReasoningEffortMap = {
+  minimal: 'low',
+  low: 'low',
+  medium: 'high',
+  high: 'high',
+  xhigh: 'max',
+  max: 'max',
 }
 const OPENAI_STANDARD_LEVELS = ['off', 'low', 'medium', 'high', 'xhigh'] as const satisfies readonly AgentThinkingLevel[]
 const OPENAI_MAX_LEVELS = [...OPENAI_STANDARD_LEVELS, 'max'] as const satisfies readonly AgentThinkingLevel[]
@@ -203,7 +211,11 @@ function normalizeGlm52Level(level: AgentThinkingLevel | undefined): AgentThinki
 }
 
 function normalizeGlm53Level(level: AgentThinkingLevel | undefined): AgentThinkingLevel {
-  return level === 'off' ? 'off' : 'high'
+  if (level === 'low' || level === 'high' || level === 'max') return level
+  if (level === 'xhigh') return 'max'
+  if (level === 'medium') return 'high'
+  // off / minimal / undefined：官方不允许关闭思考，归一到最轻的 low 档。
+  return 'low'
 }
 
 function normalizeOpenAIStandardLevel(level: AgentThinkingLevel | undefined): AgentThinkingLevel {
@@ -252,11 +264,12 @@ const K3_PROFILE: ReasoningProfile = {
 const GLM_53_PROFILE: ReasoningProfile = {
   id: 'glm-5.3',
   levels: GLM_53_LEVELS,
-  defaultLevel: 'high',
+  // 官方 API 不传 reasoning_effort 时默认 max，Proma 初始档与官方对齐。
+  defaultLevel: 'max',
   normalize: normalizeGlm53Level,
   encodings: {
-    'anthropic-messages': { kind: 'anthropic-manual', effortMap: GLM_53_THINKING_LEVEL_MAP },
-    'openai-completions': { kind: 'zai-toggle', effortMap: GLM_53_THINKING_LEVEL_MAP },
+    'anthropic-messages': { kind: 'adaptive-effort', effortMap: GLM_53_EFFORT_MAP },
+    'openai-completions': { kind: 'zai-thinking-effort', effortMap: GLM_53_EFFORT_MAP },
   },
 }
 
