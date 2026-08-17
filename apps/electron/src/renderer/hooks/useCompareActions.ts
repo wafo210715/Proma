@@ -12,8 +12,7 @@
 import * as React from 'react'
 import { useAtomValue, useSetAtom } from 'jotai'
 import { toast } from 'sonner'
-import { isAgentCompatibleProvider } from '@proma/shared'
-import type { AgentRuntime, AgentSessionMeta, Channel, SDKMessage } from '@proma/shared'
+import type { AgentSessionMeta, Channel, SDKMessage } from '@proma/shared'
 import { agentSessionsAtom, agentPendingPromptAtom } from '@/atoms/agent-atoms'
 import { channelsAtom } from '@/atoms/chat-atoms'
 import { comparePairsAtom, compareLinkedAtom, addPair, pendingInheritAtom } from '@/atoms/compare-atoms'
@@ -56,28 +55,22 @@ export function buildInheritedContextBlock(messages: SDKMessage[]): string {
 
 /** 同渠道 Claude 会话只有存在 SDK session 时才能走原生 fork。 */
 export function shouldForkInheritedSession(
-  source: AgentSessionMeta,
-  targetChannelId: string,
+  _source: AgentSessionMeta,
+  _targetChannelId: string,
 ): boolean {
-  return source.agentRuntime !== 'pi'
-    && !!source.sdkSessionId
-    && !!source.channelId
-    && targetChannelId === source.channelId
+  // Pi-only runtime: all sessions use Pi, no Claude fork needed
+  return false
 }
 
 /**
- * 目标 runtime 优先沿用 Pi；Claude 源会话选择非 Claude 兼容渠道时自动切到 Pi。
- * 这样跨 provider 继承不会创建出无法运行目标模型的 Claude 会话。
+ * Pi is the only runtime.
  */
 export function resolveCompareTargetRuntime(
-  source: AgentSessionMeta,
-  targetChannelId: string,
-  channels: Channel[],
-): AgentRuntime {
-  if (source.agentRuntime === 'pi') return 'pi'
-  const targetChannel = channels.find((channel) => channel.id === targetChannelId)
-  if (targetChannel && !isAgentCompatibleProvider(targetChannel.provider)) return 'pi'
-  return 'claude'
+  _source: AgentSessionMeta,
+  _targetChannelId: string,
+  _channels: Channel[],
+): 'pi' {
+  return 'pi'
 }
 
 export function useCompareActions(): {
@@ -106,7 +99,6 @@ export function useCompareActions(): {
         source.channelId ?? undefined,
         source.workspaceId ?? undefined,
         source.modelId ?? undefined,
-        source.agentRuntime ?? 'claude',
       )
       setAgentSessions((prev) => [meta, ...prev])
       pairWith(source.id, meta.id)
@@ -145,7 +137,6 @@ export function useCompareActions(): {
         targetChannelId,
         source.workspaceId ?? undefined,
         targetModelId,
-        targetRuntime,
       )
       setAgentSessions((prev) => [meta, ...prev])
       try {

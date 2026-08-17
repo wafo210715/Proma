@@ -1,4 +1,5 @@
 import MarkdownIt from 'markdown-it'
+import { normalizeMalformedStrongDelimiters } from './markdown-emphasis'
 
 const VIDEO_EXT_RE = /\.(mp4|webm|ogg|ogv|mov|m4v)(?:[?#].*)?$/i
 const PREVIEW_BLOCK_RE = /^<div\s+[^>]*data-type=(["'])(?:raw-html-block|math-block)\1/i
@@ -6,7 +7,7 @@ const DETAILS_BLOCK_RE = /<details(\s[^>]*)?>\s*<summary>([\s\S]*?)<\/summary>([
 const STANDALONE_HTML_MEDIA_RE = /^\s*<(?:img|video)\b[^>]*(?:\/?>|>.*?<\/video>)\s*$/i
 const LEADING_FRONTMATTER_RE = /^(?:\ufeff)?---[ \t]*\r?\n([\s\S]*?)\r?\n(?:---|\.\.\.)[ \t]*(?=\r?\n|$)/
 
-export const MARKDOWN_RENDERER_VERSION = 4
+export const MARKDOWN_RENDERER_VERSION = 5
 
 const EMOJI_SHORTCODES: Record<string, string> = {
   '+1': '👍',
@@ -332,7 +333,9 @@ function preprocessMarkdown(markdown: string): string {
   return splitMarkdownCodeRegions(wrapLeadingFrontmatterBlock(markdown))
     .map((chunk) => chunk.code
       ? chunk.text
-      : wrapMarkdownDetailsBlocks(separateStandaloneHtmlMediaBlocks(normalizeMarkdownLinePrefixes(chunk.text))))
+      : wrapMarkdownDetailsBlocks(separateStandaloneHtmlMediaBlocks(
+        normalizeMarkdownLinePrefixes(normalizeMalformedStrongDelimiters(chunk.text))
+      )))
     .join('')
 }
 
@@ -376,6 +379,10 @@ function enhanceMarkdownHtml(html: string): string {
 export function markdownToHtml(markdown: string): string {
   if (!markdown) return ''
   return enhanceMarkdownHtml(markdownIt.render(preprocessMarkdown(markdown)))
+}
+
+function serializeNamedMention(prefix: '&session' | '&todo' | '&calendar_event', id: string, label: string | null): string {
+  return label ? `${prefix}:${id}::${encodeURIComponent(label)}` : `${prefix}:${id}`
 }
 
 /** 将 TipTap 输出的 HTML 转换为 Markdown 格式 */
@@ -522,12 +529,20 @@ export function htmlToMarkdown(
         }
         const dataType = el.getAttribute('data-type')
         const dataId = el.getAttribute('data-id') || ''
+        const dataLabel = el.getAttribute('data-label')
         const suggestionChar = el.getAttribute('data-mention-suggestion-char') || '@'
+        const referenceType = el.getAttribute('data-mention-reference-type')
+        const agentHistoryQuote = el.getAttribute('data-mention-quote')
         if (dataType === 'mention') {
+          if (agentHistoryQuote) return `&quote:${agentHistoryQuote}`
+          if (referenceType === 'todo') return serializeNamedMention('&todo', dataId, dataLabel)
+          if (referenceType === 'calendar_event') return serializeNamedMention('&calendar_event', dataId, dataLabel)
           if (suggestionChar === '/') return `/skill:${dataId}`
           if (suggestionChar === '#') return `#mcp:${dataId}`
-          if (suggestionChar === '&') return `&session:${dataId}`
-          return `@file:${dataId}`
+          if (suggestionChar === '&') return serializeNamedMention('&session', dataId, dataLabel)
+          // 路径可能包含空格等字符，必须编码后再嵌入 @file: 协议，
+          // 否则展示层 @file:(\S+) 正则会在空格处截断（remarkMentions / MentionChip / 排队消息均内置解码）。
+          return `@file:${encodeURIComponent(dataId)}`
         }
         return children
       }

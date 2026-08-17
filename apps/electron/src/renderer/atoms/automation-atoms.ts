@@ -12,7 +12,6 @@ import type {
   AutomationScheduleType,
   AutomationPermissionMode,
   AutomationSessionMode,
-  AgentRuntime,
 } from '@proma/shared'
 import { AUTOMATION_DEFAULT_PERMISSION_MODE, AUTOMATION_DEFAULT_SESSION_MODE } from '@proma/shared'
 
@@ -31,14 +30,17 @@ export interface AutomationDraft {
   prompt: string
   scheduleType: AutomationScheduleType
   intervalMinutes: number
+  /** interval 的每日有效运行窗口；留空表示全天 */
+  activeWindowStart?: string
+  activeWindowEnd?: string
+  activeWeekdays?: number[]
   timeOfDay?: string
   dayOfWeek?: number
   dayOfMonth?: number
   /** 一次性任务的绝对触发时间戳，scheduleType==='once' 时使用 */
   scheduledAt?: number
   /** 最大运行次数上限（实际执行次数）；undefined = 不限次 */
-  maxRuns?: number
-  agentRuntime: AgentRuntime
+  maxRuns?: number | null
   channelId: string
   modelId?: string
   workspaceId?: string
@@ -70,7 +72,6 @@ export function createEmptyDraft(): AutomationDraft {
     timeOfDay: '09:00',
     dayOfWeek: 1,
     dayOfMonth: 1,
-    agentRuntime: 'pi',
     channelId: '',
     permissionMode: AUTOMATION_DEFAULT_PERMISSION_MODE,
     sessionMode: AUTOMATION_DEFAULT_SESSION_MODE,
@@ -89,12 +90,14 @@ export function automationToDraft(a: Automation): AutomationDraft {
     prompt: a.prompt,
     scheduleType: a.scheduleType,
     intervalMinutes: a.intervalMinutes,
+    activeWindowStart: a.activeWindowStart,
+    activeWindowEnd: a.activeWindowEnd,
+    activeWeekdays: a.activeWeekdays,
     timeOfDay: a.timeOfDay,
     dayOfWeek: a.dayOfWeek,
     dayOfMonth: a.dayOfMonth,
     scheduledAt: a.scheduledAt,
     maxRuns: a.maxRuns,
-    agentRuntime: a.agentRuntime ?? 'claude',
     channelId: a.channelId,
     modelId: a.modelId,
     workspaceId: a.workspaceId,

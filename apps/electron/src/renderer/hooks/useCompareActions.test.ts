@@ -12,7 +12,6 @@ function session(overrides: Partial<AgentSessionMeta> = {}): AgentSessionMeta {
     title: 'Source',
     channelId: 'anthropic-channel',
     modelId: 'claude-model',
-    agentRuntime: 'claude',
     createdAt: 1,
     updatedAt: 1,
     ...overrides,
@@ -25,17 +24,18 @@ const channels = [
 ] as unknown as Channel[]
 
 describe('跨 Provider 对比会话继承', () => {
-  test('given a Claude SDK session on the same channel when inheriting then uses native fork', () => {
+  test('given a legacy SDK session on the same channel when inheriting then still uses text injection (Pi-only)', () => {
+    // Pi-only 架构下 Claude SDK session 已不存在，历史 sdkSessionId 字段不触发 native fork。
     expect(shouldForkInheritedSession(
       session({ sdkSessionId: 'sdk-session' }),
       'anthropic-channel',
-    )).toBe(true)
+    )).toBe(false)
   })
 
   test('given no SDK session, Pi runtime, or a different channel when inheriting then uses text injection', () => {
     expect(shouldForkInheritedSession(session(), 'anthropic-channel')).toBe(false)
     expect(shouldForkInheritedSession(
-      session({ agentRuntime: 'pi', sdkSessionId: 'pi-session' }),
+      session({ sdkSessionId: 'sdk-session' }),
       'anthropic-channel',
     )).toBe(false)
     expect(shouldForkInheritedSession(
@@ -46,7 +46,7 @@ describe('跨 Provider 对比会话继承', () => {
 
   test('given a Pi source when creating an injected target then preserves Pi runtime', () => {
     expect(resolveCompareTargetRuntime(
-      session({ agentRuntime: 'pi' }),
+      session(),
       'anthropic-channel',
       channels,
     )).toBe('pi')
@@ -60,12 +60,12 @@ describe('跨 Provider 对比会话继承', () => {
     )).toBe('pi')
   })
 
-  test('given a Claude source and a compatible target then keeps Claude runtime', () => {
+  test('given a Claude source and a compatible target then uses Pi runtime', () => {
     expect(resolveCompareTargetRuntime(
       session(),
       'anthropic-channel',
       channels,
-    )).toBe('claude')
+    )).toBe('pi')
   })
 
   test('given user and assistant text blocks when building inherited context then keeps dialogue and skips tools', () => {

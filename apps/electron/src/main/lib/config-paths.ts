@@ -8,6 +8,7 @@
 import { join, basename } from 'node:path'
 import { mkdirSync, existsSync, cpSync, rmSync, readdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
+import { rmSyncWithRetry } from './fs-retry'
 
 /**
  * 获取配置目录名称
@@ -28,12 +29,12 @@ export function getConfigDirName(): string {
     } else {
       try {
         const { app } = require('electron')
-        _configDirName = app.isPackaged ? '.proma' : '.proma-dev-fork'
+        _configDirName = app.isPackaged ? '.proma' : '.proma-dev'
       } catch {
         _configDirName = '.proma'
       }
     }
-    const mode = _configDirName === '.proma-dev-fork' ? '开发模式（fork 实例）' : _configDirName === '.proma-dev' ? '开发模式' : '正式版本'
+    const mode = _configDirName === '.proma-dev' ? '开发模式' : '正式版本'
     console.log(`[配置] 配置目录: ~/${_configDirName}/（${mode}）`)
   }
   return _configDirName
@@ -455,6 +456,37 @@ function compareSemver(a: string, b: string): number {
   return 0
 }
 
+/**
+ * 已从 App bundle 移除、但仍需在既有用户目录中清理的默认 Skills。
+ *
+ * 不根据 bundle 中缺失的目录自动删除，避免误删用户自行安装的 Skills；
+ * 后续退役某个内置 Skill 时，显式把它的 slug 加到这里。
+ */
+export const RETIRED_DEFAULT_SKILL_SLUGS: readonly string[] = [
+  'brainstorming',
+]
+
+const RETIRED_DEFAULT_SKILL_SLUG_SET = new Set(RETIRED_DEFAULT_SKILL_SLUGS)
+
+export function isRetiredDefaultSkill(slug: string): boolean {
+  return RETIRED_DEFAULT_SKILL_SLUG_SET.has(slug)
+}
+
+/** 清理 ~/.proma/default-skills/ 中已退役的内置 Skill 缓存。 */
+export function removeRetiredDefaultSkills(dir = getDefaultSkillsDir()): void {
+  for (const slug of RETIRED_DEFAULT_SKILL_SLUGS) {
+    const target = join(dir, slug)
+    if (!existsSync(target)) continue
+
+    try {
+      rmSyncWithRetry(target, { recursive: true, force: true })
+      console.log(`[配置] 已移除退役默认 Skill: ${slug}`)
+    } catch (err) {
+      console.warn(`[配置] 移除退役默认 Skill 失败 (${slug}):`, err)
+    }
+  }
+}
+
 /** 防御性目录基名集合：复制 default skills 时永远跳过这些目录，避免
  *  .git 0444 文件、node_modules 文件爆炸等场景把启动期同步链路炸掉。 */
 const DEFAULT_SKILL_COPY_BLOCKLIST = new Set([
@@ -487,13 +519,14 @@ export function seedDefaultSkills(): void {
   const bundledDir = app.isPackaged
     ? join(process.resourcesPath, 'default-skills')
     : join(__dirname, '../default-skills')
+  const userDir = getDefaultSkillsDir()
+
+  removeRetiredDefaultSkills(userDir)
 
   if (!existsSync(bundledDir)) {
     console.log('[配置] 未找到内置 default-skills 目录，跳过')
     return
   }
-
-  const userDir = getDefaultSkillsDir()
 
   try {
     const entries = readdirSync(bundledDir, { withFileTypes: true })
@@ -640,7 +673,7 @@ export function getAgentSessionWorkspacePath(workspaceSlug: string, sessionId: s
 /**
  * 获取 SDK 隔离配置目录路径
  *
- * 用于设置 CLAUDE_CONFIG_DIR 环境变量，让 SDK 读取独立的配置文件，
+ * 用于保存 Pi session artifact 等运行时数据，
  * 而不是用户的 ~/.claude.json，实现 Proma 与 Claude Code CLI 的配置隔离。
  *
  * 如果目录不存在则自动创建。
@@ -668,10 +701,42 @@ export function getScratchPadPath(): string {
 }
 
 /**
+ * 获取 Canvas 画布文件路径
+ *
+ * @returns ~/.proma/canvas.canvas（JSON Canvas 格式）
+ */
+export function getCanvasPath(): string {
+  return join(getConfigDir(), 'canvas.canvas')
+}
+
+/**
  * 获取定时任务（Automation）配置文件路径
  *
  * @returns ~/.proma/automations.json
  */
 export function getAutomationsPath(): string {
   return join(getConfigDir(), 'automations.json')
+}
+
+/** 获取任务/日程 SQLite 数据库路径。 */
+export function getPlanningDatabasePath(): string {
+  return join(getConfigDir(), 'planning.db')
+}
+
+/**
+ * 获取指定会话的 canvas 文件路径（session-canvas.canvas）。
+ * re-emerge 注：来自 fork canvas 演化线，提前搬入以满足会话导出对 canvas 路径的引用。
+ */
+export function getSessionCanvasPath(workspaceSlug: string, sessionId: string): string {
+  const sessionDir = getAgentSessionWorkspacePath(workspaceSlug, sessionId)
+  return join(sessionDir, 'session-canvas.canvas')
+}
+
+/**
+ * 获取 Canvas 导出目录（与 session jsonl 同级，属于 Proma 备份范畴，不进 OB vault）
+ */
+export function getCanvasExportsDir(): string {
+  const dir = join(getConfigDir(), 'canvas-exports')
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  return dir
 }

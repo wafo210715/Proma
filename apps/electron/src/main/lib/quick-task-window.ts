@@ -8,6 +8,7 @@
 import { BrowserWindow, screen } from 'electron'
 import { join } from 'path'
 import { app } from 'electron'
+import { rendererDevUrl } from './dev-server'
 
 /** 快速任务窗口单例 */
 let quickTaskWindow: BrowserWindow | null = null
@@ -48,7 +49,7 @@ export function createQuickTaskWindow(): void {
   // 加载渲染进程（附带 query 参数区分窗口类型）
   const isDev = !app.isPackaged
   if (isDev) {
-    quickTaskWindow.loadURL('http://127.0.0.1:5174?window=quick-task')
+    quickTaskWindow.loadURL(rendererDevUrl('?window=quick-task'))
   } else {
     quickTaskWindow.loadFile(join(__dirname, 'renderer', 'index.html'), {
       query: { window: 'quick-task' },

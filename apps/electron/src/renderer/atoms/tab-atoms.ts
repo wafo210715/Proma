@@ -22,10 +22,16 @@ import type { PreviewFile } from './preview-atoms'
 // ===== 类型定义 =====
 
 /** 标签页类型（Settings 不作为 Tab，保留独立视图） */
-export type TabType = 'chat' | 'agent' | 'scratch' | 'preview' | 'tutorial'
+export type TabType = 'chat' | 'agent' | 'scratch' | 'canvas' | 'preview' | 'tutorial'
 
 /** Scratch Pad 专用的固定 sessionId */
 export const SCRATCH_PAD_ID = '__scratch-pad__'
+
+/** Canvas 画布专用的固定 sessionId */
+export const CANVAS_ID = '__canvas__'
+
+/** Canvas 标签默认标题 */
+export const CANVAS_TITLE = 'Canvas'
 
 /** 教程 Tab 固定 ID */
 export const TUTORIAL_TAB_ID = '__tutorial__'
@@ -113,10 +119,61 @@ export interface TabMinimapItem {
 }
 export const tabMinimapCacheAtom = atom<Map<string, TabMinimapItem[]>>(new Map())
 
+/** Scratch Pad 编辑器视图变体，用于隔离全屏页与右侧分屏的滚动位置 */
+export type ScratchPadViewVariant = 'page' | 'pane'
+
+export interface ScratchPadScrollPosition {
+  top: number
+  left: number
+}
+
+export type ScratchPadScrollPositions = Record<ScratchPadViewVariant, ScratchPadScrollPosition>
+
+/**
+ * Scratch Pad 的滚动位置（仅运行期内存态）。
+ * 全屏页和右侧分屏使用不同的滚动容器，不能互相覆盖位置。
+ */
+export const scratchPadScrollPositionsAtom = atom<ScratchPadScrollPositions>({
+  page: { top: 0, left: 0 },
+  pane: { top: 0, left: 0 },
+})
+
+export function updateScratchPadScrollPosition(
+  positions: ScratchPadScrollPositions,
+  variant: ScratchPadViewVariant,
+  position: ScratchPadScrollPosition,
+): ScratchPadScrollPositions {
+  const nextPosition = {
+    top: Math.max(0, position.top),
+    left: Math.max(0, position.left),
+  }
+  const previousPosition = positions[variant]
+  if (
+    previousPosition.top === nextPosition.top
+    && previousPosition.left === nextPosition.left
+  ) {
+    return positions
+  }
+  return { ...positions, [variant]: nextPosition }
+}
+
 /** Scratch Pad 编辑内容（HTML 字符串，供 TipTap 编辑器使用） */
 export const scratchPadContentAtom = atom<string>('')
 /** Scratch Pad 内容是否已从磁盘加载 */
 export const scratchPadLoadedAtom = atom<boolean>(false)
+
+/** Canvas 画布内容（JSON Canvas 格式字符串） */
+export const canvasContentAtom = atom<string>('')
+/** Canvas 内容是否已从磁盘加载 */
+export const canvasLoadedAtom = atom<boolean>(false)
+/** Canvas 是否固定在 Agent 右侧分屏；通过拖出 Canvas Tab 或 session 按钮打开 */
+export const canvasPanelOpenAtom = atom<boolean>(false)
+/** 当前分屏画布对应的 session ID（null = 全局画布，string = session 专属画布） */
+export const canvasPanelSessionIdAtom = atom<string | null>(null)
+/** Per-session canvas 内容缓存：sessionId → JSON Canvas 字符串 */
+export const sessionCanvasContentsAtom = atom<Map<string, string>>(new Map())
+/** Per-session canvas 是否已加载：sessionId → boolean */
+export const sessionCanvasLoadedAtom = atom<Map<string, boolean>>(new Map())
 /** Scratch Pad 是否固定在 Agent 右侧分屏；通过拖出 Scratch Tab 打开 */
 export const scratchPadPanelOpenAtom = atom<boolean>(false)
 /** 右侧工作区中 Preview 与 Scratch 并排时，Preview 占比 */
@@ -153,7 +210,7 @@ export const tabStreamingMapAtom = atom<Map<string, boolean>>((get) => {
   const agentRunning = get(agentRunningSessionIdsAtom)
   const map = new Map<string, boolean>()
   for (const tab of tabs) {
-    if (tab.type === 'scratch') continue
+    if (tab.type === 'scratch' || tab.type === 'canvas') continue
     if (tab.type === 'chat') {
       map.set(tab.id, chatStreaming.has(tab.sessionId))
     } else if (tab.type === 'agent') {
@@ -171,7 +228,7 @@ export const tabIndicatorMapAtom = atom<Map<string, SessionIndicatorStatus>>((ge
   const unviewedCompletedIds = get(unviewedCompletedSessionIdsAtom)
   const map = new Map<string, SessionIndicatorStatus>()
   for (const tab of tabs) {
-    if (tab.type === 'scratch') continue
+    if (tab.type === 'scratch' || tab.type === 'canvas') continue
     if (tab.type === 'chat') {
       map.set(tab.id, chatStreaming.has(tab.sessionId) ? 'running' : 'idle')
     } else if (tab.type === 'agent') {
@@ -194,6 +251,42 @@ function createScratchPadTab(): TabItem {
   }
 }
 
+/**
+ * 将固定草稿 Tab 放回顶部并聚焦，同时保留现有会话/预览上下文。
+ * 草稿被拖到右侧分屏时会暂时从 tabsAtom 移除，Ctrl+Tab 需要通过此入口恢复它。
+ */
+export function focusScratchPadTab(tabs: TabItem[]): {
+  tabs: TabItem[]
+  activeTabId: string
+  scratchPanelOpen: false
+} {
+  const scratchTab = tabs.find((tab) => tab.id === SCRATCH_PAD_ID && tab.type === 'scratch')
+    ?? createScratchPadTab()
+  return {
+    tabs: [scratchTab, ...tabs.filter((tab) => tab.id !== SCRATCH_PAD_ID)],
+    activeTabId: SCRATCH_PAD_ID,
+    // 从右侧分屏回到完整草稿页时，必须关闭分屏；否则下次切回 Agent 会话会出现重复草稿。
+    scratchPanelOpen: false,
+  }
+}
+
+
+function createCanvasTab(): TabItem {
+  return {
+    id: CANVAS_ID,
+    type: 'canvas',
+    sessionId: CANVAS_ID,
+    title: CANVAS_TITLE,
+  }
+}
+
+/** 获取两个固定入口：Scratch Pad + Canvas（始终位于顶部前两位） */
+function getPinnedTabs(tabs: TabItem[]): TabItem[] {
+  const scratchTab = tabs.find((t) => t.id === SCRATCH_PAD_ID) ?? createScratchPadTab()
+  const canvasTab = tabs.find((t) => t.id === CANVAS_ID) ?? createCanvasTab()
+  return [scratchTab, canvasTab]
+}
+
 export function createPreviewTabId(sessionId: string): string {
   return `${PREVIEW_TAB_PREFIX}${sessionId}`
 }
@@ -210,12 +303,17 @@ export function isPreviewTab(tab: TabItem): boolean {
   return tab.type === 'preview' || tab.id.startsWith(PREVIEW_TAB_PREFIX)
 }
 
+/** Agent 会话及其归属的文件预览 Tab 都可操作 Agent 侧面板。 */
+export function isAgentContextTab(tab: TabItem | undefined): boolean {
+  return tab?.type === 'agent' || (tab !== undefined && isPreviewTab(tab))
+}
+
 function isSessionTab(tab: TabItem): boolean {
   return tab.type === 'chat' || tab.type === 'agent'
 }
 
 function getPersistentTabs(tabs: TabItem[]): TabItem[] {
-  return tabs.filter((tab) => tab.id !== SCRATCH_PAD_ID && tab.id !== TUTORIAL_TAB_ID && !isPreviewTab(tab))
+  return tabs.filter((tab) => tab.id !== SCRATCH_PAD_ID && tab.id !== CANVAS_ID && tab.id !== TUTORIAL_TAB_ID && !isPreviewTab(tab))
 }
 
 export function getPersistableTabState(
@@ -243,12 +341,19 @@ export function openTab(
   item: { type: TabType; sessionId: string; title: string },
   restore?: OpenTabRestore,
 ): { tabs: TabItem[]; activeTabId: string } {
-  const scratchTab = tabs.find((t) => t.id === SCRATCH_PAD_ID) ?? createScratchPadTab()
+  const pinnedTabs = getPinnedTabs(tabs)
 
   if (item.type === 'scratch') {
     return {
-      tabs: [scratchTab],
+      tabs: pinnedTabs,
       activeTabId: SCRATCH_PAD_ID,
+    }
+  }
+
+  if (item.type === 'canvas') {
+    return {
+      tabs: pinnedTabs,
+      activeTabId: CANVAS_ID,
     }
   }
 
@@ -260,7 +365,7 @@ export function openTab(
       title: TUTORIAL_TAB_TITLE,
     }
     return {
-      tabs: [scratchTab, tutorialTab],
+      tabs: [...pinnedTabs, tutorialTab],
       activeTabId: TUTORIAL_TAB_ID,
     }
   }
@@ -280,7 +385,7 @@ export function openTab(
     }
 
     return {
-      tabs: [scratchTab, ownerAgentTab, previewTab],
+      tabs: [...pinnedTabs, ownerAgentTab, previewTab],
       activeTabId: previewTab.id,
     }
   }
@@ -302,13 +407,13 @@ export function openTab(
       title: restore.previewTitle,
     }
     return {
-      tabs: [scratchTab, sessionTab, previewTab],
+      tabs: [...pinnedTabs, sessionTab, previewTab],
       activeTabId: restore.lastView === 'preview' ? previewTab.id : sessionTab.id,
     }
   }
 
   return {
-    tabs: [scratchTab, sessionTab],
+    tabs: [...pinnedTabs, sessionTab],
     activeTabId: sessionTab.id,
   }
 }
@@ -339,8 +444,8 @@ export function closeTab(
   activeTabId: string | null,
   tabId: string,
 ): { tabs: TabItem[]; activeTabId: string | null } {
-  // Scratch Pad 不可关闭
-  if (tabId === SCRATCH_PAD_ID) return { tabs, activeTabId }
+  // Scratch Pad 与 Canvas 不可关闭
+  if (tabId === SCRATCH_PAD_ID || tabId === CANVAS_ID) return { tabs, activeTabId }
 
   const tabIndex = tabs.findIndex((t) => t.id === tabId)
   if (tabIndex === -1) return { tabs, activeTabId }
@@ -391,11 +496,9 @@ export function updateTabTitle(
 
 /** 确保 Scratch Pad 标签存在并位于首位，同时只保留一个会话入口 */
 export function ensureScratchPadTab(tabs: TabItem[]): TabItem[] {
-  const scratchTab = tabs.find((t) => t.id === SCRATCH_PAD_ID)
-  const sessionTab = tabs.filter((t) => t.id !== SCRATCH_PAD_ID && !isPreviewTab(t)).at(-1)
-  if (scratchTab) {
-    return sessionTab ? [scratchTab, sessionTab] : [scratchTab]
-  }
-  const newTab = createScratchPadTab()
-  return sessionTab ? [newTab, sessionTab] : [newTab]
+  const pinnedTabs = getPinnedTabs(tabs)
+  const sessionTab = tabs
+    .filter((t) => t.id !== SCRATCH_PAD_ID && t.id !== CANVAS_ID && !isPreviewTab(t))
+    .at(-1)
+  return sessionTab ? [...pinnedTabs, sessionTab] : pinnedTabs
 }

@@ -17,11 +17,11 @@ import * as React from 'react'
 import { unstable_batchedUpdates } from 'react-dom'
 import { useAtom, useAtomValue, useSetAtom, useStore } from 'jotai'
 import { toast } from 'sonner'
-import { Box, CornerDownLeft, Square, Settings, Paperclip, FolderPlus, X, Copy, Check, Brain, Sparkles, Eye, ChevronDown } from 'lucide-react'
-import { AgentMessages } from './AgentMessages'
+import { CornerDownLeft, Square, Settings, X, Copy, Check, Brain, Sparkles, ListTodo, Paperclip, Crop } from 'lucide-react'
+import { comparePairsAtom, compareFocusedSessionIdAtom, compareLinkedAtom, compareBroadcastAtom, getComparePartner } from '@/atoms/compare-atoms'
+import { AgentMessages, type AgentHistoryQuoteNavigationRequest } from './AgentMessages'
 import { AgentHeader } from './AgentHeader'
 import { AgentMessageQueue } from './AgentMessageQueue'
-import { PendingInheritBanner } from './PendingInheritBanner'
 import { ContextUsageBadge } from './ContextUsageBadge'
 import { PermissionBanner } from './PermissionBanner'
 import { PermissionModeSelector } from './PermissionModeSelector'
@@ -31,7 +31,7 @@ import { PlanModeDashedBorder } from './PlanModeDashedBorder'
 import { ModelSelector } from '@/components/chat/ModelSelector'
 import { AttachmentPreviewItem } from '@/components/chat/AttachmentPreviewItem'
 import { QuotedSelectionChip } from '@/components/diff/QuotedSelectionChip'
-import { RichTextInput } from '@/components/ai-elements/rich-text-input'
+import { RichTextInput, type RichTextInputHandle } from '@/components/ai-elements/rich-text-input'
 import { SpeechButton } from '@/components/ai-elements/speech-button'
 import { InputToolbarOverflow, type ToolbarItem } from '@/components/ai-elements/InputToolbarOverflow'
 import {
@@ -42,6 +42,8 @@ import {
   inputToolbarSendButtonClass,
 } from '@/components/ai-elements/input-toolbar-styles'
 import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Switch } from '@/components/ui/switch'
@@ -65,18 +67,20 @@ import type { QuotedSelection } from '@/atoms/preview-atoms'
 import {
   agentStreamingStatesAtom,
   agentSessionStreamingStateAtomFamily,
+  agentSessionInputStreamStateAtomFamily,
   agentChannelIdAtom,
   agentModelIdAtom,
-  agentChannelIdsAtom,
-  agentRuntimeAtom,
   agentSessionChannelMapAtom,
   agentSessionModelMapAtom,
   currentAgentWorkspaceIdAtom,
   agentPendingPromptAtom,
+  agentPendingFilesAtomFamily,
   agentMessageQueueAtomFamily,
   agentWorkspacesAtom,
   agentStreamErrorsAtom,
   agentSessionDraftsAtom,
+  agentSessionDraftSyncVersionsAtom,
+  agentSessionDraftSyncVersionAtomFamily,
   agentSessionDraftAtomFamily,
   agentSessionDraftHtmlAtom,
   agentSessionDraftHtmlAtomFamily,
@@ -102,25 +106,23 @@ import {
   allPendingAskUserRequestsAtom,
   allPendingPermissionRequestsAtom,
   allPendingExitPlanRequestsAtom,
-  finalizeStreamingActivities,
 } from '@/atoms/agent-atoms'
-import type { AgentContextStatus } from '@/atoms/agent-atoms'
 import { settingsOpenAtom } from '@/atoms/settings-tab'
 import { longTextPasteAsAttachmentEnabledAtom } from '@/atoms/ui-preferences'
-import { channelsAtom, thinkingExpandedAtom } from '@/atoms/chat-atoms'
-import { comparePairsAtom, compareFocusedSessionIdAtom, compareLinkedAtom, compareBroadcastAtom, getComparePartner, pendingInheritAtom } from '@/atoms/compare-atoms'
-import type { CompareAttachmentPayload } from '@/atoms/compare-atoms'
-import { useComparePendingFiles } from '@/hooks/useComparePendingFiles'
+import { channelsAtom } from '@/atoms/chat-atoms'
+import { todoPlanningGroupsAtom } from '@/atoms/planning-atoms'
 import { useOpenSession } from '@/hooks/useOpenSession'
 import { AgentSessionProvider } from '@/contexts/session-context'
 import { draftSessionIdsAtom } from '@/atoms/draft-session-atoms'
 import { sendWithCmdEnterAtom } from '@/atoms/shortcut-atoms'
 import { useOpenPreview } from '@/components/diff/preview-opener'
-import type { AgentRuntime, AgentSendInput, AgentPendingFile, AgentThinkingLevel, FileDialogLargeFile, ModelOption, SDKMessage, SDKUserMessage, ProviderType } from '@proma/shared'
-import { inferAgentSdkContextWindow, inferContextWindow, isCodexFastModeSupportedModel, isOpenAIReasoningMaxSupportedModel, isOpenAIReasoningSupportedModel, MAX_ATTACHMENT_SIZE } from '@proma/shared'
+import type { AgentDeferredQueueMessageInput, AgentSendInput, AgentPendingFile, AgentThinkingLevel, FileDialogLargeFile, FileDialogResult, ModelOption, ReasoningCapability, SDKMessage, SDKUserMessage } from '@proma/shared'
+import { inferContextWindow, inferReasoningTransport, isCodexFastModeSupportedModel, MAX_ATTACHMENT_SIZE, normalizeReasoningCapabilityLevel, normalizeReasoningLevel, resolveReasoningCapability, resolveReasoningProfile } from '@proma/shared'
 import { fileToBase64, formatFileNames, getFileParentPath } from '@/lib/file-utils'
-import { buildQuotedSelectionBlock } from '@/lib/quoted-selection'
+import { getFilePanelDragData, INSERT_FILE_MENTION_EVENT, type FilePanelDragItem } from '@/lib/file-panel-drag'
+import { buildQuotedSelectionBlock, expandAgentHistoryQuoteMentions } from '@/lib/quoted-selection'
 import { createClipboardPendingFile, createClipboardTextDraft, makeUniqueAttachmentName } from '@/lib/clipboard-text-attachment'
+import { copyTextToClipboard } from '@/lib/clipboard'
 import {
   buildQueuedMessageSendPayload,
   createAgentQueuedMessage,
@@ -132,9 +134,15 @@ import {
 } from '@/lib/agent-message-queue'
 import type { AgentQueuedAttachment, AgentQueuedMessage, QueueDropPlacement } from '@/lib/agent-message-queue'
 
-/** 稳定的空 SDKMessage 数组引用，避免 ?? [] 每次创建新引用 */
-const EMPTY_SDK_MESSAGES: SDKMessage[] = []
+/** 稳定的空 string 数组引用，避免无附件会话的 memo 链每次渲染失效。 */
+const EMPTY_STRING_ARRAY: string[] = []
 const LONG_TEXT_ATTACHMENT_THRESHOLD = 2000
+
+function endOfToday(): number {
+  const date = new Date()
+  date.setHours(23, 59, 59, 999)
+  return date.getTime()
+}
 
 interface OptimisticSDKUserMessage extends SDKUserMessage {
   _createdAt: number
@@ -144,8 +152,68 @@ interface PreparedAgentAttachment {
   referenceBlock: string
   attachments: AgentQueuedAttachment[]
   additionalDirectories: string[]
-  partnerPendingFileIds: string[]
 }
+
+type AgentScopedRichTextInputProps = Omit<
+  React.ComponentProps<typeof RichTextInput>,
+  'value' | 'onChange' | 'draftScopeKey' | 'draftSyncVersion' | 'htmlValue' | 'onHtmlChange' | 'sessionId'
+> & {
+  sessionId: string
+}
+
+/**
+ * 将高频草稿订阅限制在编辑器边界内。
+ *
+ * TipTap 停顿同步 Markdown/HTML 时只重渲染这个轻量包装器，避免 3000 行 AgentView
+ * 连同消息历史和输入工具栏一起重新执行。外部清空/队列回填仍通过版本号强制覆盖编辑器。
+ */
+const AgentScopedRichTextInput = React.forwardRef<RichTextInputHandle, AgentScopedRichTextInputProps>(
+  function AgentScopedRichTextInput({ sessionId, ...props }, ref): React.ReactElement {
+    const value = useAtomValue(agentSessionDraftAtomFamily(sessionId))
+    const htmlValue = useAtomValue(agentSessionDraftHtmlAtomFamily(sessionId))
+    const draftSyncVersion = useAtomValue(agentSessionDraftSyncVersionAtomFamily(sessionId))
+    const setDraftsMap = useSetAtom(agentSessionDraftsAtom)
+    const setDraftHtmlMap = useSetAtom(agentSessionDraftHtmlAtom)
+
+    const handleChange = React.useCallback((nextValue: string): void => {
+      setDraftsMap((previous) => {
+        const currentValue = previous.get(sessionId) ?? ''
+        const normalizedValue = nextValue.trim() === '' ? '' : nextValue
+        if (currentValue === normalizedValue) return previous
+        const next = new Map(previous)
+        if (normalizedValue === '') next.delete(sessionId)
+        else next.set(sessionId, normalizedValue)
+        return next
+      })
+    }, [sessionId, setDraftsMap])
+
+    const handleHtmlChange = React.useCallback((nextHtml: string): void => {
+      setDraftHtmlMap((previous) => {
+        const normalizedHtml = !nextHtml || nextHtml === '<p></p>' ? '' : nextHtml
+        const currentHtml = previous.get(sessionId) ?? ''
+        if (currentHtml === normalizedHtml) return previous
+        const next = new Map(previous)
+        if (normalizedHtml === '') next.delete(sessionId)
+        else next.set(sessionId, normalizedHtml)
+        return next
+      })
+    }, [sessionId, setDraftHtmlMap])
+
+    return (
+      <RichTextInput
+        {...props}
+        ref={ref}
+        value={value}
+        onChange={handleChange}
+        draftScopeKey={sessionId}
+        draftSyncVersion={draftSyncVersion}
+        htmlValue={htmlValue}
+        onHtmlChange={handleHtmlChange}
+        sessionId={sessionId}
+      />
+    )
+  },
+)
 
 function createUserSDKMessage(text: string, uuid?: string, createdAt = Date.now()): SDKMessage {
   const message: OptimisticSDKUserMessage = {
@@ -162,12 +230,9 @@ function createUserSDKMessage(text: string, uuid?: string, createdAt = Date.now(
 
 function resolveRunContextWindow(
   modelId: string | undefined,
-  provider: ProviderType | undefined,
   previous: number | undefined,
 ): number | undefined {
-  return provider
-    ? inferAgentSdkContextWindow(modelId, provider) ?? previous
-    : inferContextWindow(modelId) ?? previous
+  return inferContextWindow(modelId) ?? previous
 }
 
 interface SDKMessageRecord {
@@ -225,9 +290,10 @@ function isStaleAgentQueueError(error: unknown): boolean {
 
 const OPENAI_THINKING_LEVELS = ['off', 'low', 'medium', 'high', 'xhigh', 'max'] as const satisfies readonly AgentThinkingLevel[]
 const OPENAI_STANDARD_THINKING_LEVELS = OPENAI_THINKING_LEVELS.slice(0, -1)
-type OpenAIThinkingLevel = (typeof OPENAI_THINKING_LEVELS)[number]
+type OpenAIThinkingLevel = AgentThinkingLevel
 const OPENAI_THINKING_LABELS: Record<OpenAIThinkingLevel, string> = {
   off: '关闭',
+  minimal: '最小',
   low: '低',
   medium: '中',
   high: '高',
@@ -248,7 +314,6 @@ function normalizeOpenAIThinkingLevel(
 interface CodexThinkingConfig {
   thinkingLevel: AgentThinkingLevel
   levels: readonly OpenAIThinkingLevel[]
-  disabled: boolean
   onThinkingLevelChange: (level: AgentThinkingLevel) => void
 }
 
@@ -259,12 +324,14 @@ interface AgentThinkingPopoverProps {
 }
 
 function AgentThinkingPopover({ agentThinking, onToggle, codexConfig }: AgentThinkingPopoverProps): React.ReactElement {
-  const [thinkingExpanded, setThinkingExpanded] = useAtom(thinkingExpandedAtom)
   const [open, setOpen] = React.useState(false)
   const hoverTimeout = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   const isCodex = Boolean(codexConfig)
   const thinkingLevels = codexConfig?.levels ?? OPENAI_STANDARD_THINKING_LEVELS
-  const normalizedLevel = normalizeOpenAIThinkingLevel(codexConfig?.thinkingLevel, thinkingLevels)
+  const normalizedLevel = normalizeOpenAIThinkingLevel(
+    codexConfig?.thinkingLevel,
+    thinkingLevels,
+  )
   const isEnabled = isCodex ? normalizedLevel !== 'off' : agentThinking?.type === 'adaptive'
   const sliderPosition = thinkingLevels.indexOf(normalizedLevel)
 
@@ -302,7 +369,6 @@ function AgentThinkingPopover({ agentThinking, onToggle, codexConfig }: AgentThi
           onClick={handleButtonClick}
           onMouseEnter={handleMouseEnter}
           onMouseLeave={handleMouseLeave}
-          disabled={codexConfig?.disabled}
         >
           <Brain className="size-5" />
         </Button>
@@ -332,8 +398,7 @@ function AgentThinkingPopover({ agentThinking, onToggle, codexConfig }: AgentThi
                   min={0}
                   max={thinkingLevels.length - 1}
                   step={1}
-                  disabled={codexConfig.disabled}
-                  aria-label="OpenAI 思考深度"
+                  aria-label="思考深度"
                 />
                 <div className="flex justify-between text-[10px] text-muted-foreground">
                   {thinkingLevels.map((level) => <span key={level}>{OPENAI_THINKING_LABELS[level]}</span>)}
@@ -350,178 +415,6 @@ function AgentThinkingPopover({ agentThinking, onToggle, codexConfig }: AgentThi
               />
             </div>
           )}
-          <div className="h-px bg-border" />
-          <div className="flex items-center justify-between gap-4">
-            <span className="text-xs text-foreground/70">展开思考</span>
-            <Switch
-              checked={thinkingExpanded}
-              onCheckedChange={setThinkingExpanded}
-              className="h-4 w-7 [&>span]:size-3 [&>span]:data-[state=checked]:translate-x-3"
-            />
-          </div>
-        </div>
-      </PopoverContent>
-    </Popover>
-  )
-}
-
-const AGENT_RUNTIME_OPTIONS: Array<{ value: AgentRuntime; label: string; description: string }> = [
-  { value: 'claude', label: 'Claude', description: '使用 Claude Agent SDK' },
-  { value: 'pi', label: 'Pi', description: '使用 Pi Agent SDK' },
-]
-
-interface AgentRuntimeSelectorProps {
-  runtime: AgentRuntime
-  disabled?: boolean
-  onChange: (runtime: AgentRuntime) => void
-}
-
-function AgentRuntimeSelector({ runtime, disabled = false, onChange }: AgentRuntimeSelectorProps): React.ReactElement {
-  const [open, setOpen] = React.useState(false)
-  const current = AGENT_RUNTIME_OPTIONS.find((option) => option.value === runtime) ?? AGENT_RUNTIME_OPTIONS[0]!
-
-  const handleOpenChange = (nextOpen: boolean): void => {
-    if (disabled && nextOpen) return
-    setOpen(nextOpen)
-  }
-
-  const handleSelect = (nextRuntime: AgentRuntime): void => {
-    onChange(nextRuntime)
-    setOpen(false)
-  }
-
-  return (
-    <Popover open={open} onOpenChange={handleOpenChange}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <PopoverTrigger asChild>
-            <Button
-              type="button"
-              variant="ghost"
-              disabled={disabled}
-              aria-label={`Agent 内核：${current.label}`}
-              className={cn(
-                'model-selector-trigger flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground',
-                disabled && 'cursor-not-allowed opacity-60 hover:bg-transparent hover:text-muted-foreground'
-              )}
-            >
-              <Box className="size-3.5" />
-              <span>{current.label}</span>
-              <ChevronDown className="size-3" />
-            </Button>
-          </PopoverTrigger>
-        </TooltipTrigger>
-        <TooltipContent side="top" className="max-w-[220px]">
-          <p className="font-medium">{current.description}</p>
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            {disabled ? 'Agent 运行中，完成后可切换' : '切换当前会话下一轮使用的内核'}
-          </p>
-        </TooltipContent>
-      </Tooltip>
-      <PopoverContent
-        side="top"
-        align="start"
-        sideOffset={8}
-        className="w-[180px] p-1.5"
-        onOpenAutoFocus={(e) => e.preventDefault()}
-      >
-        <div className="flex flex-col gap-1">
-          {AGENT_RUNTIME_OPTIONS.map((option) => {
-            const active = runtime === option.value
-            return (
-              <Button
-                key={option.value}
-                type="button"
-                variant="ghost"
-                aria-pressed={active}
-                className={cn(
-                  'h-auto justify-start rounded-md px-2.5 py-2 text-left',
-                  active && 'bg-accent text-accent-foreground'
-                )}
-                onClick={() => handleSelect(option.value)}
-              >
-                <div className="flex w-full items-center gap-2">
-                  <Box className="size-4 shrink-0 text-muted-foreground" />
-                  <div className="min-w-0 flex-1">
-                    <div className="text-xs font-medium">{option.label}</div>
-                    <div className="mt-0.5 truncate text-[11px] font-normal text-muted-foreground">
-                      {option.description}
-                    </div>
-                  </div>
-                  {active && <Check className="size-3.5 shrink-0" />}
-                </div>
-              </Button>
-            )
-          })}
-        </div>
-      </PopoverContent>
-    </Popover>
-  )
-}
-
-interface DisplayOptionsPopoverProps {
-  processGroupsKeepExpanded: boolean
-  onProcessGroupsKeepExpandedChange: (expanded: boolean) => void
-}
-
-function DisplayOptionsPopover({
-  processGroupsKeepExpanded,
-  onProcessGroupsKeepExpandedChange,
-}: DisplayOptionsPopoverProps): React.ReactElement {
-  const [open, setOpen] = React.useState(false)
-  const hoverTimeout = React.useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  const handleMouseEnter = React.useCallback(() => {
-    if (hoverTimeout.current) clearTimeout(hoverTimeout.current)
-    setOpen(true)
-  }, [])
-
-  const handleMouseLeave = React.useCallback(() => {
-    hoverTimeout.current = setTimeout(() => setOpen(false), 150)
-  }, [])
-
-  React.useEffect(() => {
-    return () => {
-      if (hoverTimeout.current) clearTimeout(hoverTimeout.current)
-    }
-  }, [])
-
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className={cn(
-            inputToolbarButtonClass,
-            processGroupsKeepExpanded && inputToolbarActiveButtonClass
-          )}
-          aria-label="显示选项"
-          onMouseEnter={handleMouseEnter}
-          onMouseLeave={handleMouseLeave}
-        >
-          <Eye className="size-5" />
-        </Button>
-      </PopoverTrigger>
-      <PopoverContent
-        side="top"
-        align="center"
-        sideOffset={8}
-        className="w-auto min-w-[190px] p-2 px-2.5"
-        onOpenAutoFocus={(e) => e.preventDefault()}
-        onMouseEnter={handleMouseEnter}
-        onMouseLeave={handleMouseLeave}
-      >
-        <div className="flex flex-col gap-1.5">
-          <div className="flex items-center justify-between gap-4">
-            <span className="text-xs text-foreground/70">输出完保持展开</span>
-            <Switch
-              checked={processGroupsKeepExpanded}
-              onCheckedChange={onProcessGroupsKeepExpandedChange}
-              className="h-4 w-7 [&>span]:size-3 [&>span]:data-[state=checked]:translate-x-3"
-            />
-          </div>
         </div>
       </PopoverContent>
     </Popover>
@@ -529,26 +422,30 @@ function DisplayOptionsPopover({
 }
 
 export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessionId: string; sharedModelSelectorOpen?: boolean }): React.ReactElement {
-  const [persistedSDKMessages, setPersistedSDKMessages] = React.useState<SDKMessage[]>([])
+  const store = useStore()
+  const initialCachedMessages = store.get(agentSDKMessagesCacheAtom).get(sessionId)
+  const [persistedSDKMessages, setPersistedSDKMessages] = React.useState<SDKMessage[]>(
+    () => initialCachedMessages ?? [],
+  )
   const persistedSDKMessagesRef = React.useRef<SDKMessage[]>([])
   persistedSDKMessagesRef.current = persistedSDKMessages
+  const messagesRequestIdRef = React.useRef(0)
+  const messagesMutationVersionRef = React.useRef(0)
   const setStreamingStates = useSetAtom(agentStreamingStatesAtom)
-  // 按 sessionId 切片订阅：仅本 session 的 streaming state 变化才让 AgentView 重渲染。
-  // 流式期间其他 session 的高频更新（每 token 一次）通过 base map atom 传播但派生
-  // atom 输出引用未变，订阅者跳过通知。
-  const streamState = useAtomValue(agentSessionStreamingStateAtomFamily(sessionId))
-  const streaming = streamState?.running ?? false
+  // 只订阅输入区/工具栏需要的低频流状态。
+  const streamViewState = useAtomValue(agentSessionInputStreamStateAtomFamily(sessionId))
+  const streaming = streamViewState.running
   // 软空闲态：本轮主体已结束、UI 可输入，但 SDK 通道仍开着等后台任务唤醒。
   // 此时服务端 activeSessions 仍保留，新消息须走注入通道而非新建 run。
-  const backgroundWaiting = streamState?.backgroundWaiting ?? false
+  const backgroundWaiting = streamViewState.backgroundWaiting ?? false
   const stoppedByUserSessions = useAtomValue(stoppedByUserSessionsAtom)
+  // 点击停止后，底层 Pi query 仍需一个很短的收尾窗口。该窗口内不可发起/排队新消息，
+  // 否则旧 run 与新 run 会交错，导致同一用户消息被重复展示或持久化。
+  const [isStopping, setIsStopping] = React.useState(false)
   const sendWithCmdEnter = useAtomValue(sendWithCmdEnterAtom)
   const longTextPasteAsAttachmentEnabled = useAtomValue(longTextPasteAsAttachmentEnabledAtom)
   const stoppedByUser = stoppedByUserSessions.has(sessionId)
-  const liveMessagesMap = useAtomValue(liveMessagesMapAtom)
   const setLiveMessagesMap = useSetAtom(liveMessagesMapAtom)
-  // 稳定化空数组引用，避免 ?? [] 每次创建新引用导致下游 useMemo 链不必要重算
-  const liveMessages = liveMessagesMap.get(sessionId) ?? EMPTY_SDK_MESSAGES
   // Per-session 渠道/模型配置（优先读 session map，回退到全局默认值）
   const sessionChannelMap = useAtomValue(agentSessionChannelMapAtom)
   const sessionModelMap = useAtomValue(agentSessionModelMapAtom)
@@ -557,6 +454,18 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
   const [defaultChannelId, setDefaultChannelId] = useAtom(agentChannelIdAtom)
   const [defaultModelId, setDefaultModelId] = useAtom(agentModelIdAtom)
   const sessions = useAtomValue(agentSessionsAtom)
+  const planningGroups = useAtomValue(todoPlanningGroupsAtom)
+  const [todoDialogOpen, setTodoDialogOpen] = React.useState(false)
+  const [todoDraftTitle, setTodoDraftTitle] = React.useState('')
+  const [todoSourceText, setTodoSourceText] = React.useState('')
+  const [todoGroupId, setTodoGroupId] = React.useState('__none__')
+  const [creatingTodo, setCreatingTodo] = React.useState(false)
+  React.useEffect(() => window.electronAPI.onPlanningAgentOperation((operation) => {
+    if (operation.sessionId !== sessionId) return
+    const target = operation.target === 'todo' ? 'Todo' : '日程'
+    const action = operation.action === 'created' ? '创建' : operation.action === 'updated' ? '更新' : '删除'
+    toast.success(`已${action}${target}`, { description: `「${operation.title}」` })
+  }), [sessionId])
   const sessionMeta = React.useMemo(
     () => sessions.find((s) => s.id === sessionId),
     [sessions, sessionId],
@@ -564,10 +473,9 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
   const sessionMetaChannelId = sessionMeta?.channelId
   const sessionMetaModelId = sessionMeta?.modelId
   const hasSessionMeta = Boolean(sessionMeta)
+  const isLegacyTranscript = sessionMeta?.legacyTranscript?.continuationRequired === true
   const agentChannelId = sessionMetaChannelId ?? sessionChannelMap.get(sessionId) ?? defaultChannelId
   const agentModelId = sessionMetaModelId ?? sessionModelMap.get(sessionId) ?? defaultModelId
-  const agentChannelIds = useAtomValue(agentChannelIdsAtom)
-  const [agentRuntime, setAgentRuntime] = useAtom(agentRuntimeAtom)
   const [agentThinking, setAgentThinking] = useAtom(agentThinkingAtom)
   const agentEffort = useAtomValue(agentEffortAtom)
   const setSettingsOpen = useSetAtom(settingsOpenAtom)
@@ -579,16 +487,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     return sessionMeta.workspaceId ?? null     // 数据已加载，以会话自身为准
   }, [sessionMeta, globalWorkspaceId])
   const [pendingPrompt, setPendingPrompt] = useAtom(agentPendingPromptAtom)
-  const {
-    pendingFiles,
-    setPendingFiles,
-    addPendingFile,
-    removePendingFile,
-    releasePendingFileLinks,
-    removePendingFilesById,
-  } = useComparePendingFiles(sessionId)
-  const [queuedMessages, setQueuedMessages] = useAtom(agentMessageQueueAtomFamily(sessionId))
-  const workspaces = useAtomValue(agentWorkspacesAtom)
+  const [pendingFiles, setPendingFiles] = useAtom(agentPendingFilesAtomFamily(sessionId))
   // 双开对比：本 session 的配对 partner + 联动开关 + 广播信号
   const comparePairs = useAtomValue(comparePairsAtom)
   const compareLinked = useAtomValue(compareLinkedAtom)
@@ -596,7 +495,11 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
   const setCompareFocusedSessionId = useSetAtom(compareFocusedSessionIdAtom)
   const [compareBroadcast, setCompareBroadcast] = useAtom(compareBroadcastAtom)
   const lastBroadcastNonceRef = React.useRef<string | null>(null)
-  const [pendingInherit, setPendingInherit] = useAtom(pendingInheritAtom)
+  const [queuedMessages, setQueuedMessages] = useAtom(agentMessageQueueAtomFamily(sessionId))
+  const workspaces = useAtomValue(agentWorkspacesAtom)
+  const setWorkspaces = useSetAtom(agentWorkspacesAtom)
+  const [restoreProjectRootDialogOpen, setRestoreProjectRootDialogOpen] = React.useState(false)
+  const [restoringProjectRoot, setRestoringProjectRoot] = React.useState(false)
   // 保持 channelId 稳定：初始化前使用上次有效值，避免工具栏抖动
   const stableChannelIdRef = React.useRef(agentChannelId)
   if (agentChannelId) stableChannelIdRef.current = agentChannelId
@@ -605,9 +508,6 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
   // 已有会话首次打开时，从会话元数据初始化 per-session map。
   // setter 内的 `prev.has(sessionId)` 守卫保证幂等，外层不再订阅 Map atom，
   // 避免 setter 写入 → atom 引用变化 → effect 重跑的自循环（React #185）。
-  const sessionAgentRuntime: AgentRuntime = hasSessionMeta
-    ? sessionMeta?.agentRuntime ?? 'claude'
-    : agentRuntime
   // 只有会话元数据尚未加载时，才允许使用全局默认值初始化新会话。
   React.useEffect(() => {
     if (!sessionId) return
@@ -631,12 +531,6 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     }
   }, [sessionId, sessionMetaChannelId, sessionMetaModelId, hasSessionMeta, defaultChannelId, defaultModelId, setSessionChannelMap, setSessionModelMap])
 
-  const contextStatus: AgentContextStatus = {
-    isCompacting: streamState?.isCompacting ?? false,
-    inputTokens: streamState?.inputTokens,
-    contextWindow: streamState?.contextWindow,
-    contextUsageIsEstimated: streamState?.contextUsageIsEstimated,
-  }
   const setAgentStreamErrors = useSetAtom(agentStreamErrorsAtom)
   const streamErrors = useAtomValue(agentStreamErrorsAtom)
   const agentError = streamErrors.get(sessionId) ?? null
@@ -647,7 +541,6 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
   const persistedPermissionMode = useAtomValue(sessionPersistedPermissionModeAtom(sessionId))
   const permissionMode = permissionModeMap.get(sessionId) ?? persistedPermissionMode ?? defaultPermissionMode
   const isPermissionPlanMode = permissionMode === 'plan'
-  const store = useStore()
   const currentQuotedSelection = useAtomValue(currentQuotedSelectionAtom)
   const setQuotedSelectionMap = useSetAtom(quotedSelectionMapAtom)
   const openPreview = useOpenPreview()
@@ -683,44 +576,105 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
   const openSession = useOpenSession()
   const setAttachedDirsMap = useSetAtom(agentAttachedDirectoriesMapAtom)
   const attachedDirsMap = useAtomValue(agentAttachedDirectoriesMapAtom)
-  const attachedDirs = attachedDirsMap.get(sessionId) ?? []
+  const attachedDirs = attachedDirsMap.get(sessionId) ?? EMPTY_STRING_ARRAY
   const setAttachedFilesMap = useSetAtom(agentAttachedFilesMapAtom)
   const attachedFilesMap = useAtomValue(agentAttachedFilesMapAtom)
-  const attachedFiles = attachedFilesMap.get(sessionId) ?? []
+  const attachedFiles = attachedFilesMap.get(sessionId) ?? EMPTY_STRING_ARRAY
   const wsAttachedDirsMap = useAtomValue(workspaceAttachedDirectoriesMapAtom)
-  const wsAttachedDirs = currentWorkspaceId ? (wsAttachedDirsMap.get(currentWorkspaceId) ?? []) : []
+  const wsAttachedDirs = currentWorkspaceId
+    ? (wsAttachedDirsMap.get(currentWorkspaceId) ?? EMPTY_STRING_ARRAY)
+    : EMPTY_STRING_ARRAY
   const setWsAttachedFilesMap = useSetAtom(workspaceAttachedFilesMapAtom)
   const wsAttachedFilesMap = useAtomValue(workspaceAttachedFilesMapAtom)
-  const wsAttachedFiles = currentWorkspaceId ? (wsAttachedFilesMap.get(currentWorkspaceId) ?? []) : []
+  const wsAttachedFiles = currentWorkspaceId
+    ? (wsAttachedFilesMap.get(currentWorkspaceId) ?? EMPTY_STRING_ARRAY)
+    : EMPTY_STRING_ARRAY
 
-  // 按 sessionId 切片订阅 drafts/draftHtml：仅本 session 草稿变化才让 AgentView 重渲染。
-  // 输入框每次按键都会写整 Map atom，若直接订阅整 Map，AgentView 跟着每键重渲染。
-  const inputContent = useAtomValue(agentSessionDraftAtomFamily(sessionId))
+  // AgentView 只保留低频外部草稿写入；编辑器本地同步由 AgentScopedRichTextInput 订阅，
+  // 避免每次停顿保存草稿时重渲染整个 Agent 页面。
   const setDraftsMap = useSetAtom(agentSessionDraftsAtom)
-  const setInputContent = React.useCallback((value: string) => {
-    setDraftsMap((prev) => {
-      const map = new Map(prev)
-      if (value.trim() === '') {
-        map.delete(sessionId)
-      } else {
-        map.set(sessionId, value)
-      }
-      return map
-    })
-  }, [sessionId, setDraftsMap])
-  const inputHtmlContent = useAtomValue(agentSessionDraftHtmlAtomFamily(sessionId))
+  const setDraftSyncVersions = useSetAtom(agentSessionDraftSyncVersionsAtom)
   const setDraftHtmlMap = useSetAtom(agentSessionDraftHtmlAtom)
+  const setInputContent = React.useCallback((value: string) => {
+    setDraftSyncVersions((previous) => {
+      const next = new Map(previous)
+      next.set(sessionId, (next.get(sessionId) ?? 0) + 1)
+      return next
+    })
+    setDraftsMap((previous) => {
+      const currentValue = previous.get(sessionId) ?? ''
+      const normalizedValue = value.trim() === '' ? '' : value
+      if (currentValue === normalizedValue) return previous
+      const next = new Map(previous)
+      if (normalizedValue === '') next.delete(sessionId)
+      else next.set(sessionId, normalizedValue)
+      return next
+    })
+  }, [sessionId, setDraftSyncVersions, setDraftsMap])
   const setInputHtmlContent = React.useCallback((html: string) => {
-    setDraftHtmlMap((prev) => {
-      const map = new Map(prev)
-      if (!html || html === '<p></p>') {
-        map.delete(sessionId)
-      } else {
-        map.set(sessionId, html)
-      }
-      return map
+    setDraftHtmlMap((previous) => {
+      const normalizedHtml = !html || html === '<p></p>' ? '' : html
+      const currentHtml = previous.get(sessionId) ?? ''
+      if (currentHtml === normalizedHtml) return previous
+      const next = new Map(previous)
+      if (normalizedHtml === '') next.delete(sessionId)
+      else next.set(sessionId, normalizedHtml)
+      return next
     })
   }, [sessionId, setDraftHtmlMap])
+
+  const createTodoForCurrentSession = React.useCallback(async (title: string, groupId: string, sourceText?: string): Promise<boolean> => {
+    const normalizedTitle = title.trim()
+    if (!normalizedTitle) {
+      toast.error('Todo 标题不能为空')
+      return false
+    }
+    if (normalizedTitle.length > 500) {
+      toast.error('Todo 标题不能超过 500 字')
+      return false
+    }
+
+    try {
+      await window.electronAPI.createTodo({
+        title: normalizedTitle,
+        notes: sourceText?.trim() && sourceText.trim() !== normalizedTitle ? sourceText.trim() : undefined,
+        dueAt: endOfToday(),
+        groupId: groupId === '__none__' ? undefined : groupId,
+        sessionId,
+        workspaceId: currentWorkspaceId ?? undefined,
+      })
+      toast.success('已添加 Todo', { description: '已关联当前 Agent 会话' })
+      return true
+    } catch (error) {
+      console.error('[AgentView] 创建 Todo 失败:', error)
+      toast.error('创建 Todo 失败', { description: String(error) })
+      return false
+    }
+  }, [currentWorkspaceId, sessionId])
+
+  const handleOpenReplyTodoDialog = React.useCallback((text: string): void => {
+    const sourceText = text.trim()
+    const firstLine = sourceText.split('\n').map((line) => line.trim()).find(Boolean) ?? sourceText
+    setTodoSourceText(sourceText)
+    setTodoDraftTitle(firstLine.replace(/^#{1,6}\s+/, '').slice(0, 500))
+    setTodoGroupId('__none__')
+    setTodoDialogOpen(true)
+  }, [])
+  const handleOpenRestoreProjectRootDialog = React.useCallback(() => {
+    setRestoreProjectRootDialogOpen(true)
+  }, [])
+
+  const handleCreateReplyTodo = React.useCallback(async (): Promise<void> => {
+    setCreatingTodo(true)
+    try {
+      if (await createTodoForCurrentSession(todoDraftTitle, todoGroupId, todoSourceText)) {
+        setTodoDialogOpen(false)
+      }
+    } finally {
+      setCreatingTodo(false)
+    }
+  }, [createTodoForCurrentSession, todoDraftTitle, todoGroupId, todoSourceText])
+
   const sessionPathMap = useAtomValue(agentSessionPathMapAtom)
   const setSessionPathMap = useSetAtom(agentSessionPathMapAtom)
   const sessionPath = sessionPathMap.get(sessionId) ?? null
@@ -730,6 +684,35 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
 
   // pendingFiles ref（供 addFilesAsAttachments 读取最新列表，避免闭包旧值）
   const pendingFilesRef = React.useRef(pendingFiles)
+  // RichTextInput 命令接口 ref（右侧文件面板拖入时插入 @file 引用）
+  const richTextInputRef = React.useRef<RichTextInputHandle>(null)
+  const historyQuoteNavigationRequestIdRef = React.useRef(0)
+  const [historyQuoteNavigation, setHistoryQuoteNavigation] = React.useState<AgentHistoryQuoteNavigationRequest | null>(null)
+  const handleAddHistoryQuote = React.useCallback((quote: QuotedSelection): boolean => {
+    return richTextInputRef.current?.insertAgentHistoryQuoteMention(quote) ?? false
+  }, [])
+  const handleAgentHistoryQuoteClick = React.useCallback((quote: QuotedSelection): void => {
+    if (
+      quote.sourceType !== 'agent-history'
+      || !quote.messageId
+      || quote.selectionStart == null
+      || quote.selectionEnd == null
+      || quote.selectionEnd <= quote.selectionStart
+    ) {
+      return
+    }
+    historyQuoteNavigationRequestIdRef.current += 1
+    setHistoryQuoteNavigation({
+      sessionId,
+      quote,
+      requestId: historyQuoteNavigationRequestIdRef.current,
+    })
+  }, [sessionId])
+  React.useEffect(() => {
+    setHistoryQuoteNavigation(null)
+  }, [sessionId])
+  // 父组件同步生成的 ID，同时提供给 RichTextInput 与 SpeechButton，避免工具栏 memo 捕获空值。
+  const agentVoiceInputId = React.useId()
   React.useEffect(() => {
     pendingFilesRef.current = pendingFiles
   }, [pendingFiles])
@@ -749,37 +732,59 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     [globalChannels, agentChannelId],
   )
   const isCodexFastModeAvailable = hasSessionMeta
-    && sessionAgentRuntime === 'pi'
     && agentChannelProvider === 'openai-codex'
     && isCodexFastModeSupportedModel(agentModelId ?? undefined)
   const codexFastModeEnabled = isCodexFastModeAvailable && sessionMeta?.codexFastMode === true
-  const isOpenAIThinkingAvailable = hasSessionMeta
-    && sessionAgentRuntime === 'pi'
-    && (agentChannelProvider === 'openai-codex' || agentChannelProvider === 'openai-responses' || agentChannelProvider === 'openai' || agentChannelProvider === 'custom')
-    && isOpenAIReasoningSupportedModel(agentModelId ?? undefined)
-  const openAIThinkingLevels = isOpenAIReasoningMaxSupportedModel(agentModelId ?? undefined)
-    ? OPENAI_THINKING_LEVELS
-    : OPENAI_STANDARD_THINKING_LEVELS
+  const reasoningProfile = hasSessionMeta
+    ? resolveReasoningProfile({
+      modelId: agentModelId ?? undefined,
+      transport: inferReasoningTransport(agentChannelProvider),
+    })
+    : undefined
+  const reasoningCapabilityKey = `${agentChannelId ?? ''}:${agentModelId ?? ''}`
+  const [piReasoningCapability, setPiReasoningCapability] = React.useState<{
+    key: string
+    capability: ReasoningCapability | undefined
+  }>({ key: '', capability: undefined })
+  React.useEffect(() => {
+    if (!hasSessionMeta || !agentChannelId || !agentModelId) {
+      setPiReasoningCapability({ key: reasoningCapabilityKey, capability: undefined })
+      return
+    }
+
+    let cancelled = false
+    void window.electronAPI.getPiReasoningCapability(agentChannelId, agentModelId)
+      .then((capability) => {
+        if (!cancelled) setPiReasoningCapability({ key: reasoningCapabilityKey, capability })
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          console.warn('[AgentView] 读取 Pi reasoning capability 失败:', error)
+          setPiReasoningCapability({ key: reasoningCapabilityKey, capability: undefined })
+        }
+      })
+    return () => { cancelled = true }
+  }, [agentChannelId, agentModelId, hasSessionMeta, reasoningCapabilityKey])
+
+  const effectiveReasoningCapability = piReasoningCapability.key === reasoningCapabilityKey
+    ? piReasoningCapability.capability ?? resolveReasoningCapability({ profile: reasoningProfile })
+    : resolveReasoningCapability({ profile: reasoningProfile })
+  const isSessionThinkingAvailable = Boolean(effectiveReasoningCapability)
+  const openAIThinkingLevels = effectiveReasoningCapability?.levels ?? OPENAI_STANDARD_THINKING_LEVELS
   const fallbackOpenAIThinkingLevel: AgentThinkingLevel = agentEffort === 'max'
     ? 'xhigh'
     : agentEffort ?? (agentThinking?.type === 'adaptive' ? 'high' : 'off')
-  const openAIThinkingLevel = sessionMeta?.openAIThinkingLevel ?? fallbackOpenAIThinkingLevel
+  const persistedReasoningLevel = sessionMeta?.reasoningLevel ?? sessionMeta?.openAIThinkingLevel
+  const normalizedReasoningLevel = reasoningProfile
+    ? normalizeReasoningLevel(reasoningProfile, persistedReasoningLevel ?? fallbackOpenAIThinkingLevel)
+    : normalizeReasoningCapabilityLevel(effectiveReasoningCapability, persistedReasoningLevel ?? fallbackOpenAIThinkingLevel)
+  const openAIThinkingLevel = normalizedReasoningLevel ?? (persistedReasoningLevel ?? fallbackOpenAIThinkingLevel)
 
-  // 检查 Agent 渠道列表中是否存在可用的模型（渠道 enabled + 模型 enabled）
-  const hasAvailableModel = React.useMemo(() => {
-    // Proma 官方渠道（商业版）：只要 enabled 且有可用模型，直接视为可用
-    const promaOfficial = globalChannels.find((c) => c.id === 'proma-official')
-    if (promaOfficial?.enabled && promaOfficial.models.some((m) => m.enabled)) return true
-    // Pi runtime 支持所有协议，任何已启用渠道都可用
-    if (sessionAgentRuntime === 'pi') {
-      return globalChannels.some((c) => c.enabled && c.models.some((m) => m.enabled))
-    }
-    // Claude runtime：需在 agentChannelIds 白名单中
-    if (!agentChannelIds || agentChannelIds.length === 0) return false
-    return globalChannels.some(
-      (c) => c.enabled && agentChannelIds.includes(c.id) && c.models.some((m) => m.enabled),
-    )
-  }, [globalChannels, agentChannelIds, sessionAgentRuntime])
+  // Pi runtime supports all protocols, so any enabled channel with an enabled model is available.
+  const hasAvailableModel = React.useMemo(
+    () => globalChannels.some((channel) => channel.enabled && channel.models.some((model) => model.enabled)),
+    [globalChannels],
+  )
   React.useEffect(() => {
     if (!agentChannelId || agentModelId) return
 
@@ -845,17 +850,29 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
   }, [sessionId, currentWorkspaceId, setSessionPathMap])
 
   // 获取工作区共享文件目录路径（@ 引用时需要搜索）
-  const workspaceSlug = workspaces.find((w) => w.id === currentWorkspaceId)?.slug ?? null
+  const currentWorkspace = workspaces.find((workspace) => workspace.id === currentWorkspaceId)
+  const workspaceSlug = currentWorkspace?.slug ?? null
+  const projectRootPath = currentWorkspace?.projectRootPath ?? null
   React.useEffect(() => {
-    if (!workspaceSlug) {
-      setWorkspaceFilesPath(null)
-      return
-    }
+    let disposed = false
+
+    // 同一项目重新关联本地根时 slug 保持不变，必须立即废弃旧路径与旧请求结果。
+    setWorkspaceFilesPath(null)
+    if (!workspaceSlug) return
+
     window.electronAPI
       .getWorkspaceFilesPath(workspaceSlug)
-      .then(setWorkspaceFilesPath)
-      .catch(() => setWorkspaceFilesPath(null))
-  }, [workspaceSlug])
+      .then((path) => {
+        if (!disposed) setWorkspaceFilesPath(path)
+      })
+      .catch(() => {
+        if (!disposed) setWorkspaceFilesPath(null)
+      })
+
+    return () => {
+      disposed = true
+    }
+  }, [workspaceSlug, projectRootPath])
 
   // 获取工作区级附加文件（@ 引用和路径解析都需要）
   React.useEffect(() => {
@@ -938,6 +955,8 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
   const appendOptimisticPersistedMessage = React.useCallback((message: SDKMessage) => {
     // 切会话时优先命中内存缓存，因此乐观插入的用户消息也要同步写入缓存，
     // 否则“发送后立刻切走再切回”会短暂回退到旧消息数组。
+    // 本地乐观消息优先于正在进行中的旧 IPC 快照。
+    messagesMutationVersionRef.current += 1
     const next = [...persistedSDKMessagesRef.current, message]
     persistedSDKMessagesRef.current = next
     setPersistedSDKMessages(next)
@@ -980,7 +999,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     mentions: ReturnType<typeof parseQueuedMessageMentions>,
     interruptCurrentTurn: boolean,
   ): Promise<void> => {
-    // 气泡显示用原文 text（保留 /skill: #mcp: &session: 语法），
+    // 气泡显示用原文 text（保留 /skill:、#mcp:、&session:、&todo: 和 &calendar_event: 语法），
     // 让 message.tsx 的 remarkMentions 立即渲染出引用芯片；
     // 剥离后的 sdkText 仅用于传给 SDK，不作为展示文本。
     appendLiveUserMessage(createUserSDKMessage(rawText, message.id, Date.now()))
@@ -995,6 +1014,8 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         ...(mentions.mentionedSkills.length > 0 && { mentionedSkills: mentions.mentionedSkills }),
         ...(mentions.mentionedMcpServers.length > 0 && { mentionedMcpServers: mentions.mentionedMcpServers }),
         ...(mentions.mentionedSessionIds.length > 0 && { mentionedSessionIds: mentions.mentionedSessionIds }),
+        ...(mentions.mentionedTodoIds.length > 0 && { mentionedTodoIds: mentions.mentionedTodoIds }),
+        ...(mentions.mentionedCalendarEventIds.length > 0 && { mentionedCalendarEventIds: mentions.mentionedCalendarEventIds }),
       })
     } catch (error) {
       removeLiveUserMessage(message.id)
@@ -1003,7 +1024,8 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
   }, [appendLiveUserMessage, removeLiveUserMessage, sessionId])
 
   const startQueuedMessageRun = React.useCallback(async (
-    text: string,
+    displayText: string,
+    sdkText: string,
     mentions: ReturnType<typeof parseQueuedMessageMentions>,
     channelId: string,
     queuedAdditionalDirectories: string[] = [],
@@ -1018,8 +1040,6 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       const existing = prev.get(sessionId)
       map.set(sessionId, {
         running: true,
-        content: '',
-        toolActivities: [],
         model: agentModelId || undefined,
         startedAt: streamStartedAt,
         inputTokens: existing?.inputTokens,
@@ -1028,15 +1048,17 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       return map
     })
 
-    appendOptimisticPersistedMessage(createUserSDKMessage(text, undefined, streamStartedAt))
+    appendOptimisticPersistedMessage(createUserSDKMessage(displayText, undefined, streamStartedAt))
 
     try {
       await window.electronAPI.sendAgentMessage({
         sessionId,
-        userMessage: text,
+        // Agent 侧使用解码后的 SDK 文本（@file 路径还原为真实路径），
+        // 展示/持久化使用 displayText（编码原文，remarkMentions 解码显示）。
+        userMessage: sdkText,
+        rawUserMessage: displayText,
         channelId,
         modelId: agentModelId || undefined,
-        agentRuntime: sessionAgentRuntime,
         workspaceId: currentWorkspaceId || undefined,
         startedAt: streamStartedAt,
         permissionModeOverride: permissionMode,
@@ -1046,6 +1068,8 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         ...(mentions.mentionedSkills.length > 0 && { mentionedSkills: mentions.mentionedSkills }),
         ...(mentions.mentionedMcpServers.length > 0 && { mentionedMcpServers: mentions.mentionedMcpServers }),
         ...(mentions.mentionedSessionIds.length > 0 && { mentionedSessionIds: mentions.mentionedSessionIds }),
+        ...(mentions.mentionedTodoIds.length > 0 && { mentionedTodoIds: mentions.mentionedTodoIds }),
+        ...(mentions.mentionedCalendarEventIds.length > 0 && { mentionedCalendarEventIds: mentions.mentionedCalendarEventIds }),
       })
     } catch (error) {
       setStreamingStates((prev) => {
@@ -1063,7 +1087,6 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     createBaseAdditionalDirectories,
     currentWorkspaceId,
     permissionMode,
-    sessionAgentRuntime,
     sessionId,
     setStreamingStates,
   ])
@@ -1098,7 +1121,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       } catch (error) {
         if (isStaleAgentQueueError(error)) {
           console.warn('[AgentView] 检测到陈旧的 Agent 追加通道，改为启动新一轮运行:', error)
-          await startQueuedMessageRun(payload.rawText, payload.mentions, agentChannelId, message.additionalDirectories)
+          await startQueuedMessageRun(payload.rawText, payload.sdkText, payload.mentions, agentChannelId, message.additionalDirectories)
           return
         }
         throw error
@@ -1106,7 +1129,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       return
     }
 
-    await startQueuedMessageRun(payload.rawText, payload.mentions, agentChannelId, message.additionalDirectories)
+    await startQueuedMessageRun(payload.rawText, payload.sdkText, payload.mentions, agentChannelId, message.additionalDirectories)
   }, [
     agentChannelId,
     backgroundWaiting,
@@ -1119,8 +1142,8 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     streaming,
   ])
 
-  // 消息是否已完成首次加载（用于 auto-send 等待）
-  const [messagesLoaded, setMessagesLoaded] = React.useState(false)
+  // 消息首次加载状态直接由同步缓存决定；缓存命中时首个 render 就显示历史，IPC 只做后台校准。
+  const [messagesLoaded, setMessagesLoaded] = React.useState(initialCachedMessages !== undefined)
   const [messagesRefreshing, setMessagesRefreshing] = React.useState(false)
   const messagesRefreshingRef = React.useRef(false)
   const loadingSessionIdRef = React.useRef<string | null>(null)
@@ -1147,10 +1170,19 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     }
     messagesRefreshingRef.current = true
     setMessagesRefreshing(true)
+    const requestId = ++messagesRequestIdRef.current
+    const requestMutationVersion = messagesMutationVersionRef.current
     let cancelled = false
     window.electronAPI.getAgentSessionSDKMessages(sessionId)
       .then((sdkMsgs) => {
-        if (cancelled) return
+        if (cancelled || requestId !== messagesRequestIdRef.current) return
+        if (requestMutationVersion !== messagesMutationVersionRef.current) {
+          // 请求期间已有本地消息变更，旧 IPC 快照不能覆盖当前内存消息。
+          setMessagesLoaded(true)
+          messagesRefreshingRef.current = false
+          setMessagesRefreshing(false)
+          return
+        }
         // 写入缓存（含 LRU 淘汰，防止会话数增长导致内存无限膨胀）
         setMessagesCache((prev) => setSessionMessagesCache(prev, sessionId, sdkMsgs))
         unstable_batchedUpdates(() => {
@@ -1169,15 +1201,13 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
             // 仍在运行中：不清除
             if (!state || state.running) return prev
             const map = new Map(prev)
-            // 软空闲态（后台任务等待）：必须保留 backgroundWaiting 标志（否则 handleSend 误走新建 run），
-            // 但展示字段 content/toolActivities 仍要清空——否则上一轮流式文本残留会被兜底气泡渲染成重复消息。
+            // 软空闲态（后台任务等待）：必须保留 backgroundWaiting 标志（否则 handleSend 误走新建 run）。
+            // 实时文本只在 liveMessages 中，完成消息刷新时随其统一清理。
             if (state.inputTokens !== undefined) {
-              // 保留 usage 数据，仅清除流式展示字段
+              // 保留 usage 数据，仅清除本轮工具活动展示状态。
               map.set(sessionId, {
                 running: false,
                 backgroundWaiting: state.backgroundWaiting,
-                content: '',
-                toolActivities: [],
                 inputTokens: state.inputTokens,
                 outputTokens: state.outputTokens,
                 cacheReadTokens: state.cacheReadTokens,
@@ -1192,8 +1222,6 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
               map.set(sessionId, {
                 running: false,
                 backgroundWaiting: state.backgroundWaiting,
-                content: '',
-                toolActivities: [],
                 contextCompaction: state.contextCompaction,
               })
             } else {
@@ -1204,7 +1232,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
           setLiveMessagesMap((prev) => {
             if (!prev.has(sessionId)) return prev
             // 仍在运行中，不清除实时消息（与 streamingStates 保护逻辑一致）
-            const streamingState = store.get(agentStreamingStatesAtom).get(sessionId)
+            const streamingState = store.get(agentSessionStreamingStateAtomFamily(sessionId))
             if (streamingState?.running) return prev
             const map = new Map(prev)
             map.delete(sessionId)
@@ -1222,7 +1250,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     return () => { cancelled = true }
   }, [sessionId, refreshVersion, setStreamingStates, setLiveMessagesMap, setMessagesCache, store])
 
-  // 从会话元数据初始化附加目录（仅冷启动水合，后续由 handleAttachFolder/handleDetachDirectory 实时写入）
+  // 从会话元数据初始化附加目录（仅冷启动水合，后续由 handleAttachContent/handleDetachDirectory 实时写入）
   React.useEffect(() => {
     const meta = sessions.find((s) => s.id === sessionId)
     const dirs = meta?.attachedDirectories ?? []
@@ -1264,10 +1292,14 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     // 快照当前上下文
     const snapshot = {
       message: pendingPrompt.message,
+      // Agent 侧使用解码后的 SDK 文本（@file 路径还原为真实路径），
+      // 展示/持久化保留编码原文（remarkMentions 解码显示）。
+      sdkMessage: parseQueuedMessageMentions(pendingPrompt.message).cleanedText,
       channelId: agentChannelId,
       modelId: agentModelId || undefined,
       workspaceId: currentWorkspaceId || undefined,
       additionalDirectories: Array.from(new Set([...attachedDirs, ...attachedFileDirectories, ...(pendingPrompt.additionalDirectories ?? [])])),
+      mentionedTodoIds: pendingPrompt.mentionedTodoIds,
     }
     setPendingPrompt(null)
 
@@ -1279,12 +1311,10 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         const existing = prev.get(sessionId)
         map.set(sessionId, {
           running: true,
-          content: '',
-          toolActivities: [],
           model: snapshot.modelId,
           startedAt: streamStartedAt,
           inputTokens: existing?.inputTokens,
-          contextWindow: resolveRunContextWindow(snapshot.modelId, agentChannelProvider, existing?.contextWindow),
+          contextWindow: resolveRunContextWindow(snapshot.modelId, existing?.contextWindow),
         })
         return map
       })
@@ -1303,15 +1333,18 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       // 发送消息
       const input: AgentSendInput = {
         sessionId,
-        userMessage: snapshot.message,
+        userMessage: snapshot.sdkMessage,
+        rawUserMessage: snapshot.message,
         channelId: snapshot.channelId,
         modelId: snapshot.modelId,
-        agentRuntime: sessionAgentRuntime,
         workspaceId: snapshot.workspaceId,
         startedAt: streamStartedAt,
         permissionModeOverride: permissionMode,
         ...(snapshot.additionalDirectories && snapshot.additionalDirectories.length > 0 && {
           additionalDirectories: snapshot.additionalDirectories,
+        }),
+        ...(snapshot.mentionedTodoIds && snapshot.mentionedTodoIds.length > 0 && {
+          mentionedTodoIds: snapshot.mentionedTodoIds,
         }),
       }
       window.electronAPI.sendAgentMessage(input).catch((error) => {
@@ -1325,13 +1358,50 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         })
       })
     })
-  }, [messagesLoaded, pendingPrompt, sessionId, agentChannelId, agentModelId, sessionAgentRuntime, agentChannelProvider, currentWorkspaceId, streaming, setPendingPrompt, setStreamingStates, permissionMode, attachedDirs, attachedFileDirectories])
+  }, [messagesLoaded, pendingPrompt, sessionId, agentChannelId, agentModelId, agentChannelProvider, currentWorkspaceId, streaming, setPendingPrompt, setStreamingStates, permissionMode, attachedDirs, attachedFileDirectories])
   // ===== 附件处理 =====
 
   /** 为文件生成唯一文件名（避免粘贴多张图片时文件名重复导致覆盖） */
   const makeUniqueFilename = React.useCallback((originalName: string, existingNames: string[]): string => {
     return makeUniqueAttachmentName(originalName, existingNames)
   }, [])
+
+  /** 微信式屏幕截图：交互框选一块屏幕区域 → 作为图片附件加入输入框 */
+  const handleCaptureScreenRegion = React.useCallback(async (): Promise<void> => {
+    if (!window.electronAPI.captureScreenRegion) {
+      toast.error('当前版本不支持屏幕截图')
+      return
+    }
+    try {
+      const res = await window.electronAPI.captureScreenRegion()
+      if (res.cancelled) return // 用户 Esc 取消，不提示
+      if (res.error || !res.base64) {
+        toast.error(res.error || '截图失败')
+        return
+      }
+      const base64 = res.base64
+      const p = (n: number): string => String(n).padStart(2, '0')
+      const t = new Date()
+      const stamp = `${String(t.getFullYear()).slice(2)}${p(t.getMonth() + 1)}${p(t.getDate())}-${p(t.getHours())}${p(t.getMinutes())}${p(t.getSeconds())}`
+      const filename = makeUniqueFilename(`screenshot-${stamp}.png`, pendingFilesRef.current.map((f) => f.filename))
+      const pending: AgentPendingFile = {
+        id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        filename,
+        mediaType: 'image/png',
+        size: Math.round(base64.length * 0.75),
+        previewUrl: `data:image/png;base64,${base64}`,
+      }
+      // 存裸 base64（与 __pendingAgentFileData 约定一致，发送时按 base64 落盘）
+      if (!window.__pendingAgentFileData) {
+        window.__pendingAgentFileData = new Map<string, string>()
+      }
+      window.__pendingAgentFileData.set(pending.id, base64)
+      setPendingFiles((prev) => [...prev, pending])
+    } catch (err) {
+      console.error('[AgentView] 屏幕截图失败:', err)
+      toast.error('屏幕截图失败')
+    }
+  }, [makeUniqueFilename])
 
   const attachSessionFile = React.useCallback(async (filePath: string): Promise<void> => {
     const updated = await window.electronAPI.attachFile({ sessionId, filePath })
@@ -1347,13 +1417,13 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     additionalDirectoriesForRun: Set<string>,
   ): Promise<PreparedAgentAttachment | null> => {
     if (files.length === 0) {
-      return { referenceBlock: '', attachments: [], additionalDirectories: [], partnerPendingFileIds: [] }
+      return { referenceBlock: '', attachments: [], additionalDirectories: [] }
     }
 
     const workspace = workspaces.find((w) => w.id === currentWorkspaceId)
     if (!workspace) {
       toast.warning('暂时无法发送附件', {
-        description: '当前 Agent 会话没有绑定有效工作区。请在顶部选择工作区，或新建 Agent 会话后重新上传。',
+        description: '当前 Agent 会话没有绑定有效项目。请在顶部选择项目，或新建 Agent 会话后重新上传。',
       })
       return null
     }
@@ -1388,15 +1458,14 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       const sourcePath = f.sourcePath!
       const parentPath = getFileParentPath(sourcePath)
       try {
-        const read = await window.electronAPI.resolveAndReadFile(sourcePath, {
+        const data = await window.electronAPI.readBinaryBase64(sourcePath, {
           sessionId,
           candidateBasePaths: parentPath ? [parentPath] : undefined,
-        })
-        if (!read) {
+        }, MAX_ATTACHMENT_SIZE)
+        if (!data) {
           staleDraftFiles.push(f.filename)
           continue
         }
-        const data = await fileToBase64(new File([read.content], f.filename, { type: f.mediaType }))
         draftFilesToSave.push({ sourceFile: f, filename: f.filename, data })
       } catch (error) {
         console.error('[AgentView] 读取剪贴板草稿失败:', error)
@@ -1440,7 +1509,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       } catch (error) {
         console.error('[AgentView] 保存附件到 session 失败:', error)
         toast.error('附件保存失败', {
-          description: '请确认当前工作区可用，或新建 Agent 会话后重新上传。',
+          description: '请确认当前项目可用，或新建 Agent 会话后重新上传。',
         })
         return null
       }
@@ -1448,22 +1517,12 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
 
     if (allRefs.length === 0) {
       toast.error('附件没有成功加入消息', {
-        description: '请重新上传文件，或切换到有效工作区后再试。',
+        description: '请重新上传文件，或切换到有效项目后再试。',
       })
       return null
     }
 
-    // 源 session 自己保存的上传文件位于 cwd 内，但对 partner 是兄弟目录；
-    // 所有稳定路径都显式携带父目录，确保跨 session 广播后仍有读取权限。
-    for (const ref of allRefs) {
-      const parentPath = getFileParentPath(ref.targetPath)
-      if (!parentPath) continue
-      additionalDirectoriesForRun.add(parentPath)
-      queuedAdditionalDirectories.add(parentPath)
-    }
-
     const refs = allRefs.map((f) => `- ${f.filename}: ${f.targetPath}`).join('\n')
-    const partnerPendingFileIds = releasePendingFileLinks(files)
 
     for (const f of files) {
       if (f.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(f.previewUrl)
@@ -1480,9 +1539,8 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         targetPath: ref.targetPath,
       })),
       additionalDirectories: Array.from(queuedAdditionalDirectories),
-      partnerPendingFileIds,
     }
-  }, [currentWorkspaceId, releasePendingFileLinks, sessionId, setPendingFiles, workspaces])
+  }, [currentWorkspaceId, sessionId, setPendingFiles, workspaces])
 
   const restoreQueuedAttachmentsToPending = React.useCallback((attachments?: AgentQueuedAttachment[]): void => {
     if (!attachments || attachments.length === 0) return
@@ -1529,7 +1587,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
             sourcePath,
           }
 
-          addPendingFile(pending)
+          setPendingFiles((prev) => [...prev, pending])
           pathBackedFiles.push(uniqueFilename)
           continue
         }
@@ -1552,7 +1610,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         }
         window.__pendingAgentFileData.set(pending.id, base64)
 
-        addPendingFile(pending)
+        setPendingFiles((prev) => [...prev, pending])
       } catch (error) {
         console.error('[AgentView] 添加附件失败:', error)
       }
@@ -1564,7 +1622,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     if (rejectedLargeFiles.length > 0) {
       toast.error(`以下文件超过 100MB 且无法取得本地路径，已跳过：${formatFileNames(rejectedLargeFiles)}`)
     }
-  }, [addPendingFile, attachSessionFile, makeUniqueFilename])
+  }, [attachSessionFile, makeUniqueFilename, setPendingFiles])
 
   const addLargeDialogFilesAsReferences = React.useCallback(async (files: FileDialogLargeFile[]): Promise<void> => {
     if (files.length === 0) return
@@ -1586,7 +1644,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
           sourcePath: file.path,
         }
 
-        addPendingFile(pending)
+        setPendingFiles((prev) => [...prev, pending])
         added.push(uniqueFilename)
       } catch (error) {
         console.error('[AgentView] 附加大文件失败:', error)
@@ -1600,83 +1658,101 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     if (rejected.length > 0) {
       toast.error(`以下文件附加失败，已跳过：${formatFileNames(rejected)}`)
     }
-  }, [addPendingFile, attachSessionFile, makeUniqueFilename])
+  }, [attachSessionFile, makeUniqueFilename, setPendingFiles])
 
-  /** 打开文件选择对话框 */
-  const handleOpenFileDialog = React.useCallback(async (): Promise<void> => {
+  /** 将已选文件加入待发送附件，目录由外层走会话授权路径。 */
+  const addDialogFilesAsAttachments = React.useCallback(async (result: FileDialogResult): Promise<void> => {
+    const largeFiles = result.largeFiles ?? []
+    const skippedFiles = result.skippedFiles ?? []
+    const oversized: string[] = []
+
+    for (const fileInfo of result.files) {
+      if (fileInfo.size > MAX_ATTACHMENT_SIZE) {
+        oversized.push(fileInfo.filename)
+        continue
+      }
+      const previewUrl = fileInfo.mediaType.startsWith('image/')
+        ? `data:${fileInfo.mediaType};base64,${fileInfo.data}`
+        : undefined
+
+      const pending: AgentPendingFile = {
+        id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        filename: fileInfo.filename,
+        mediaType: fileInfo.mediaType,
+        size: fileInfo.size,
+        previewUrl,
+      }
+
+      if (!window.__pendingAgentFileData) {
+        window.__pendingAgentFileData = new Map<string, string>()
+      }
+      window.__pendingAgentFileData.set(pending.id, fileInfo.data)
+
+      setPendingFiles((prev) => [...prev, pending])
+    }
+
+    if (oversized.length > 0) {
+      toast.error(`以下文件超过 100MB 且无法取得本地路径，已跳过：${formatFileNames(oversized)}`)
+    }
+    await addLargeDialogFilesAsReferences(largeFiles)
+    if (skippedFiles.length > 0) {
+      toast.warning(`以下文件无法读取，已跳过：${formatFileNames(skippedFiles.map((file) => file.filename))}`)
+    }
+  }, [addLargeDialogFilesAsReferences, setPendingFiles])
+
+  /** 打开混合选择器：文件作为附件，文件夹仅授权给当前会话。 */
+  const handleAttachContent = React.useCallback(async (): Promise<void> => {
     try {
-      const result = await window.electronAPI.openFileDialog()
+      const result = await window.electronAPI.openFileOrFolderDialog()
       const largeFiles = result.largeFiles ?? []
       const skippedFiles = result.skippedFiles ?? []
-      if (result.files.length === 0 && largeFiles.length === 0 && skippedFiles.length === 0) return
+      if (result.files.length === 0 && largeFiles.length === 0 && skippedFiles.length === 0 && result.directories.length === 0) return
 
-      const oversized: string[] = []
+      await addDialogFilesAsAttachments(result)
 
-      for (const fileInfo of result.files) {
-        if (fileInfo.size > MAX_ATTACHMENT_SIZE) {
-          oversized.push(fileInfo.filename)
-          continue
+      const attachedDirectoryNames: string[] = []
+      const failedDirectoryNames: string[] = []
+      for (const directory of result.directories) {
+        try {
+          const updated = await window.electronAPI.attachDirectory({
+            sessionId,
+            directoryPath: directory.path,
+          })
+          setAttachedDirsMap((prev) => {
+            const map = new Map(prev)
+            map.set(sessionId, updated)
+            return map
+          })
+          attachedDirectoryNames.push(directory.name)
+        } catch (error) {
+          console.error('[AgentView] 附加文件夹失败:', error)
+          failedDirectoryNames.push(directory.name)
         }
-        const previewUrl = fileInfo.mediaType.startsWith('image/')
-          ? `data:${fileInfo.mediaType};base64,${fileInfo.data}`
-          : undefined
-
-        const pending: AgentPendingFile = {
-          id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-          filename: fileInfo.filename,
-          mediaType: fileInfo.mediaType,
-          size: fileInfo.size,
-          previewUrl,
-        }
-
-        if (!window.__pendingAgentFileData) {
-          window.__pendingAgentFileData = new Map<string, string>()
-        }
-        window.__pendingAgentFileData.set(pending.id, fileInfo.data)
-
-        addPendingFile(pending)
       }
 
-      if (oversized.length > 0) {
-        toast.error(`以下文件超过 100MB 且无法取得本地路径，已跳过：${formatFileNames(oversized)}`)
+      if (attachedDirectoryNames.length > 0) {
+        toast.success(`已附加目录: ${formatFileNames(attachedDirectoryNames)}`)
       }
-      await addLargeDialogFilesAsReferences(largeFiles)
-      if (skippedFiles.length > 0) {
-        toast.warning(`以下文件无法读取，已跳过：${formatFileNames(skippedFiles.map((f) => f.filename))}`)
+      if (failedDirectoryNames.length > 0) {
+        toast.error(`以下文件夹附加失败：${formatFileNames(failedDirectoryNames)}`)
       }
     } catch (error) {
-      console.error('[AgentView] 文件选择对话框失败:', error)
+      console.error('[AgentView] 附加内容选择失败:', error)
+      toast.error('附加文件或文件夹失败')
     }
-  }, [addLargeDialogFilesAsReferences, addPendingFile])
+  }, [addDialogFilesAsAttachments, sessionId, setAttachedDirsMap])
 
-  /** 附加文件夹（不复制，仅记录路径） */
-  const handleAttachFolder = React.useCallback(async (): Promise<void> => {
-    try {
-      const result = await window.electronAPI.openFolderDialog()
-      if (!result) return
-
-      const updated = await window.electronAPI.attachDirectory({
-        sessionId,
-        directoryPath: result.path,
-      })
-
-      setAttachedDirsMap((prev) => {
-        const map = new Map(prev)
-        map.set(sessionId, updated)
-        return map
-      })
-
-      toast.success(`已附加目录: ${result.name}`)
-    } catch (error) {
-      console.error('[AgentView] 附加文件夹失败:', error)
-      toast.error('附加文件夹失败')
-    }
-  }, [sessionId, setAttachedDirsMap])
-
-  /** 移除待发送文件；联动开启时同步移除 partner 的镜像草稿。 */
+  /** 移除待发送文件 */
   const handleRemoveFile = React.useCallback((id: string): void => {
-    removePendingFile(id)
-  }, [removePendingFile])
+    setPendingFiles((prev) => {
+      const file = prev.find((f) => f.id === id)
+      if (file?.previewUrl?.startsWith('blob:')) {
+        URL.revokeObjectURL(file.previewUrl)
+      }
+      window.__pendingAgentFileData?.delete(id)
+      return prev.filter((f) => f.id !== id)
+    })
+  }, [setPendingFiles])
 
   /** 图片附件编辑完成：用编辑后的图替换该附件（统一转为内存图片走 __pendingAgentFileData） */
   const handleAttachmentEditComplete = React.useCallback((fileId: string, editedDataUrl: string): void => {
@@ -1747,10 +1823,13 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       tmpPath,
       `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     )
-    pendingFilesRef.current = [...pendingFilesRef.current, pending]
-    addPendingFile(pending)
+    setPendingFiles((prev) => {
+      const next = [...prev, pending]
+      pendingFilesRef.current = next
+      return next
+    })
     return pending
-  }, [addPendingFile])
+  }, [setPendingFiles])
 
   /** 粘贴文件处理 */
   const handlePasteFiles = React.useCallback((files: File[]): void => {
@@ -1771,6 +1850,25 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       })
   }, [addClipboardTextDraft])
 
+  /** 将右侧文件面板拖入的目录附加到会话（保持 Agent 可访问）。返回是否成功。 */
+  const addPanelDirectory = React.useCallback(async (dirPath: string): Promise<boolean> => {
+    try {
+      const updated = await window.electronAPI.attachDirectory({
+        sessionId,
+        directoryPath: dirPath,
+      })
+      setAttachedDirsMap((prev) => {
+        const map = new Map(prev)
+        map.set(sessionId, updated)
+        return map
+      })
+      return true
+    } catch (error) {
+      console.error('[AgentView] 面板拖拽附加目录失败:', error)
+      return false
+    }
+  }, [sessionId, setAttachedDirsMap])
+
   /** 拖放处理 */
   const handleDragOver = React.useCallback((e: React.DragEvent): void => {
     e.preventDefault()
@@ -1788,6 +1886,25 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     e.preventDefault()
     e.stopPropagation()
     setIsDragOver(false)
+
+    // 优先识别右侧文件面板的自定义拖拽载荷（会话文件 / 项目文件引用）
+    // 文件直接插入引用；文件夹先附加到会话（Agent 可访问），附加成功后才插入引用，
+    // 避免失败时留下 Agent 无法访问的无效引用。
+    const panelItems = getFilePanelDragData(e.dataTransfer)
+    if (panelItems && panelItems.length > 0) {
+      const files = panelItems.filter((item) => !item.isDirectory)
+      const dirs = panelItems.filter((item) => item.isDirectory)
+      if (files.length > 0) {
+        richTextInputRef.current?.insertFileMentions(files)
+      }
+      for (const dir of dirs) {
+        const ok = await addPanelDirectory(dir.path)
+        if (ok) {
+          richTextInputRef.current?.insertFileMentions([dir])
+        }
+      }
+      return
+    }
 
     const droppedFiles = Array.from(e.dataTransfer.files)
     if (droppedFiles.length === 0) return
@@ -1810,7 +1927,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         // 通过主进程检测目录 vs 文件
         const { directories, files: filePaths } = await window.electronAPI.checkPathsType(paths)
 
-        // 拖拽的文件夹直接附加
+        // 拖拽的文件夹：附加到会话 + 插入可见的文件夹引用（与右侧面板拖拽体验一致）
         for (const dirPath of directories) {
           try {
             const updated = await window.electronAPI.attachDirectory({
@@ -1822,22 +1939,76 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
               map.set(sessionId, updated)
               return map
             })
-            const dirName = dirPath.split('/').pop() || dirPath
+            const dirName = dirPath.split(/[\\/]/).pop() || dirPath
+            // 在输入框插入文件夹引用 chip（Agent 通过附加目录可访问）
+            richTextInputRef.current?.insertFileMentions([{
+              path: dirPath,
+              name: dirName,
+              isDirectory: true,
+              scope: 'project',
+            }])
             toast.success(`已附加目录: ${dirName}`)
           } catch (error) {
             console.error('[AgentView] 拖拽附加文件夹失败:', error)
           }
         }
 
-        // 普通文件作为附件
+        // 普通文件：复制到会话私有目录后插入 @ 引用（方案 B）
+        // 引用指向会话私有工作目录内的副本路径，Agent 通过会话私有目录即可访问，
+        // 与右侧面板拖拽/键盘 @ 引用保持一致；超大文件或无项目时回退附件逻辑。
         const regularFiles = filePaths.map((p) => pathMap.get(p)!).filter(Boolean)
         if (regularFiles.length > 0) {
-          const fileSourcePaths = new Map<File, string>()
+          const sourcePaths = new Map<File, string>()
           for (const path of filePaths) {
             const file = pathMap.get(path)
-            if (file) fileSourcePaths.set(file, path)
+            if (file) sourcePaths.set(file, path)
           }
-          addFilesAsAttachments(regularFiles, fileSourcePaths)
+
+          const workspace = workspaces.find((w) => w.id === currentWorkspaceId)
+          const canSave = Boolean(workspace?.slug)
+          const savedRefs: Array<{ path: string; name: string }> = []
+          const fallbackFiles: File[] = []
+
+          for (const file of regularFiles) {
+            if (!canSave || file.size > MAX_ATTACHMENT_SIZE) {
+              fallbackFiles.push(file)
+              continue
+            }
+            try {
+              const data = await fileToBase64(file)
+              const saved = await window.electronAPI.saveFilesToAgentSession({
+                workspaceSlug: workspace!.slug,
+                sessionId,
+                files: [{ filename: file.name, data }],
+              })
+              if (saved && saved.length > 0) {
+                const [savedFile] = saved
+                if (savedFile) {
+                  savedRefs.push({ path: savedFile.targetPath, name: savedFile.filename })
+                } else {
+                  fallbackFiles.push(file)
+                }
+              } else {
+                fallbackFiles.push(file)
+              }
+            } catch (error) {
+              console.error('[AgentView] 外部文件复制到会话目录失败:', error)
+              fallbackFiles.push(file)
+            }
+          }
+
+          if (savedRefs.length > 0) {
+            richTextInputRef.current?.insertFileMentions(savedRefs.map((r) => ({
+              path: r.path,
+              name: r.name,
+              isDirectory: false,
+              scope: 'session',
+            })))
+            toast.success(`已引用 ${savedRefs.length} 个文件`)
+          }
+          if (fallbackFiles.length > 0) {
+            addFilesAsAttachments(fallbackFiles, sourcePaths)
+          }
         }
       } catch (error) {
         console.error('[AgentView] 路径检测失败，回退处理:', error)
@@ -1847,14 +2018,12 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       // 无路径信息：回退，所有项按普通文件处理
       addFilesAsAttachments(droppedFiles)
     }
-  }, [sessionId, addFilesAsAttachments, setAttachedDirsMap])
+  }, [sessionId, addFilesAsAttachments, addPanelDirectory, setAttachedDirsMap, workspaces, currentWorkspaceId])
 
   /** ModelSelector 选择回调 */
   const handleModelSelect = React.useCallback((option: ModelOption): void => {
-    if (streaming || backgroundWaiting) {
-      toast.info('Agent 运行中，完成后再切换模型')
-      return
-    }
+    // 运行中的 Agent query 会继续使用启动时的模型；这里只更新会话配置，供本轮结束后的下一轮使用。
+    const modelSwitchDeferred = streaming || backgroundWaiting
 
     // 更新当前会话的 per-session 配置
     setSessionChannelMap((prev) => {
@@ -1873,14 +2042,17 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         : session
     )))
 
-    // 模型切换时：清除旧的 contextWindow，让 result 重新提供真实值
-    setStreamingStates((prev) => {
-      const state = prev.get(sessionId)
-      if (!state) return prev
-      const map = new Map(prev)
-      map.set(sessionId, { ...state, contextWindow: undefined })
-      return map
-    })
+    // 空闲切换时清除旧的 contextWindow，让下一轮 result 重新提供真实值。
+    // 运行中不能清除：当前轮仍在使用旧模型，旧模型的用量显示应保持稳定。
+    if (!modelSwitchDeferred) {
+      setStreamingStates((prev) => {
+        const state = prev.get(sessionId)
+        if (!state) return prev
+        const map = new Map(prev)
+        map.set(sessionId, { ...state, contextWindow: undefined })
+        return map
+      })
+    }
 
     // 同时更新全局默认值（新会话继承）
     setDefaultChannelId(option.channelId)
@@ -1899,55 +2071,11 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         )))
       })
       .catch(console.error)
+
+    if (modelSwitchDeferred) {
+      toast.info('模型已切换，本轮结束后生效')
+    }
   }, [sessionId, streaming, backgroundWaiting, setSessionChannelMap, setSessionModelMap, setDefaultChannelId, setDefaultModelId, setAgentSessions])
-
-  const handleAgentRuntimeChange = React.useCallback(async (runtime: AgentRuntime): Promise<void> => {
-    if (runtime === sessionAgentRuntime) {
-      requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-input-mode="agent"] .ProseMirror')?.focus())
-      return
-    }
-    if (streaming || backgroundWaiting) {
-      toast.info('Agent 运行中，完成后再切换内核')
-      return
-    }
-
-    const previousDefaultRuntime = agentRuntime
-    const previousSessionMeta = sessionMeta
-    setAgentRuntime(runtime)
-    if (sessionMeta) {
-      setAgentSessions((prev) => prev.map((item) =>
-        item.id === sessionId
-          ? { ...item, agentRuntime: runtime, sdkSessionId: undefined, updatedAt: Date.now() }
-          : item
-      ))
-    }
-
-    try {
-      const updated = await window.electronAPI.updateSessionAgentRuntime(sessionId, runtime)
-      setAgentSessions((prev) => prev.map((item) => item.id === sessionId ? updated : item))
-      window.electronAPI.updateSettings({ agentRuntime: runtime }).catch((error) => {
-        console.error('[AgentView] 保存 Agent Runtime 默认值失败:', error)
-      })
-    } catch (error) {
-      console.error('[AgentView] 切换 Agent Runtime 失败:', error)
-      setAgentRuntime(previousDefaultRuntime)
-      if (previousSessionMeta) {
-        setAgentSessions((prev) => prev.map((item) => item.id === sessionId ? previousSessionMeta : item))
-      }
-      toast.error('Agent Runtime 切换失败', { description: getErrorMessage(error) })
-    } finally {
-      requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-input-mode="agent"] .ProseMirror')?.focus())
-    }
-  }, [
-    agentRuntime,
-    backgroundWaiting,
-    sessionAgentRuntime,
-    sessionId,
-    sessionMeta,
-    setAgentRuntime,
-    setAgentSessions,
-    streaming,
-  ])
 
   const handleCodexFastModeChange = React.useCallback(async (): Promise<void> => {
     if (!isCodexFastModeAvailable || streaming || backgroundWaiting || !sessionMeta) return
@@ -1968,16 +2096,17 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     }
   }, [backgroundWaiting, codexFastModeEnabled, isCodexFastModeAvailable, sessionId, sessionMeta, setAgentSessions, streaming])
 
-  const updateOpenAIThinkingLevel = React.useCallback(async (thinkingLevel: AgentThinkingLevel): Promise<void> => {
-    if (!isOpenAIThinkingAvailable || streaming || backgroundWaiting || !sessionMeta) return
+  const updateReasoningLevel = React.useCallback(async (thinkingLevel: AgentThinkingLevel): Promise<void> => {
+    if (!isSessionThinkingAvailable || !sessionMeta) return
 
+    const reasoningLevelSwitchDeferred = streaming || backgroundWaiting
     const previousSessionMeta = sessionMeta
     setAgentSessions((prev) => prev.map((item) => (
-      item.id === sessionId ? { ...item, openAIThinkingLevel: thinkingLevel, updatedAt: Date.now() } : item
+      item.id === sessionId ? { ...item, reasoningLevel: thinkingLevel, updatedAt: Date.now() } : item
     )))
 
     try {
-      const updated = await window.electronAPI.updateSessionOpenAIThinkingLevel(sessionId, thinkingLevel)
+      const updated = await window.electronAPI.updateSessionReasoningLevel(sessionId, thinkingLevel)
       setAgentSessions((prev) => prev.map((item) => item.id === sessionId ? updated : item))
 
       try {
@@ -1986,12 +2115,15 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         console.error('[AgentView] 保存 OpenAI 默认思考深度失败:', error)
         toast.error('默认思考深度保存失败', { description: getErrorMessage(error) })
       }
+      if (reasoningLevelSwitchDeferred) {
+        toast.info('思考强度已切换，本轮结束后生效', { id: `agent-reasoning-level-deferred-${sessionId}` })
+      }
     } catch (error) {
       console.error('[AgentView] 更新 OpenAI 思考深度失败:', error)
       setAgentSessions((prev) => prev.map((item) => item.id === sessionId ? previousSessionMeta : item))
       toast.error('思考深度切换失败', { description: getErrorMessage(error) })
     }
-  }, [backgroundWaiting, isOpenAIThinkingAvailable, sessionId, sessionMeta, setAgentSessions, streaming])
+  }, [backgroundWaiting, isSessionThinkingAvailable, sessionId, sessionMeta, setAgentSessions, streaming])
 
   /** 构建 externalSelectedModel 给 ModelSelector */
   const computedSelectedModel = React.useMemo(() => {
@@ -2004,49 +2136,33 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
   if (computedSelectedModel) stableSelectedModelRef.current = computedSelectedModel
   const externalSelectedModel = computedSelectedModel ?? stableSelectedModelRef.current
 
-  const broadcastComparePrompt = React.useCallback((
-    text: string,
-    fromBroadcast?: boolean,
-    attachmentContext?: PreparedAgentAttachment | null,
-  ): void => {
+  /** 发送消息 */
+  // 双开对比·联动广播：焦点侧发送时把同一段文本广播给 partner（附件镜像暂不联动）。
+  const broadcastComparePrompt = React.useCallback((text: string, fromBroadcast?: boolean): void => {
     if (fromBroadcast || !compareLinked || !comparePartnerId) return
-    const attachmentPayload: CompareAttachmentPayload | undefined = attachmentContext?.attachments.length
-      ? {
-          fileReferenceBlock: attachmentContext.referenceBlock,
-          attachments: attachmentContext.attachments,
-          additionalDirectories: attachmentContext.additionalDirectories,
-          pendingFileIdsToConsume: attachmentContext.partnerPendingFileIds,
-        }
-      : undefined
-    if (!text && !attachmentPayload) return
+    if (!text) return
     setCompareBroadcast({
       targetSessionId: comparePartnerId,
       text,
       nonce: crypto.randomUUID(),
-      attachmentPayload,
     })
   }, [compareLinked, comparePartnerId, setCompareBroadcast])
 
-  /** 发送消息 */
-  const handleSend = React.useCallback(async (
-    overrideText?: string,
-    opts?: { fromBroadcast?: boolean; attachmentPayload?: CompareAttachmentPayload },
-  ): Promise<void> => {
-    const text = (overrideText ?? inputContent).trim()
-    // 本地输入为空时可采用建议；广播为空文本时不能误用 partner 自己的建议。
-    const effectiveText = text || (opts?.fromBroadcast ? '' : suggestion) || ''
-    // 联动广播使用源侧已经稳定化的附件路径，不消费 partner 的私人附件草稿。
-    const incomingAttachmentContext: PreparedAgentAttachment | null = opts?.attachmentPayload
-      ? {
-          referenceBlock: opts.attachmentPayload.fileReferenceBlock,
-          attachments: opts.attachmentPayload.attachments,
-          additionalDirectories: opts.attachmentPayload.additionalDirectories,
-          partnerPendingFileIds: [],
-        }
-      : null
-    const pendingFilesSnapshot = opts?.fromBroadcast ? [] : pendingFilesRef.current
-    if (!messagesLoaded || (!effectiveText && pendingFilesSnapshot.length === 0 && !incomingAttachmentContext) || !agentChannelId || !hasAvailableModel) return
-
+  const handleSend = React.useCallback(async (overrideText?: string, fromEditor = false, opts?: { fromBroadcast?: boolean }): Promise<void> => {
+    const currentDraft = store.get(agentSessionDraftsAtom).get(sessionId) ?? ''
+    const text = (overrideText ?? currentDraft).trim()
+    // 如果输入为空但有建议，使用建议内容
+    const effectiveText = text || suggestion || ''
+    const pendingFilesSnapshot = pendingFilesRef.current
+    if (!messagesLoaded || (!effectiveText && pendingFilesSnapshot.length === 0) || !agentChannelId || !hasAvailableModel) return
+    if (isStopping) {
+      toast.info('正在停止上一轮 Agent', { description: '请等待停止完成后再发送消息。' })
+      return
+    }
+    if (isLegacyTranscript) {
+      toast.info('这是只读历史会话，请新建 Pi 会话继续')
+      return
+    }
     if (!streaming && messagesRefreshingRef.current) {
       toast.info('上一轮消息正在同步', {
         description: '请稍等片刻再发送；队列会在同步完成后继续。',
@@ -2054,32 +2170,59 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       return
     }
     const additionalDirectoriesForRun = createBaseAdditionalDirectories()
-    for (const dir of incomingAttachmentContext?.additionalDirectories ?? []) {
-      additionalDirectoriesForRun.add(dir)
-    }
-    const consumeIncomingPendingFiles = (): void => {
-      removePendingFilesById(opts?.attachmentPayload?.pendingFileIdsToConsume ?? [])
-    }
+    broadcastComparePrompt(effectiveText, opts?.fromBroadcast)
 
     if (streaming) {
       // Agent 正在输出时，用户消息默认进入 Proma 托管队列，不打断当前 turn。
-      const attachmentContext = incomingAttachmentContext ?? (pendingFilesSnapshot.length > 0
+      const attachmentContext = pendingFilesSnapshot.length > 0
         ? await preparePendingFilesForSend(pendingFilesSnapshot, additionalDirectoriesForRun)
-        : null)
+        : null
       if (pendingFilesSnapshot.length > 0 && !attachmentContext) return
 
-      const quotedSelection = opts?.fromBroadcast ? undefined : consumeQuotedSelection()
-      setQueuedMessages((prev) => [
-        ...prev,
-        createAgentQueuedMessage(effectiveText, crypto.randomUUID(), Date.now(), quotedSelection, attachmentContext
-          ? {
-              fileReferenceBlock: attachmentContext.referenceBlock,
-              attachments: attachmentContext.attachments,
-              additionalDirectories: attachmentContext.additionalDirectories,
-            }
-          : undefined),
-      ])
-      if (overrideText === undefined) {
+      const quotedSelection = consumeQuotedSelection()
+      const message = createAgentQueuedMessage(effectiveText, crypto.randomUUID(), Date.now(), quotedSelection, attachmentContext
+        ? {
+            fileReferenceBlock: attachmentContext.referenceBlock,
+            attachments: attachmentContext.attachments,
+            additionalDirectories: attachmentContext.additionalDirectories,
+          }
+        : undefined)
+      const quotedSelectionBlock = quotedSelection
+        ? buildQuotedSelectionBlock(quotedSelection)
+        : ''
+      const payload = buildQueuedMessageSendPayload(message, quotedSelectionBlock)
+      const queuedInput: AgentDeferredQueueMessageInput = {
+        queueMessageId: message.id,
+        sessionId,
+        userMessage: payload.sdkText,
+        rawUserMessage: payload.rawText,
+        channelId: agentChannelId,
+        modelId: agentModelId || undefined,
+        workspaceId: currentWorkspaceId || undefined,
+        additionalDirectories: message.additionalDirectories,
+        permissionModeOverride: permissionMode,
+        mentionedSkills: payload.mentions.mentionedSkills,
+        mentionedMcpServers: payload.mentions.mentionedMcpServers,
+        mentionedSessionIds: payload.mentions.mentionedSessionIds,
+        mentionedTodoIds: payload.mentions.mentionedTodoIds,
+        mentionedCalendarEventIds: payload.mentions.mentionedCalendarEventIds,
+      }
+      setQueuedMessages((prev) => [...prev, message])
+      void window.electronAPI.enqueueAgentQueuedMessage(queuedInput).catch((error) => {
+        console.error('[AgentView] 主进程队列入队失败:', error)
+        setQueuedMessages((prev) => removeQueuedMessage(prev, message.id))
+        restoreQueuedAttachmentsToPending(message.attachments)
+        if (quotedSelection) {
+          setQuotedSelectionMap((prev) => {
+            const map = new Map(prev)
+            map.set(sessionId, quotedSelection)
+            return map
+          })
+        }
+        toast.error('消息加入队列失败', { description: String(error) })
+      })
+      // 入队后消息会出现在队列 UI 中，用户可见；不再弹 toast 打扰。
+      if (overrideText === undefined || fromEditor) {
         setInputContent('')
         setInputHtmlContent('')
       }
@@ -2089,21 +2232,18 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         map.delete(sessionId)
         return map
       })
-      consumeIncomingPendingFiles()
-      // 源会话已成功入队后再广播，避免附件准备失败或早退时只有 partner 收到消息。
-      broadcastComparePrompt(effectiveText, opts?.fromBroadcast, attachmentContext)
 
       return
     }
 
     if (backgroundWaiting) {
       // 软空闲态没有活跃输出，直接注入，无需中断。
-      const attachmentContext = incomingAttachmentContext ?? (pendingFilesSnapshot.length > 0
+      const attachmentContext = pendingFilesSnapshot.length > 0
         ? await preparePendingFilesForSend(pendingFilesSnapshot, additionalDirectoriesForRun)
-        : null)
+        : null
       if (pendingFilesSnapshot.length > 0 && !attachmentContext) return
 
-      const quotedSelection = opts?.fromBroadcast ? undefined : consumeQuotedSelection()
+      const quotedSelection = consumeQuotedSelection()
       const message = createAgentQueuedMessage(effectiveText, crypto.randomUUID(), Date.now(), quotedSelection, attachmentContext
         ? {
             fileReferenceBlock: attachmentContext.referenceBlock,
@@ -2111,7 +2251,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
             additionalDirectories: attachmentContext.additionalDirectories,
           }
         : undefined)
-      if (overrideText === undefined) {
+      if (overrideText === undefined || fromEditor) {
         setInputContent('')
         setInputHtmlContent('')
       }
@@ -2146,8 +2286,6 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         }
         restoreQueuedAttachmentsToPending(message.attachments)
       })
-      consumeIncomingPendingFiles()
-      broadcastComparePrompt(effectiveText, opts?.fromBroadcast, attachmentContext)
       return
     }
 
@@ -2168,21 +2306,24 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     })
 
     // 1. 如果有 pending 文件，先保存到 session 目录
-    const attachmentContext = incomingAttachmentContext ?? (pendingFilesSnapshot.length > 0
+    const attachmentContext = pendingFilesSnapshot.length > 0
       ? await preparePendingFilesForSend(pendingFilesSnapshot, additionalDirectoriesForRun)
-      : null)
+      : null
     if (pendingFilesSnapshot.length > 0 && !attachmentContext) return
     let fileReferences = attachmentContext?.referenceBlock ?? ''
 
     // 构建引用选中文本：内联 XML 拼入 prompt，对话框不展示（parseAttachedFiles 剥离）
-    const quotedSelection = opts?.fromBroadcast ? undefined : consumeQuotedSelection()
+    const quotedSelection = consumeQuotedSelection()
     if (quotedSelection) {
       fileReferences = fileReferences + buildQuotedSelectionBlock(quotedSelection)
     }
 
     // 2. 构建最终消息
-    const finalMessage = fileReferences + effectiveText
+    const finalMessage = fileReferences + expandAgentHistoryQuoteMentions(effectiveText)
     const mentions = parseQueuedMessageMentions(effectiveText)
+    // Agent 侧使用解码后的 SDK 文本（@file 路径还原为真实路径，Agent 可读取）；
+    // 历史 quote marker 仅在此刻展开为精确上下文，草稿本身始终保持可编辑 chip。
+    const sdkMessage = fileReferences + expandAgentHistoryQuoteMentions(mentions.cleanedText)
 
     // 清除打断状态（上一轮的打断标记不再显示）
     store.set(stoppedByUserSessionsAtom, (prev: Set<string>) => {
@@ -2207,12 +2348,10 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       const existing = prev.get(sessionId)
       map.set(sessionId, {
         running: true,
-        content: '',
-        toolActivities: [],
         model: agentModelId || undefined,
         startedAt: streamStartedAt,
         inputTokens: existing?.inputTokens,
-        contextWindow: resolveRunContextWindow(agentModelId || undefined, agentChannelProvider, existing?.contextWindow),
+        contextWindow: resolveRunContextWindow(agentModelId || undefined, existing?.contextWindow),
       })
       return map
     })
@@ -2230,10 +2369,10 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
 
     const input: AgentSendInput = {
       sessionId,
-      userMessage: finalMessage,
+      userMessage: sdkMessage,
+      rawUserMessage: finalMessage,
       channelId: agentChannelId,
       modelId: agentModelId || undefined,
-      agentRuntime: sessionAgentRuntime,
       workspaceId: currentWorkspaceId || undefined,
       startedAt: streamStartedAt,
       permissionModeOverride: permissionMode,
@@ -2241,12 +2380,13 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       ...(mentions.mentionedSkills.length > 0 && { mentionedSkills: mentions.mentionedSkills }),
       ...(mentions.mentionedMcpServers.length > 0 && { mentionedMcpServers: mentions.mentionedMcpServers }),
       ...(mentions.mentionedSessionIds.length > 0 && { mentionedSessionIds: mentions.mentionedSessionIds }),
+      ...(mentions.mentionedTodoIds.length > 0 && { mentionedTodoIds: mentions.mentionedTodoIds }),
+      ...(mentions.mentionedCalendarEventIds.length > 0 && { mentionedCalendarEventIds: mentions.mentionedCalendarEventIds }),
     }
 
-    // 清空输入框（仅当发送的是用户自己输入的内容，而非推荐建议时）
-    // 用 === undefined 与上方 `overrideText ?? inputContent` 的取值语义保持一致，
-    // 避免未来出现 handleSend('') 时两条路径行为割裂
-    if (overrideText === undefined) {
+    // 清空输入框（仅当发送的是用户自己输入的内容，而非推荐建议时）。
+    // Enter 路径会显式传入已刷新的编辑器内容，因此也应清空。
+    if (overrideText === undefined || fromEditor) {
       setInputContent('')
       setInputHtmlContent('')
     }
@@ -2261,9 +2401,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         return map
       })
     })
-    consumeIncomingPendingFiles()
-    broadcastComparePrompt(effectiveText, opts?.fromBroadcast, attachmentContext)
-  }, [inputContent, createBaseAdditionalDirectories, preparePendingFilesForSend, restoreQueuedAttachmentsToPending, sessionId, agentChannelId, agentModelId, sessionAgentRuntime, agentChannelProvider, currentWorkspaceId, streaming, backgroundWaiting, suggestion, hasAvailableModel, store, consumeQuotedSelection, setStreamingStates, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, permissionMode, messagesLoaded, setQueuedMessages, setQuotedSelectionMap, sendPlainTextAgentMessage, broadcastComparePrompt, removePendingFilesById])
+  }, [createBaseAdditionalDirectories, preparePendingFilesForSend, restoreQueuedAttachmentsToPending, sessionId, agentChannelId, agentModelId, agentChannelProvider, currentWorkspaceId, streaming, backgroundWaiting, suggestion, hasAvailableModel, store, consumeQuotedSelection, setStreamingStates, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, permissionMode, messagesLoaded, setQueuedMessages, setQuotedSelectionMap, sendPlainTextAgentMessage, isLegacyTranscript, isStopping, broadcastComparePrompt])
 
   // 双开对比·联动接收：监听广播信号，目标为本 session 且 nonce 未消费时，
   // 走自己的 handleSend（fromBroadcast=true 避免回环）独立发送同一段文本。
@@ -2273,39 +2411,35 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     if (compareBroadcast.nonce === lastBroadcastNonceRef.current) return
     // 目标会话尚未可接收时保留广播；状态变化后 effect 会再次尝试。
     if (!messagesLoaded || !agentChannelId || !hasAvailableModel) return
-    if (!streaming && messagesRefreshing) return
+    if (!streaming && messagesRefreshingRef.current) return
     lastBroadcastNonceRef.current = compareBroadcast.nonce
     const event = compareBroadcast
     // 消费后立即清空，避免 AgentView 解绑重挂时重放旧 prompt。
     setCompareBroadcast((current) => current === event ? null : current)
-    void handleSend(event.text, {
-      fromBroadcast: true,
-      attachmentPayload: event.attachmentPayload,
-    })
-  }, [agentChannelId, compareBroadcast, handleSend, hasAvailableModel, messagesLoaded, messagesRefreshing, sessionId, setCompareBroadcast, streaming])
+    void handleSend(event.text, false, { fromBroadcast: true })
+  }, [agentChannelId, compareBroadcast, handleSend, hasAvailableModel, messagesLoaded, sessionId, setCompareBroadcast, streaming])
 
   /** 停止生成 */
   const handleStop = React.useCallback((): void => {
+    if (isStopping) return
+    setIsStopping(true)
     store.set(stoppedByUserSessionsAtom, (prev: Set<string>) => {
       const next = new Set(prev)
       next.add(sessionId)
       return next
     })
 
-    setStreamingStates((prev) => {
-      const current = prev.get(sessionId)
-      if (!current || !current.running) return prev
-      const map = new Map(prev)
-      map.set(sessionId, {
-        ...current,
-        running: false,
-        ...finalizeStreamingActivities(current.toolActivities),
-      })
-      return map
+    // 保持 running 到 STREAM_COMPLETE 到达。提前把它切成 false 会让输入框误以为
+    // 已经可以开启新 run，而底层 query 尚未退出，形成重复保存的竞态。
+    window.electronAPI.stopAgent(sessionId).catch((error) => {
+      console.error(error)
+      setIsStopping(false)
     })
+  }, [isStopping, sessionId, store])
 
-    window.electronAPI.stopAgent(sessionId).catch(console.error)
-  }, [sessionId, setStreamingStates, store])
+  React.useEffect(() => {
+    if (!streaming) setIsStopping(false)
+  }, [streaming])
 
   /** 手动发送 /compact 命令 */
   const handleCompact = React.useCallback((): void => {
@@ -2337,8 +2471,6 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       const map = new Map(prev)
       const current = prev.get(sessionId) ?? {
         running: true,
-        content: '',
-        toolActivities: [],
         model: agentModelId || undefined,
         startedAt: streamStartedAt,
       }
@@ -2358,7 +2490,6 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       userMessage: '/compact',
       channelId: agentChannelId,
       modelId: agentModelId || undefined,
-      agentRuntime: sessionAgentRuntime,
       workspaceId: currentWorkspaceId || undefined,
       startedAt: streamStartedAt,
       permissionModeOverride: permissionMode,
@@ -2381,14 +2512,14 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         return map
       })
     })
-  }, [sessionId, agentChannelId, agentModelId, sessionAgentRuntime, currentWorkspaceId, streaming, setStreamingStates, store, permissionMode])
+  }, [sessionId, agentChannelId, agentModelId, currentWorkspaceId, streaming, setStreamingStates, store, permissionMode])
 
   /** 复制错误信息到剪贴板 */
   const handleCopyError = React.useCallback(async (): Promise<void> => {
     if (!agentError) return
 
     try {
-      await navigator.clipboard.writeText(agentError)
+      await copyTextToClipboard(agentError)
       setErrorCopied(true)
       setTimeout(() => setErrorCopied(false), 2000)
     } catch (error) {
@@ -2396,21 +2527,54 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     }
   }, [agentError])
 
+  const handleRelinkProjectRoot = React.useCallback(async (): Promise<void> => {
+    if (!currentWorkspaceId) return
+    try {
+      const folder = await window.electronAPI.openFolderDialog()
+      if (!folder) return
+      const updated = await window.electronAPI.relinkAgentWorkspaceProjectRoot(currentWorkspaceId, folder.path)
+      setWorkspaces((prev) => prev.map((workspace) => (workspace.id === updated.id ? updated : workspace)))
+      toast.success('本地项目根已重新关联', { description: folder.path })
+    } catch (error) {
+      console.error('[AgentView] 重新关联本地项目根失败:', error)
+      toast.error(error instanceof Error ? error.message : '重新关联项目文件夹失败')
+    }
+  }, [currentWorkspaceId, setWorkspaces])
+
+  const handleRestoreProjectRoot = React.useCallback(async (): Promise<void> => {
+    if (!currentWorkspaceId) return
+    try {
+      setRestoringProjectRoot(true)
+      const updated = await window.electronAPI.restoreAgentWorkspaceProjectRoot(currentWorkspaceId)
+      setWorkspaces((prev) => prev.map((workspace) => (workspace.id === updated.id ? updated : workspace)))
+      toast.success('已在原路径新建空项目文件夹', { description: updated.projectRootPath })
+      setRestoreProjectRootDialogOpen(false)
+    } catch (error) {
+      console.error('[AgentView] 恢复本地项目根失败:', error)
+      toast.error(error instanceof Error ? error.message : '恢复项目文件夹失败')
+    } finally {
+      setRestoringProjectRoot(false)
+    }
+  }, [currentWorkspaceId, setWorkspaces])
+
   /** 重试：在当前会话中重新发送最后一条用户消息 */
   const handleRetry = React.useCallback((retryOfErrorUuid?: string): void => {
     if (!agentChannelId || streaming) return
 
     // 找到最后一条用户消息
-    const lastUserMessage = [...persistedSDKMessages]
+    const lastUserRawMessage = [...persistedSDKMessages]
       .reverse()
       .map(getUserTextFromSDKMessage)
       .find((text): text is string => text !== null)
-    if (!lastUserMessage) return
+    if (!lastUserRawMessage) return
+    // 重试重发给 Agent 的消息：@file 路径还原为真实路径（持久化存的是编码原文）
+    const lastUserMessage = parseQueuedMessageMentions(lastUserRawMessage).cleanedText
 
     // 与主进程按 UUID 的原子删除同步更新当前 React 状态和 LRU cache，避免旧错误
     // 在下一轮回复开始前仍被页面渲染。旧会话没有 UUID 时保留历史，由主进程幂等处理。
     const messagesAfterCleanup = removeRetriedErrorSDKMessage(persistedSDKMessages, retryOfErrorUuid)
     if (messagesAfterCleanup !== persistedSDKMessages) {
+      messagesMutationVersionRef.current += 1
       persistedSDKMessagesRef.current = messagesAfterCleanup
       setPersistedSDKMessages(messagesAfterCleanup)
       setMessagesCache((prev) => setSessionMessagesCache(prev, sessionId, messagesAfterCleanup))
@@ -2431,28 +2595,27 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       const existing = prev.get(sessionId)
       map.set(sessionId, {
         running: true,
-        content: '',
-        toolActivities: [],
         model: agentModelId || undefined,
         startedAt: streamStartedAt,
         inputTokens: existing?.inputTokens,
-        contextWindow: resolveRunContextWindow(agentModelId || undefined, agentChannelProvider, existing?.contextWindow),
+        contextWindow: resolveRunContextWindow(agentModelId || undefined, existing?.contextWindow),
       })
       return map
     })
 
     window.electronAPI.sendAgentMessage({
       sessionId,
+      // Agent 侧使用解码后的文本（@file 真实路径）；持久化/展示保留编码原文，避免新历史记录被 \S+ 截断
       userMessage: lastUserMessage,
+      rawUserMessage: lastUserRawMessage,
       channelId: agentChannelId,
       modelId: agentModelId || undefined,
-      agentRuntime: sessionAgentRuntime,
       workspaceId: currentWorkspaceId || undefined,
       startedAt: streamStartedAt,
       permissionModeOverride: permissionMode,
       ...(retryOfErrorUuid && { retryOfErrorUuid }),
     }).catch(console.error)
-  }, [persistedSDKMessages, sessionId, agentChannelId, agentModelId, sessionAgentRuntime, agentChannelProvider, currentWorkspaceId, streaming, setAgentStreamErrors, setStreamingStates, setMessagesCache, permissionMode])
+  }, [persistedSDKMessages, sessionId, agentChannelId, agentModelId, agentChannelProvider, currentWorkspaceId, streaming, setAgentStreamErrors, setStreamingStates, setMessagesCache, permissionMode])
 
   /** 在新对话继续：创建新会话 + 切换 tab + 使用 &session 引用旧会话 */
   const handleRetryInNewSession = React.useCallback(async (): Promise<void> => {
@@ -2476,8 +2639,6 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         const map = new Map(prev)
         map.set(meta.id, {
           running: true,
-          content: '',
-          toolActivities: [],
           model: agentModelId || undefined,
           startedAt: streamStartedAt,
         })
@@ -2489,7 +2650,6 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         userMessage: prompt,
         channelId: agentChannelId,
         modelId: agentModelId || undefined,
-        agentRuntime: sessionAgentRuntime,
         workspaceId: currentWorkspaceId || undefined,
         mentionedSessionIds: [sessionId],
         startedAt: streamStartedAt,
@@ -2498,7 +2658,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     } catch (error) {
       console.error('[AgentView] 在新会话中重试失败:', error)
     }
-  }, [sessionId, agentChannelId, agentModelId, sessionAgentRuntime, currentWorkspaceId, openSession, setAgentSessions, setStreamingStates, permissionMode])
+  }, [sessionId, agentChannelId, agentModelId, currentWorkspaceId, openSession, setAgentSessions, setStreamingStates, permissionMode])
 
   /** 分叉会话：从指定消息处创建新会话并自动切换 */
   const handleFork = React.useCallback(async (upToMessageUuid: string): Promise<void> => {
@@ -2607,6 +2767,17 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     return () => window.removeEventListener('proma:focus-input', handler)
   }, [])
 
+  // 监听文件面板三点菜单「引用到 Agent」事件：在输入框插入 @file 引用
+  React.useEffect(() => {
+    const handler = (event: Event): void => {
+      const items = (event as CustomEvent<FilePanelDragItem[]>).detail
+      if (!items || items.length === 0) return
+      richTextInputRef.current?.insertFileMentions(items)
+    }
+    window.addEventListener(INSERT_FILE_MENTION_EVENT, handler)
+    return () => window.removeEventListener(INSERT_FILE_MENTION_EVENT, handler)
+  }, [])
+
   const allAskUserRequests = useAtomValue(allPendingAskUserRequestsAtom)
   const allPermissionRequests = useAtomValue(allPendingPermissionRequestsAtom)
   const allExitPlanRequests = useAtomValue(allPendingExitPlanRequestsAtom)
@@ -2614,8 +2785,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     (allAskUserRequests.get(sessionId)?.length ?? 0) > 0 ||
     (allExitPlanRequests.get(sessionId)?.length ?? 0) > 0
   const hasBlockingRequests = hasBannerOverlay || (allPermissionRequests.get(sessionId)?.length ?? 0) > 0
-  const canSendQueuedNow = messagesLoaded && (streaming || !messagesRefreshing) && !!agentChannelId && hasAvailableModel && !hasBlockingRequests
-  const autoSendingQueuedRef = React.useRef(false)
+  const canSendQueuedNow = messagesLoaded && (streaming || !messagesRefreshing) && !!agentChannelId && hasAvailableModel && !hasBlockingRequests && !isStopping
   const queuedSendInFlightRef = React.useRef(false)
   const sendingQueuedMessageIdsRef = React.useRef<Set<string>>(new Set())
 
@@ -2628,12 +2798,19 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
 
     queuedSendInFlightRef.current = true
     sendingQueuedMessageIdsRef.current.add(messageId)
-    setQueuedMessages((prev) => removeQueuedMessage(prev, messageId))
-    sendPlainTextAgentMessage(message)
+    void window.electronAPI.cancelAgentQueuedMessage({ sessionId, messageId })
+      .then((cancelled) => {
+        if (!cancelled) return
+        setQueuedMessages((prev) => removeQueuedMessage(prev, messageId))
+        return sendPlainTextAgentMessage(message).catch((error) => {
+          console.error('[AgentView] 队列消息发送失败:', error)
+          toast.error('队列消息发送失败', { description: String(error) })
+          setQueuedMessages((prev) => restoreQueuedMessageToFront(prev, message))
+        })
+      })
       .catch((error) => {
-        console.error('[AgentView] 队列消息发送失败:', error)
-        toast.error('队列消息发送失败', { description: String(error) })
-        setQueuedMessages((prev) => restoreQueuedMessageToFront(prev, message))
+        console.error('[AgentView] 取消主进程队列失败:', error)
+        toast.error('队列消息操作失败', { description: String(error) })
       })
       .finally(() => {
         sendingQueuedMessageIdsRef.current.delete(messageId)
@@ -2645,74 +2822,61 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     const message = queuedMessages.find((item) => item.id === messageId)
     if (!message) return
 
-    setQueuedMessages((prev) => removeQueuedMessage(prev, messageId))
-    const recalledQuotedSelection = message.quotedSelection
-    if (recalledQuotedSelection) {
-      setQuotedSelectionMap((prev) => {
-        const map = new Map(prev)
-        map.set(sessionId, recalledQuotedSelection)
-        return map
+    void window.electronAPI.cancelAgentQueuedMessage({ sessionId, messageId })
+      .then((cancelled) => {
+        if (!cancelled) return
+        setQueuedMessages((prev) => removeQueuedMessage(prev, messageId))
+        const recalledQuotedSelection = message.quotedSelection
+        if (recalledQuotedSelection) {
+          setQuotedSelectionMap((prev) => {
+            const map = new Map(prev)
+            map.set(sessionId, recalledQuotedSelection)
+            return map
+          })
+        }
+        restoreQueuedAttachmentsToPending(message.attachments)
+
+        const currentDraft = store.get(agentSessionDraftsAtom).get(sessionId) ?? ''
+        const currentDraftHtml = store.get(agentSessionDraftHtmlAtom).get(sessionId) ?? ''
+        const hasDraft = currentDraft.trim().length > 0
+        const nextDraft = hasDraft
+          ? `${currentDraft.trimEnd()}\n\n${message.text}`
+          : message.text
+        setInputContent(nextDraft)
+
+        // 已有草稿时，用「原草稿 HTML + 队列文本段落 HTML」合并，保留原草稿的 mention 等富文本节点；
+        // 空草稿时留空 HTML，交给编辑器按纯文本重建（与正常输入渲染一致）。
+        if (hasDraft) {
+          const draftHtml = currentDraftHtml.trim().length > 0
+            ? currentDraftHtml
+            : queuedTextToParagraphHtml(currentDraft)
+          setInputHtmlContent(`${draftHtml}${queuedTextToParagraphHtml(message.text)}`)
+        } else {
+          setInputHtmlContent('')
+        }
       })
-    }
-    restoreQueuedAttachmentsToPending(message.attachments)
-
-    const hasDraft = inputContent.trim().length > 0
-    const nextDraft = hasDraft
-      ? `${inputContent.trimEnd()}\n\n${message.text}`
-      : message.text
-    setInputContent(nextDraft)
-
-    // 已有草稿时，用「原草稿 HTML + 队列文本段落 HTML」合并，保留原草稿的 mention 等富文本节点；
-    // 空草稿时留空 HTML，交给编辑器按纯文本重建（与正常输入渲染一致）。
-    if (hasDraft) {
-      const draftHtml = inputHtmlContent.trim().length > 0
-        ? inputHtmlContent
-        : queuedTextToParagraphHtml(inputContent)
-      setInputHtmlContent(`${draftHtml}${queuedTextToParagraphHtml(message.text)}`)
-    } else {
-      setInputHtmlContent('')
-    }
-  }, [inputContent, inputHtmlContent, queuedMessages, restoreQueuedAttachmentsToPending, sessionId, setInputContent, setInputHtmlContent, setQueuedMessages, setQuotedSelectionMap])
+      .catch((error) => {
+        console.warn('[AgentView] 撤回主进程队列消息失败:', error)
+      })
+  }, [queuedMessages, restoreQueuedAttachmentsToPending, sessionId, setInputContent, setInputHtmlContent, setQueuedMessages, setQuotedSelectionMap, store])
 
   const handleRemoveQueuedMessage = React.useCallback((messageId: string): void => {
+    void window.electronAPI.cancelAgentQueuedMessage({ sessionId, messageId }).catch((error) => {
+      console.warn('[AgentView] 取消主进程队列失败:', error)
+    })
     setQueuedMessages((prev) => removeQueuedMessage(prev, messageId))
-  }, [setQueuedMessages])
+  }, [sessionId, setQueuedMessages])
 
   const handleMoveQueuedMessage = React.useCallback((
     sourceId: string,
     targetId: string,
     placement: QueueDropPlacement,
   ): void => {
+    void window.electronAPI.moveAgentQueuedMessage({ sessionId, sourceId, targetId, placement }).catch((error) => {
+      console.warn('[AgentView] 调整主进程队列顺序失败:', error)
+    })
     setQueuedMessages((prev) => moveQueuedMessage(prev, sourceId, targetId, placement))
-  }, [setQueuedMessages])
-
-  React.useEffect(() => {
-    if (autoSendingQueuedRef.current) return
-    if (queuedSendInFlightRef.current) return
-    if (queuedMessages.length === 0) return
-    if (messagesRefreshingRef.current) return
-    if (!canSendQueuedNow || streaming || stoppedByUser) return
-
-    const message = queuedMessages[0]
-    if (!message) return
-    if (sendingQueuedMessageIdsRef.current.has(message.id)) return
-
-    autoSendingQueuedRef.current = true
-    queuedSendInFlightRef.current = true
-    sendingQueuedMessageIdsRef.current.add(message.id)
-    setQueuedMessages((prev) => removeQueuedMessage(prev, message.id))
-    sendPlainTextAgentMessage(message)
-      .catch((error) => {
-        console.error('[AgentView] 自动发送队列消息失败:', error)
-        toast.error('自动发送队列消息失败', { description: String(error) })
-        setQueuedMessages((prev) => restoreQueuedMessageToFront(prev, message))
-      })
-      .finally(() => {
-        sendingQueuedMessageIdsRef.current.delete(message.id)
-        queuedSendInFlightRef.current = false
-        autoSendingQueuedRef.current = false
-      })
-  }, [canSendQueuedNow, queuedMessages, sendPlainTextAgentMessage, setQueuedMessages, stoppedByUser, streaming])
+  }, [sessionId, setQueuedMessages])
 
   // ===== 预览面板状态（toggle 快捷键，分屏布局在 MainArea） =====
   const setPreviewOpenMap = useSetAtom(previewPanelOpenMapAtom)
@@ -2730,21 +2894,20 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
     return registerShortcut('toggle-preview-panel', togglePreviewPanel)
   }, [togglePreviewPanel])
 
-  const hasTextInput = inputContent.trim().length > 0
-  const canSend = messagesLoaded && (streaming || !messagesRefreshing) && (hasTextInput || pendingFiles.length > 0 || !!suggestion) && agentChannelId !== null && hasAvailableModel && (!streaming || hasTextInput)
+  const [inputHasContent, setInputHasContent] = React.useState(
+    () => (store.get(agentSessionDraftsAtom).get(sessionId) ?? '').trim().length > 0,
+  )
+  const inputHasContentRef = React.useRef(inputHasContent)
+  inputHasContentRef.current = inputHasContent
+  const handleInputActivity = React.useCallback((hasContent: boolean): void => {
+    if (inputHasContentRef.current === hasContent) return
+    inputHasContentRef.current = hasContent
+    setInputHasContent(hasContent)
+  }, [])
+  const hasTextInput = inputHasContent
+  const canSend = !isStopping && messagesLoaded && (streaming || !messagesRefreshing) && (hasTextInput || pendingFiles.length > 0 || !!suggestion) && agentChannelId !== null && hasAvailableModel && (!streaming || hasTextInput)
 
   const inputToolbarItems = React.useMemo<ToolbarItem[]>(() => [
-    {
-      key: 'model',
-      node: (
-        <ModelSelector
-          filterChannelIds={sessionAgentRuntime === 'pi' ? undefined : agentChannelIds}
-          externalSelectedModel={externalSelectedModel}
-          onModelSelect={handleModelSelect}
-          useSharedOpenState={sharedModelSelectorOpen}
-        />
-      ),
-    },
     ...(isCodexFastModeAvailable ? [{
       key: 'codex-fast-mode',
       node: (
@@ -2767,16 +2930,6 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         </Tooltip>
       ),
     }] : []),
-    {
-      key: 'runtime',
-      node: (
-        <AgentRuntimeSelector
-          runtime={sessionAgentRuntime}
-          disabled={streaming || backgroundWaiting}
-          onChange={handleAgentRuntimeChange}
-        />
-      ),
-    },
     { key: 'permission-mode', node: <PermissionModeSelector sessionId={sessionId} /> },
     {
       key: 'thinking',
@@ -2790,18 +2943,17 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
             setAgentThinking(next)
             window.electronAPI.updateSettings({ agentThinking: next })
           }}
-          codexConfig={isOpenAIThinkingAvailable ? {
+          codexConfig={isSessionThinkingAvailable ? {
             thinkingLevel: openAIThinkingLevel,
             levels: openAIThinkingLevels,
-            disabled: streaming || backgroundWaiting,
-            onThinkingLevelChange: (level) => { void updateOpenAIThinkingLevel(level) },
+            onThinkingLevelChange: (level) => { void updateReasoningLevel(level) },
           } : undefined}
         />
       ),
     },
-    { key: 'speech', node: <SpeechButton className={inputToolbarButtonClass} /> },
+    { key: 'speech', node: <SpeechButton className={inputToolbarButtonClass} voiceInputId={agentVoiceInputId} /> },
     {
-      key: 'attach-file',
+      key: 'attach-content',
       node: (
         <Tooltip>
           <TooltipTrigger asChild>
@@ -2810,19 +2962,18 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
               variant="ghost"
               size="icon"
               className={inputToolbarButtonClass}
-              onClick={handleOpenFileDialog}
+              onClick={() => void handleAttachContent()}
+              aria-label="附加文件或文件夹"
             >
-              <Paperclip className="size-5" />
+              <Paperclip className="size-[17px]" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent side="top">
-            <p>添加附件</p>
-          </TooltipContent>
+          <TooltipContent side="top"><p>附加文件或文件夹</p></TooltipContent>
         </Tooltip>
       ),
     },
     {
-      key: 'attach-folder',
+      key: 'capture-screen',
       node: (
         <Tooltip>
           <TooltipTrigger asChild>
@@ -2831,14 +2982,13 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
               variant="ghost"
               size="icon"
               className={inputToolbarButtonClass}
-              onClick={handleAttachFolder}
+              onClick={() => void handleCaptureScreenRegion()}
+              aria-label="截图并附加"
             >
-              <FolderPlus className="size-5" />
+              <Crop className="size-[17px]" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent side="top">
-            <p>附加文件夹</p>
-          </TooltipContent>
+          <TooltipContent side="top"><p>截图并附加</p></TooltipContent>
         </Tooltip>
       ),
     },
@@ -2846,13 +2996,6 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       key: 'context-usage',
       node: (
         <ContextUsageBadge
-          inputTokens={contextStatus.inputTokens}
-          outputTokens={contextStatus.outputTokens}
-          cacheReadTokens={contextStatus.cacheReadTokens}
-          cacheCreationTokens={contextStatus.cacheCreationTokens}
-          contextWindow={contextStatus.contextWindow}
-          isEstimated={contextStatus.contextUsageIsEstimated === true}
-          isCompacting={contextStatus.isCompacting}
           isProcessing={streaming}
           sessionId={sessionId}
           channelId={planQuotaChannelId}
@@ -2862,38 +3005,27 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       ),
     },
   ], [
-    agentChannelIds,
-    agentChannelId,
     planQuotaChannelId,
     planQuotaChannelUpdatedAt,
     isCodexFastModeAvailable,
     codexFastModeEnabled,
     handleCodexFastModeChange,
-    isOpenAIThinkingAvailable,
+    isSessionThinkingAvailable,
     openAIThinkingLevel,
     openAIThinkingLevels,
-    updateOpenAIThinkingLevel,
-    agentModelId,
-    handleModelSelect,
-    sessionAgentRuntime,
+    updateReasoningLevel,
     backgroundWaiting,
-    handleAgentRuntimeChange,
     sessionId,
     agentThinking,
     setAgentThinking,
-    handleOpenFileDialog,
-    handleAttachFolder,
-    contextStatus.inputTokens,
-    contextStatus.outputTokens,
-    contextStatus.cacheReadTokens,
-    contextStatus.cacheCreationTokens,
-    contextStatus.contextWindow,
-    contextStatus.isCompacting,
+
     streaming,
+    handleAttachContent,
     handleCompact,
+    agentVoiceInputId,
   ])
 
-  const inputTrailingNode = streaming && !hasTextInput ? (
+  const stopControl = (
     <Tooltip>
       <TooltipTrigger asChild>
         <Button
@@ -2902,6 +3034,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
           size="icon"
           className={inputToolbarDangerButtonClass}
           onClick={handleStop}
+          disabled={isStopping}
         >
           <Square className="size-[16px]" fill="currentColor" strokeWidth={0} />
         </Button>
@@ -2910,7 +3043,9 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         <p>停止 Agent ({getAcceleratorDisplay(getActiveAccelerator('stop-generation'))})</p>
       </TooltipContent>
     </Tooltip>
-  ) : (
+  )
+
+  const sendButton = (
     <Button
       type="button"
       variant="ghost"
@@ -2918,11 +3053,35 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
       className={cn(
         canSend ? inputToolbarSendButtonClass : inputToolbarDisabledButtonClass
       )}
-      onClick={() => handleSend()}
+      onClick={() => {
+        const latestContent = richTextInputRef.current?.getMarkdown()
+        void handleSend(latestContent, true)
+      }}
       disabled={!canSend}
     >
       <CornerDownLeft className="size-[22px]" />
     </Button>
+  )
+
+  const sendControl = streaming ? (
+    <>
+      {hasTextInput && sendButton}
+      {stopControl}
+    </>
+  ) : sendButton
+
+  const inputTrailingNode = (
+    <>
+      <div className="flex min-w-0 items-center gap-1 [&_.model-selector-trigger>span]:max-w-[min(18rem,42vw)]">
+        <ModelSelector
+          externalSelectedModel={externalSelectedModel}
+          onModelSelect={handleModelSelect}
+          showChannelInTrigger
+          useSharedOpenState={sharedModelSelectorOpen}
+        />
+      </div>
+      {sendControl}
+    </>
   )
 
   // 同批图片附件 — 用于大图预览时左右翻页（提取到 useMemo 避免每次渲染重建）
@@ -2960,17 +3119,20 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
           sessionModelId={agentModelId || undefined}
           messagesLoaded={messagesLoaded}
           persistedSDKMessages={persistedSDKMessages}
-          streaming={streaming}
-          streamState={streamState}
-          liveMessages={liveMessages}
           sessionPath={sessionPath}
           attachedDirs={allAttachedDirs}
           stoppedByUser={stoppedByUser}
           onRetry={handleRetry}
           onRetryInNewSession={handleRetryInNewSession}
-          onFork={handleFork}
-          onRewind={handleRewindRequest}
+          onRelinkProjectRoot={handleRelinkProjectRoot}
+          onRestoreProjectRoot={handleOpenRestoreProjectRootDialog}
+          onFork={isLegacyTranscript ? undefined : handleFork}
+          onRewind={isLegacyTranscript ? undefined : handleRewindRequest}
+          onCreateTodo={handleOpenReplyTodoDialog}
           onCompact={handleCompact}
+          onAddHistoryQuote={handleAddHistoryQuote}
+          onAgentHistoryQuoteClick={handleAgentHistoryQuoteClick}
+          historyQuoteNavigation={historyQuoteNavigation}
         />
 
         {/* 权限请求横幅 */}
@@ -2997,6 +3159,15 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
             onDrop={handleDrop}
           >
             {(isPlanMode || isPermissionPlanMode) && !isDragOver && <PlanModeDashedBorder />}
+            {isLegacyTranscript && (
+              <div className="flex items-center justify-between gap-3 px-4 py-2 text-sm text-amber-700 dark:text-amber-300">
+                <span>这是已退役 Claude runtime 的只读历史会话；原对话可查看，但不能继续、分叉或回退。</span>
+                <Button size="sm" variant="outline" onClick={() => void handleRetryInNewSession()} disabled={!agentChannelId}>
+                  以 Pi 新会话继续
+                </Button>
+              </div>
+            )}
+
             {/* 无 Agent 渠道或无可用模型提示 */}
             {(!agentChannelId || !hasAvailableModel) && (
               <div className="flex items-center gap-2 px-4 py-2 text-sm text-amber-600 dark:text-amber-400">
@@ -3042,24 +3213,12 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
             <AgentMessageQueue
               items={queuedMessages}
               canSendNow={canSendQueuedNow}
+              interruptsCurrentTurn={streaming}
               onSendNow={handleSendQueuedNow}
               onRecall={handleRecallQueuedMessage}
               onRemove={handleRemoveQueuedMessage}
               onMove={handleMoveQueuedMessage}
             />
-
-            {/* 待办·继承上下文提示条（源会话在跑时点继承，持续显示直到执行或取消） */}
-            {pendingInherit && pendingInherit.sourceSessionId === sessionId && (() => {
-              const ch = globalChannels.find((c) => c.id === pendingInherit.targetChannelId)
-              const mdl = ch?.models.find((m) => m.id === pendingInherit.targetModelId)
-              const label = `${ch?.name ?? '未知渠道'} · ${mdl?.name ?? '未知模型'}`
-              return (
-                <PendingInheritBanner
-                  targetLabel={label}
-                  onCancel={() => setPendingInherit(null)}
-                />
-              )
-            })()}
 
             {/* Agent 建议提示 */}
             {suggestion && !streaming && (
@@ -3087,35 +3246,35 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
               </div>
             )}
 
-            <RichTextInput
-              value={inputContent}
-              onChange={setInputContent}
+            <AgentScopedRichTextInput
+              ref={richTextInputRef}
+              sessionId={sessionId}
+              onInputActivity={handleInputActivity}
+              draftSyncDelayMs={300}
               onSubmit={handleSend}
               onPasteFiles={handlePasteFiles}
               onPasteLongText={handlePasteLongText}
+              voiceInputId={agentVoiceInputId}
               longTextPasteThreshold={longTextPasteAsAttachmentEnabled ? LONG_TEXT_ATTACHMENT_THRESHOLD : undefined}
               placeholder={
                 agentChannelId && hasAvailableModel
                   ? sendWithCmdEnter
-                    ? '输入消息... (⌘/Ctrl+Enter 发送，Enter 换行，@ 引用文件，/ 调用 Skill，# 调用 MCP，& 引用会话)'
-                    : '输入消息... (Enter 发送，Shift+Enter 换行，@ 引用文件，/ 调用 Skill，# 调用 MCP，& 引用会话)'
+                    ? '输入消息...（@ 引用文件，/ 调用 Skill，# 使用 MCP，& 引用会话，～ 引用待办/日程；⌘/Ctrl+Enter 发送）'
+                    : '输入消息...（@ 引用文件，/ 调用 Skill，# 使用 MCP，& 引用会话，～ 引用待办/日程；Enter 发送）'
                   : !agentChannelId
                     ? '请先在设置中选择 Agent 供应商'
                     : '暂无可用模型，请先在设置中启用渠道'
               }
-              disabled={!agentChannelId || !hasAvailableModel}
+              disabled={isLegacyTranscript || !agentChannelId || !hasAvailableModel}
               autoFocusTrigger={sessionId}
               collapsible
               enableMentions
               workspacePath={sessionPath}
-              workspaceId={currentWorkspaceId}
               workspaceSlug={workspaceSlug}
-              sessionId={sessionId}
               attachedDirs={workspaceMentionPaths}
               sessionAttachedDirs={sessionMentionPaths}
-              htmlValue={inputHtmlContent}
-              onHtmlChange={setInputHtmlContent}
               sendWithCmdEnter={sendWithCmdEnter}
+              onAgentHistoryQuoteClick={handleAgentHistoryQuoteClick}
             />
 
             {/* Footer 工具栏 — 容器变窄时尾部按钮自动折叠进「更多」Popover */}
@@ -3125,6 +3284,21 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
         )}
       </div>
     </AgentSessionProvider>
+
+    <Dialog open={todoDialogOpen} onOpenChange={setTodoDialogOpen}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader><DialogTitle>标记为 Todo</DialogTitle></DialogHeader>
+        <div className="space-y-4">
+          <label className="grid gap-2 text-sm font-medium">任务标题
+            <textarea value={todoDraftTitle} onChange={(event) => setTodoDraftTitle(event.target.value)} rows={3} className="min-h-20 w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/30" />
+          </label>
+          <label className="grid gap-2 text-sm font-medium">Todo 分组
+            <Select value={todoGroupId} onValueChange={setTodoGroupId}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="__none__">不分组</SelectItem>{planningGroups.map((group) => <SelectItem key={group.id} value={group.id}>{group.name}</SelectItem>)}</SelectContent></Select>
+          </label>
+        </div>
+        <DialogFooter><Button type="button" variant="ghost" onClick={() => setTodoDialogOpen(false)}>取消</Button><Button type="button" onClick={() => void handleCreateReplyTodo()} disabled={creatingTodo || !todoDraftTitle.trim()}><ListTodo size={15} />添加 Todo</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     {/* 回退确认弹窗 */}
     <AlertDialog
@@ -3145,6 +3319,23 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true }: { sessi
             className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
           >
             回退
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+
+    <AlertDialog open={restoreProjectRootDialogOpen} onOpenChange={setRestoreProjectRootDialogOpen}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>在原路径新建空文件夹？</AlertDialogTitle>
+          <AlertDialogDescription>
+            将在该本地项目原路径创建空文件夹。此操作不会恢复被删除的文件。
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={restoringProjectRoot}>取消</AlertDialogCancel>
+          <AlertDialogAction disabled={restoringProjectRoot} onClick={() => void handleRestoreProjectRoot()}>
+            {restoringProjectRoot ? '创建中...' : '新建空文件夹'}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

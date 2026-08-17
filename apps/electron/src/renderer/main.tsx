@@ -26,14 +26,13 @@ import {
 import {
   agentChannelIdAtom,
   agentModelIdAtom,
-  agentChannelIdsAtom,
-  agentRuntimeAtom,
   agentWorkspacesAtom,
   agentSessionsAtom,
   currentAgentWorkspaceIdAtom,
   currentAgentSessionIdAtom,
   workspaceCapabilitiesVersionAtom,
   workspaceFilesVersionAtom,
+  workspaceGitDiffRefreshVersionAtom,
   agentThinkingAtom,
   agentEffortAtom,
   agentMaxBudgetUsdAtom,
@@ -45,6 +44,7 @@ import {
 } from './atoms/agent-atoms'
 import { updateStatusAtom, initializeUpdater } from './atoms/updater'
 import { automationsAtom } from './atoms/automation-atoms'
+import { calendarEventsAtom, calendarPlanningGroupsAtom, planningTagsAtom, todoPlanningGroupsAtom, todosAtom } from './atoms/planning-atoms'
 import {
   notificationsEnabledAtom,
   notificationSoundEnabledAtom,
@@ -55,6 +55,7 @@ import {
   stickyUserMessageEnabledAtom,
   longTextPasteAsAttachmentEnabledAtom,
   richTextRenderingEnabledAtom,
+  sessionHoverPreviewEnabledAtom,
   initializeUiPreferences,
 } from './atoms/ui-preferences'
 import {
@@ -63,7 +64,7 @@ import {
 } from './atoms/markdown-font-size'
 import { useGlobalAgentListeners } from './hooks/useGlobalAgentListeners'
 import { useGlobalChatListeners } from './hooks/useGlobalChatListeners'
-import { tabsAtom, activeTabIdAtom, ensureScratchPadTab, getPersistableTabState, scratchPadContentAtom, scratchPadLoadedAtom, SCRATCH_PAD_ID } from './atoms/tab-atoms'
+import { tabsAtom, activeTabIdAtom, ensureScratchPadTab, getPersistableTabState, scratchPadContentAtom, scratchPadLoadedAtom, SCRATCH_PAD_ID, canvasContentAtom, canvasLoadedAtom } from './atoms/tab-atoms'
 import type { TabItem } from './atoms/tab-atoms'
 import { chatToolsAtom } from './atoms/chat-tool-atoms'
 import { feishuBotStatesAtom } from './atoms/feishu-atoms'
@@ -73,24 +74,33 @@ import { appModeAtom } from './atoms/app-mode'
 import type { FeishuBotBridgeState, FeishuBridgeState, DingTalkBotBridgeState, DingTalkBridgeState } from '@proma/shared'
 import { Toaster } from './components/ui/sonner'
 import { toast } from 'sonner'
+import { ArrowUpRight } from 'lucide-react'
 import { diffCapabilities } from '@proma/shared'
 import type { WorkspaceCapabilities } from '@proma/shared'
 import { showCapabilityChangeToasts } from './lib/capabilities-toast'
 import { GlobalShortcuts } from './components/shortcuts/GlobalShortcuts'
+import { VoiceDictationApp } from './components/voice-dictation/VoiceDictationApp'
 import { TabSwitcher } from './components/tabs/TabSwitcher'
 import { htmlToMarkdown, markdownToHtml } from './lib/markdown-rich-text'
-import { getEnabledClaudeAgentChannelIds } from './lib/agent-channel-selection'
+import { PromaLogo } from './lib/model-logo'
+import { initShortcutRegistry, updateShortcutOverrides } from './lib/shortcut-registry'
+import { initializePerformanceMonitor } from './lib/performance-monitor'
 import './styles/globals.css'
 import 'katex/dist/katex.min.css'
 
 // ===== 窗口类型检测 =====
 const isQuickTaskWindow = new URLSearchParams(window.location.search).get('window') === 'quick-task'
-const isVoiceDictationWindow = new URLSearchParams(window.location.search).get('window') === 'voice-dictation'
+const isVoiceDictationIndicatorWindow = new URLSearchParams(window.location.search).get('window') === 'voice-dictation-indicator'
 const isDetachedPreviewWindow = new URLSearchParams(window.location.search).get('window') === 'detached-preview'
-const isMainWindow = !isQuickTaskWindow && !isVoiceDictationWindow && !isDetachedPreviewWindow
+const isPlanningWindow = new URLSearchParams(window.location.search).get('window') === 'planning'
+const isWorkspaceMemoryWindow = new URLSearchParams(window.location.search).get('window') === 'workspace-memory'
+const isAgentStatusHoverWindow = new URLSearchParams(window.location.search).get('window') === 'agent-status-hover'
+const isMainWindow = !isQuickTaskWindow && !isVoiceDictationIndicatorWindow && !isDetachedPreviewWindow && !isPlanningWindow && !isWorkspaceMemoryWindow && !isAgentStatusHoverWindow
 
-// 仅主窗口禁用页面级滚动；独立浮窗各自管理自己的内容高度和滚动。
-if (isMainWindow) {
+initializePerformanceMonitor()
+
+// 主窗口和独立规划窗口均由内部面板管理滚动，避免页面本身出现第二层滚动。
+if (isMainWindow || isPlanningWindow || isWorkspaceMemoryWindow) {
   document.documentElement.classList.add('proma-main-window')
 }
 
@@ -164,12 +174,11 @@ function ThemeInitializer(): null {
 function AgentSettingsInitializer(): null {
   const setAgentChannelId = useSetAtom(agentChannelIdAtom)
   const setAgentModelId = useSetAtom(agentModelIdAtom)
-  const setAgentChannelIds = useSetAtom(agentChannelIdsAtom)
-  const setAgentRuntime = useSetAtom(agentRuntimeAtom)
   const setAgentWorkspaces = useSetAtom(agentWorkspacesAtom)
   const setCurrentWorkspaceId = useSetAtom(currentAgentWorkspaceIdAtom)
   const bumpCapabilities = useSetAtom(workspaceCapabilitiesVersionAtom)
   const bumpFiles = useSetAtom(workspaceFilesVersionAtom)
+  const bumpGitDiffRefresh = useSetAtom(workspaceGitDiffRefreshVersionAtom)
   const setThinking = useSetAtom(agentThinkingAtom)
   const setEffort = useSetAtom(agentEffortAtom)
   const setMaxBudget = useSetAtom(agentMaxBudgetUsdAtom)
@@ -209,27 +218,14 @@ function AgentSettingsInitializer(): null {
         store.set(selectedModelAtom, null)
       }
 
-      const defaultAgentRuntime = settings.agentRuntime ?? 'pi'
-      setAgentRuntime(defaultAgentRuntime)
-
-      // 渠道的启用状态是唯一开关：启动时也必须从实际渠道派生 Claude 白名单，
-      // 不能继承旧版独立开关，或把 Pi 专用渠道带入 Claude runtime。
-      const claudeChannelIds = getEnabledClaudeAgentChannelIds(channels)
-      setAgentChannelIds(claudeChannelIds)
-
       const selectedChannel = settings.agentChannelId
         ? channels.find((channel) => channel.id === settings.agentChannelId)
         : undefined
       const selectedChannelIsUsable = selectedChannel?.enabled
-        && (defaultAgentRuntime === 'pi' || claudeChannelIds.includes(selectedChannel.id))
 
       const updates: Parameters<typeof window.electronAPI.updateSettings>[0] = {}
-      const storedClaudeChannelIds = settings.agentChannelIds ?? []
-      const whitelistChanged = claudeChannelIds.length !== storedClaudeChannelIds.length
-        || claudeChannelIds.some((id, index) => id !== storedClaudeChannelIds[index])
-      if (whitelistChanged) updates.agentChannelIds = claudeChannelIds
 
-      // 验证并加载 Agent 默认渠道/模型。Claude runtime 不能恢复到 Pi 专用或已禁用渠道。
+      // 验证并加载 Agent 默认渠道/模型。Pi 可使用任意启用渠道。
       if (settings.agentChannelId && selectedChannelIsUsable) {
         setAgentChannelId(settings.agentChannelId)
         if (settings.agentModelId) setAgentModelId(settings.agentModelId)
@@ -280,7 +276,7 @@ function AgentSettingsInitializer(): null {
       console.error(err)
       setAgentSettingsReady(true) // 即使出错也标记就绪，避免永远阻塞
     })
-  }, [setAgentChannelId, setAgentModelId, setAgentChannelIds, setAgentRuntime, setAgentWorkspaces, setCurrentWorkspaceId, setThinking, setEffort, setMaxBudget, setMaxTurns, setAutomationGroupOrder, setChannels, setChannelsLoaded, setAgentSettingsReady])
+  }, [setAgentChannelId, setAgentModelId, setAgentWorkspaces, setCurrentWorkspaceId, setThinking, setEffort, setMaxBudget, setMaxTurns, setAutomationGroupOrder, setChannels, setChannelsLoaded, setAgentSettingsReady])
 
   // 工作区切换时重置能力缓存，预加载基线
   useEffect(() => {
@@ -324,13 +320,18 @@ function AgentSettingsInitializer(): null {
     })
     const unsubFiles = window.electronAPI.onWorkspaceFilesChanged(() => {
       bumpFiles((v) => v + 1)
+      // watcher 已在主进程失效命中的 repo cache；所有已挂载 Changes 面板由此重新拉取。
+      bumpGitDiffRefresh((v) => v + 1)
+      // 外部本地项目目录变动时，主进程在 LIST_WORKSPACES 中重新计算根目录状态。
+      // 这里仅响应 watcher 事件刷新一次，避免在侧栏每次渲染时同步访问文件系统。
+      window.electronAPI.listAgentWorkspaces().then(setAgentWorkspaces).catch(console.error)
     })
 
     return () => {
       unsubCapabilities()
       unsubFiles()
     }
-  }, [bumpCapabilities, bumpFiles, currentWorkspaceId, workspaces])
+  }, [bumpCapabilities, bumpFiles, bumpGitDiffRefresh, currentWorkspaceId, setAgentWorkspaces, workspaces])
 
   return null
 }
@@ -342,11 +343,107 @@ function AgentSettingsInitializer(): null {
  */
 function UpdaterInitializer(): null {
   const setUpdateStatus = useSetAtom(updateStatusAtom)
+  const updateStatus = useAtomValue(updateStatusAtom)
+  const notifiedDownloadVersionRef = useRef<string | null>(null)
 
   useEffect(() => {
     const cleanup = initializeUpdater(setUpdateStatus)
     return cleanup
   }, [setUpdateStatus])
+
+  useEffect(() => {
+    if (updateStatus.status !== 'downloaded') return
+
+    const version = updateStatus.version || '新版本'
+    if (notifiedDownloadVersionRef.current === version) return
+    notifiedDownloadVersionRef.current = version
+    const versionLabel = version.startsWith('v') ? version : `v${version}`
+
+    toast.custom((toastId) => (
+      <div className="w-[344px] max-w-[calc(100vw-32px)] rounded-xl bg-background/95 p-3 text-foreground shadow-[0_12px_32px_rgba(0,0,0,0.14)] ring-1 ring-black/5 backdrop-blur-xl dark:ring-white/10">
+        <div className="flex items-center gap-2.5">
+          <img src={PromaLogo} alt="Proma" className="size-8 rounded-lg" />
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5 text-sm leading-5">
+              <span className="font-semibold tracking-tight">Proma 更新已下载</span>
+              <span className="text-xs text-primary">{versionLabel}</span>
+            </div>
+            <p className="text-xs leading-4 text-muted-foreground">所有 Agent 完成后即可自动安装。</p>
+          </div>
+        </div>
+        <div className="mt-2.5 flex items-center justify-between">
+          <button
+            type="button"
+            className="h-7 rounded-md px-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground active:scale-[0.96]"
+            onClick={() => toast.dismiss(toastId)}
+          >
+            取消
+          </button>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              className="flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground active:scale-[0.96]"
+              onClick={() => { void window.electronAPI.openExternal('https://proma.cool/changelog') }}
+            >
+              查看更新
+              <ArrowUpRight size={13} />
+            </button>
+            <button
+              type="button"
+              className="h-7 rounded-md bg-primary px-2.5 text-xs font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 active:scale-[0.96]"
+              onClick={() => {
+                toast.dismiss(toastId)
+                void window.electronAPI.updater?.installWhenIdle()
+                  .then((scheduled) => {
+                    if (!scheduled) {
+                      toast.error('更新尚未准备好，请稍后重试')
+                      return
+                    }
+
+                    toast.custom((scheduledToastId) => (
+                      <div className="w-[312px] max-w-[calc(100vw-32px)] rounded-xl bg-background/95 p-3 text-foreground shadow-[0_12px_32px_rgba(0,0,0,0.14)] ring-1 ring-black/5 backdrop-blur-xl dark:ring-white/10">
+                        <div className="flex items-center gap-2.5">
+                          <img src={PromaLogo} alt="Proma" className="size-7 rounded-md" />
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm font-semibold tracking-tight">已安排空闲时更新</p>
+                            <p className="text-xs leading-4 text-muted-foreground">当前任务结束后会自动重启安装。</p>
+                          </div>
+                        </div>
+                        <div className="mt-2 flex justify-end">
+                          <button
+                            type="button"
+                            className="h-7 rounded-md px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground active:scale-[0.96]"
+                            onClick={() => {
+                              void window.electronAPI.updater?.cancelIdleInstall()
+                              toast.dismiss(scheduledToastId)
+                            }}
+                          >
+                            取消安排
+                          </button>
+                        </div>
+                      </div>
+                    ), {
+                      duration: Infinity,
+                      dismissible: false,
+                      unstyled: true,
+                    })
+                  })
+                  .catch(() => {
+                    toast.error('无法安排空闲更新，请稍后重试')
+                  })
+              }}
+            >
+              空闲时更新
+            </button>
+          </div>
+        </div>
+      </div>
+    ), {
+      duration: Infinity,
+      dismissible: false,
+      unstyled: true,
+    })
+  }, [updateStatus])
 
   return null
 }
@@ -356,6 +453,74 @@ function UpdaterInitializer(): null {
  *
  * 加载全部定时任务，并订阅主进程的变更事件（运行完成/状态变化）刷新列表。
  */
+function PlanningShortcutInitializer(): null {
+  useEffect(() => {
+    initShortcutRegistry()
+    void window.electronAPI.getSettings().then((settings) => {
+      updateShortcutOverrides(settings.shortcutOverrides ?? {})
+    }).catch((error) => {
+      console.error('[任务/日程] 加载快捷键设置失败:', error)
+    })
+  }, [])
+  return null
+}
+
+function PlanningInitializer(): null {
+  const setTodos = useSetAtom(todosAtom)
+  const setCalendarEvents = useSetAtom(calendarEventsAtom)
+  const setTodoGroups = useSetAtom(todoPlanningGroupsAtom)
+  const setCalendarGroups = useSetAtom(calendarPlanningGroupsAtom)
+  const setTags = useSetAtom(planningTagsAtom)
+
+  useEffect(() => {
+    let disposed = false
+    const latestRequest = { todos: 0, calendarEvents: 0, todoGroups: 0, calendarGroups: 0, tags: 0 }
+    const loadTodos = (): void => {
+      const requestId = ++latestRequest.todos
+      void window.electronAPI.listTodos().then((todos) => {
+        if (!disposed && requestId === latestRequest.todos) setTodos(todos)
+      }).catch((error: unknown) => console.error('[任务/日程] 加载 Todo 失败:', error))
+    }
+    const loadCalendarEvents = (): void => {
+      const requestId = ++latestRequest.calendarEvents
+      void window.electronAPI.listCalendarEvents().then((events) => {
+        if (!disposed && requestId === latestRequest.calendarEvents) setCalendarEvents(events)
+      }).catch((error: unknown) => console.error('[任务/日程] 加载日程失败:', error))
+    }
+    const loadTodoGroups = (): void => {
+      const requestId = ++latestRequest.todoGroups
+      void window.electronAPI.listPlanningGroups('todo').then((groups) => {
+        if (!disposed && requestId === latestRequest.todoGroups) setTodoGroups(groups)
+      }).catch((error: unknown) => console.error('[任务/日程] 加载 Todo 分组失败:', error))
+    }
+    const loadCalendarGroups = (): void => {
+      const requestId = ++latestRequest.calendarGroups
+      void window.electronAPI.listPlanningGroups('calendar').then((groups) => {
+        if (!disposed && requestId === latestRequest.calendarGroups) setCalendarGroups(groups)
+      }).catch((error: unknown) => console.error('[任务/日程] 加载日程分组失败:', error))
+    }
+    const loadTags = (): void => {
+      const requestId = ++latestRequest.tags
+      void window.electronAPI.listPlanningTags().then((tags) => {
+        if (!disposed && requestId === latestRequest.tags) setTags(tags)
+      }).catch((error: unknown) => console.error('[任务/日程] 加载标签失败:', error))
+    }
+    const load = (resources?: string[]): void => {
+      const includes = (resource: string): boolean => resources === undefined || resources.includes(resource)
+      if (includes('todos')) loadTodos()
+      if (includes('calendar_events')) loadCalendarEvents()
+      if (includes('todo_groups')) loadTodoGroups()
+      if (includes('calendar_groups')) loadCalendarGroups()
+      if (includes('tags')) loadTags()
+    }
+    load()
+    const unsubscribe = window.electronAPI.onPlanningChanged((change) => load(change.resources))
+    return () => { disposed = true; unsubscribe() }
+  }, [setCalendarEvents, setCalendarGroups, setTags, setTodoGroups, setTodos])
+
+  return null
+}
+
 function AutomationInitializer(): null {
   const setAutomations = useSetAtom(automationsAtom)
   const setAgentSessions = useSetAtom(agentSessionsAtom)
@@ -398,9 +563,16 @@ function NotificationsInitializer(): null {
 function DockBadgeInitializer(): null {
   const count = useAtomValue(dockBadgeCountAtom)
   const notificationsEnabled = useAtomValue(notificationsEnabledAtom)
-  const currentSessionId = useAtomValue(currentAgentSessionIdAtom)
+  const tabs = useAtomValue(tabsAtom)
+  const activeTabId = useAtomValue(activeTabIdAtom)
   const setUnviewedCompleted = useSetAtom(unviewedCompletedSessionIdsAtom)
   const badgeCount = notificationsEnabled ? count : 0
+  const activeAgentSessionId = useMemo(() => {
+    const activeTab = activeTabId ? tabs.find((tab) => tab.id === activeTabId) : null
+    return activeTab?.type === 'agent' || activeTab?.type === 'preview'
+      ? activeTab.sessionId
+      : null
+  }, [activeTabId, tabs])
 
   useEffect(() => {
     window.electronAPI.setDockBadgeCount(badgeCount).catch((error) => {
@@ -409,24 +581,27 @@ function DockBadgeInitializer(): null {
   }, [badgeCount])
 
   useEffect(() => {
-    const clearCurrentSessionBadge = (): void => {
-      if (!document.hasFocus() || !currentSessionId) return
+    const clearActiveSessionBadge = (): void => {
+      if (!document.hasFocus() || !activeAgentSessionId) return
+      // 以实际激活的 Agent/预览 Tab 为准。Scratch Pad 会保留 currentAgentSessionId，
+      // 不能仅据此把后台会话误判为已查看。
+      void window.electronAPI.agentIsland.markSessionViewed(activeAgentSessionId).catch(console.error)
       setUnviewedCompleted((prev) => {
-        if (!prev.has(currentSessionId)) return prev
+        if (!prev.has(activeAgentSessionId)) return prev
         const next = new Set(prev)
-        next.delete(currentSessionId)
+        next.delete(activeAgentSessionId)
         return next
       })
     }
 
-    clearCurrentSessionBadge()
-    window.addEventListener('focus', clearCurrentSessionBadge)
-    document.addEventListener('visibilitychange', clearCurrentSessionBadge)
+    clearActiveSessionBadge()
+    window.addEventListener('focus', clearActiveSessionBadge)
+    document.addEventListener('visibilitychange', clearActiveSessionBadge)
     return () => {
-      window.removeEventListener('focus', clearCurrentSessionBadge)
-      document.removeEventListener('visibilitychange', clearCurrentSessionBadge)
+      window.removeEventListener('focus', clearActiveSessionBadge)
+      document.removeEventListener('visibilitychange', clearActiveSessionBadge)
     }
-  }, [currentSessionId, setUnviewedCompleted])
+  }, [activeAgentSessionId, setUnviewedCompleted])
 
   return null
 }
@@ -440,14 +615,16 @@ function UiPreferencesInitializer(): null {
   const setStickyUserMessageEnabled = useSetAtom(stickyUserMessageEnabledAtom)
   const setLongTextPasteAsAttachmentEnabled = useSetAtom(longTextPasteAsAttachmentEnabledAtom)
   const setRichTextRenderingEnabled = useSetAtom(richTextRenderingEnabledAtom)
+  const setSessionHoverPreviewEnabled = useSetAtom(sessionHoverPreviewEnabledAtom)
 
   useEffect(() => {
     initializeUiPreferences(
       setStickyUserMessageEnabled,
       setLongTextPasteAsAttachmentEnabled,
-      setRichTextRenderingEnabled
+      setRichTextRenderingEnabled,
+      setSessionHoverPreviewEnabled
     )
-  }, [setStickyUserMessageEnabled, setLongTextPasteAsAttachmentEnabled, setRichTextRenderingEnabled])
+  }, [setStickyUserMessageEnabled, setLongTextPasteAsAttachmentEnabled, setRichTextRenderingEnabled, setSessionHoverPreviewEnabled])
 
   return null
 }
@@ -884,6 +1061,108 @@ function ScratchPadPersistence(): null {
   return null
 }
 
+/**
+ * Canvas 画布持久化组件
+ *
+ * 从磁盘加载 canvas.canvas（JSON Canvas 格式字符串）到 canvasContentAtom，
+ * 监听变化防抖自动保存。固定 Tab 注入由 ScratchPadPersistence 的 ensureScratchPadTab 一并处理。
+ */
+function CanvasPersistence(): null {
+  const store = useStore()
+  const loadedRef = useRef(false)
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout>>()
+
+  // 启动：加载 canvas.canvas 内容（直接存 JSON 字符串，无需转换）
+  useEffect(() => {
+    const init = async (): Promise<void> => {
+      try {
+        const loaded = window.electronAPI.loadCanvas
+          ? await window.electronAPI.loadCanvas()
+          : ''
+        store.set(canvasContentAtom, loaded)
+        store.set(canvasLoadedAtom, true)
+        console.log('[Canvas] 初始化完成，已加载内容:', !!loaded)
+      } catch (err) {
+        console.error('[Canvas] 初始化失败:', err)
+        store.set(canvasLoadedAtom, true)
+      } finally {
+        loadedRef.current = true
+      }
+    }
+    init()
+  }, [store])
+
+  // 自动保存：监听 canvasContentAtom 变化，防抖写入磁盘
+  useEffect(() => {
+    const save = (): void => {
+      const content = store.get(canvasContentAtom)
+      if (window.electronAPI.saveCanvas) {
+        window.electronAPI.saveCanvas(content).then((ok) => {
+          if (!ok) console.error('[Canvas] 保存失败')
+        }).catch(console.error)
+      }
+    }
+
+    const debouncedSave = (): void => {
+      if (!loadedRef.current) return
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+      saveTimerRef.current = setTimeout(save, 500)
+    }
+
+    const unsub = store.sub(canvasContentAtom, debouncedSave)
+
+    const handleBeforeUnload = (): void => {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+      const content = store.get(canvasContentAtom)
+      if (window.electronAPI.saveCanvasSync) {
+        window.electronAPI.saveCanvasSync(content)
+      }
+    }
+    window.addEventListener('beforeunload', handleBeforeUnload)
+
+    // 外部修改检测：canvas 文件被 Proma 之外的程序（如 Obsidian）改动时提示
+    let externalUnsub: (() => void) | undefined
+    if (window.electronAPI.onCanvasExternalChanged) {
+      externalUnsub = window.electronAPI.onCanvasExternalChanged((incoming) => {
+        const current = store.get(canvasContentAtom)
+        if (incoming === current) return
+        toast.warning('Canvas 文件被外部修改', {
+          description: '检测到 Obsidian 等程序改动了此文件。重新加载会丢弃当前未保存的改动。',
+          duration: Infinity,
+          action: {
+            label: '重新加载',
+            onClick: () => {
+              loadedRef.current = false
+              store.set(canvasLoadedAtom, false)
+              store.set(canvasContentAtom, incoming)
+              store.set(canvasLoadedAtom, true)
+              loadedRef.current = true
+            },
+          },
+          cancel: {
+            label: '保留当前',
+            onClick: () => {
+              // 用当前内容覆盖磁盘，压过外部改动
+              if (window.electronAPI.saveCanvas) {
+                window.electronAPI.saveCanvas(store.get(canvasContentAtom)).catch(console.error)
+              }
+            },
+          },
+        })
+      })
+    }
+
+    return () => {
+      unsub()
+      externalUnsub?.()
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+      window.removeEventListener('beforeunload', handleBeforeUnload)
+    }
+  }, [store])
+
+  return null
+}
+
 // ===== 快速任务窗口：轻量渲染 =====
 if (isQuickTaskWindow) {
   import('./components/quick-task/QuickTaskApp').then(({ QuickTaskApp }) => {
@@ -894,13 +1173,12 @@ if (isQuickTaskWindow) {
       </React.StrictMode>
     )
   })
-} else if (isVoiceDictationWindow) {
-  import('./components/voice-dictation/VoiceDictationApp').then(({ VoiceDictationApp }) => {
+} else if (isVoiceDictationIndicatorWindow) {
+  import('./components/voice-dictation/VoiceDictationIndicatorApp').then(({ VoiceDictationIndicatorApp }) => {
     ReactDOM.createRoot(document.getElementById('root')!).render(
       <React.StrictMode>
         <ThemeInitializer />
-        <VoiceDictationApp />
-        <Toaster position="bottom-right" />
+        <VoiceDictationIndicatorApp />
       </React.StrictMode>
     )
   })
@@ -912,6 +1190,39 @@ if (isQuickTaskWindow) {
         <MarkdownFontSizeInitializer />
         <DetachedPreviewApp />
         <Toaster position="bottom-right" />
+      </React.StrictMode>
+    )
+  })
+} else if (isPlanningWindow) {
+  import('./components/planning/PlanningWindowApp').then(({ PlanningWindowApp }) => {
+    ReactDOM.createRoot(document.getElementById('root')!).render(
+      <React.StrictMode>
+        <ThemeInitializer />
+        <AgentSettingsInitializer />
+        <PlanningShortcutInitializer />
+        <AutomationInitializer />
+        <PlanningInitializer />
+        <PlanningWindowApp />
+        <Toaster position="bottom-right" />
+      </React.StrictMode>
+    )
+  })
+} else if (isWorkspaceMemoryWindow) {
+  import('./components/agent-skills/WorkspaceMemoryWindowApp').then(({ WorkspaceMemoryWindowApp }) => {
+    ReactDOM.createRoot(document.getElementById('root')!).render(
+      <React.StrictMode>
+        <ThemeInitializer />
+        <WorkspaceMemoryWindowApp />
+        <Toaster position="bottom-right" />
+      </React.StrictMode>
+    )
+  })
+} else if (isAgentStatusHoverWindow) {
+  import('./components/agent-status-hover/HoverPanel').then(({ HoverPanel }) => {
+    ReactDOM.createRoot(document.getElementById('root')!).render(
+      <React.StrictMode>
+        <ThemeInitializer />
+        <HoverPanel />
       </React.StrictMode>
     )
   })
@@ -930,10 +1241,13 @@ if (isQuickTaskWindow) {
       <ChatToolInitializer />
       <UpdaterInitializer />
       <AutomationInitializer />
+      <PlanningInitializer />
       <FeishuInitializer />
       <DingTalkInitializer />
       <TabStatePersistenceInitializer />
       <ScratchPadPersistence />
+      <VoiceDictationApp embedded />
+      <CanvasPersistence />
       <GlobalShortcuts />
       <TabSwitcher />
       <App />

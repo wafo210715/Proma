@@ -1,7 +1,8 @@
 /**
  * 存储管理服务
  *
- * 提供磁盘用量统计、孤儿数据检测和清理功能。
+ * 提供磁盘用量统计和临时文件清理功能。
+ * 孤儿数据清理因可能误伤用户工作资料而默认关闭。
  * 由设置面板"磁盘管理"Tab 和启动时自动清理逻辑调用。
  */
 
@@ -82,16 +83,23 @@ const SKIP_DIRS = new Set([
 const MAX_FILE_SCAN = 100_000
 const MAX_ORPHAN_ITEM_PREVIEW = 80
 
+// 孤儿目录无法可靠区分用户仍需保留的会话工作资料，默认不展示也不允许删除。
+const ORPHAN_DATA_CLEANUP_ENABLED = false
+
 const WORKSPACE_METADATA_DIRS = new Set([
   'workspace-files',
   'skills',
   'skills-inactive',
   '.claude',
-  '.claude-plugin',
 ])
 
-const PRESERVED_ORPHAN_SESSION_DIRS = new Set([
+// 历史会话保留 `.context/`；新 workbench 根布局保留私有任务资料，附件仍可清理。
+const PRESERVED_ORPHAN_SESSION_ENTRIES = new Set([
   '.context',
+  'plan',
+  'todo.md',
+  'note.md',
+  'handoff.md',
 ])
 
 function isWorkspaceMetadataDir(entryName: string): boolean {
@@ -177,7 +185,7 @@ async function cleanupOrphanSessionWorkspaceDir(sessionDir: string): Promise<num
   try {
     const entries = await fsPromises.readdir(sessionDir)
     for (const entry of entries) {
-      if (PRESERVED_ORPHAN_SESSION_DIRS.has(entry)) continue
+      if (PRESERVED_ORPHAN_SESSION_ENTRIES.has(entry)) continue
       const entryPath = join(sessionDir, entry)
       try {
         const stat = await fsPromises.lstat(entryPath)
@@ -209,15 +217,6 @@ function getActiveSessionIds(): Set<string> {
   return new Set(listAgentSessions().map((s) => s.id))
 }
 
-function getActiveSdkSessionIds(): Set<string> {
-  const ids = new Set<string>()
-  for (const s of listAgentSessions()) {
-    if (s.sdkSessionId) ids.add(s.sdkSessionId)
-    if (s.forkSourceSdkSessionId) ids.add(s.forkSourceSdkSessionId)
-  }
-  return ids
-}
-
 function getActiveWorkspaceSlugs(): Set<string> {
   return new Set(listAgentWorkspaces().map((w) => w.slug))
 }
@@ -240,7 +239,7 @@ async function calcAgentSessionsCategory(): Promise<StorageCategory> {
           const id = basename(file, '.jsonl')
           bytes += stat.size
           count++
-          if (!activeIds.has(id)) {
+          if (ORPHAN_DATA_CLEANUP_ENABLED && !activeIds.has(id)) {
             orphanBytes += stat.size
             orphanCount++
             orphanItemsTruncated = addOrphanItem(orphanItems, {
@@ -267,76 +266,16 @@ async function calcAgentSessionsCategory(): Promise<StorageCategory> {
 
 async function calcSdkConfigCategory(): Promise<StorageCategory> {
   const sdkDir = getSdkConfigDir()
-  const activeSdkIds = getActiveSdkSessionIds()
   let bytes = 0, count = 0, orphanBytes = 0, orphanCount = 0
   const orphanItems: StorageOrphanItem[] = []
   let orphanItemsTruncated = false
-
-  const projectsDir = join(sdkDir, 'projects')
-  if (existsSync(projectsDir)) {
-    try {
-      const hashDirs = await fsPromises.readdir(projectsDir)
-      for (const hashDir of hashDirs) {
-        const projPath = join(projectsDir, hashDir)
-        try {
-          if (!(await fsPromises.lstat(projPath)).isDirectory()) continue
-          const files = await fsPromises.readdir(projPath)
-          for (const file of files) {
-            if (!file.endsWith('.jsonl')) continue
-            const fullPath = join(projPath, file)
-            try {
-              const stat = await fsPromises.stat(fullPath)
-              const sdkId = basename(file, '.jsonl')
-              bytes += stat.size
-              count++
-              if (!activeSdkIds.has(sdkId)) {
-                orphanBytes += stat.size
-                orphanCount++
-                orphanItemsTruncated = addOrphanItem(orphanItems, {
-                  kind: 'file',
-                  path: displayStoragePath(fullPath),
-                  bytes: stat.size,
-                  count: 1,
-                }) || orphanItemsTruncated
-              }
-            } catch { /* skip */ }
-          }
-        } catch { /* skip */ }
-      }
-    } catch { /* skip */ }
-  }
-
-  const fileHistoryDir = join(sdkDir, 'file-history')
-  if (existsSync(fileHistoryDir)) {
-    try {
-      const sdkIds = await fsPromises.readdir(fileHistoryDir)
-      for (const sdkId of sdkIds) {
-        const histPath = join(fileHistoryDir, sdkId)
-        try {
-          if (!(await fsPromises.lstat(histPath)).isDirectory()) continue
-          const sub = await getDirSize(histPath)
-          bytes += sub.bytes
-          count += sub.count
-          if (!activeSdkIds.has(sdkId)) {
-            orphanBytes += sub.bytes
-            orphanCount += sub.count
-            orphanItemsTruncated = addOrphanItem(orphanItems, {
-              kind: 'directory',
-              path: displayStoragePath(histPath),
-              bytes: sub.bytes,
-              count: sub.count,
-            }) || orphanItemsTruncated
-          }
-        } catch { /* skip */ }
-      }
-    } catch { /* skip */ }
-  }
 
   // sdk-config 其他子目录（sessions, backups 等）
   if (existsSync(sdkDir)) {
     try {
       const entries = await fsPromises.readdir(sdkDir)
       for (const entry of entries) {
+        // Claude legacy artifacts are intentionally retained but no longer managed by Pi.
         if (entry === 'projects' || entry === 'file-history') continue
         const fullPath = join(sdkDir, entry)
         try {
@@ -402,8 +341,8 @@ async function calcWorkspacesCategory(): Promise<StorageCategory> {
               bytes += sub.bytes
               count += sub.count
               // session 目录的 ID 不在活跃列表中 → 孤儿
-              if (!activeIds.has(entry) && !activeSlugs.has(entry)) {
-                const cleanable = await getDirSize(entryPath, { skipTopLevelDirs: PRESERVED_ORPHAN_SESSION_DIRS })
+              if (ORPHAN_DATA_CLEANUP_ENABLED && !activeIds.has(entry) && !activeSlugs.has(entry)) {
+                const cleanable = await getDirSize(entryPath, { skipTopLevelDirs: PRESERVED_ORPHAN_SESSION_ENTRIES })
                 if (cleanable.count > 0) {
                   orphanBytes += cleanable.bytes
                   orphanCount++
@@ -423,7 +362,7 @@ async function calcWorkspacesCategory(): Promise<StorageCategory> {
   }
 
   return {
-    label: '工作区文件',
+    label: '项目与会话数据',
     key: 'workspaces',
     bytes, count,
     hasOrphans: orphanCount > 0,
@@ -554,61 +493,6 @@ async function cleanupOrphanAgentSessions(): Promise<CleanupResult> {
   return { freedBytes, deletedCount, errors }
 }
 
-async function cleanupOrphanSdkConfig(): Promise<CleanupResult> {
-  const sdkDir = getSdkConfigDir()
-  const activeSdkIds = getActiveSdkSessionIds()
-  let freedBytes = 0, deletedCount = 0
-  const errors: string[] = []
-
-  const projectsDir = join(sdkDir, 'projects')
-  if (existsSync(projectsDir)) {
-    try {
-      const hashDirs = await fsPromises.readdir(projectsDir)
-      for (const hashDir of hashDirs) {
-        const projPath = join(projectsDir, hashDir)
-        try {
-          if (!(await fsPromises.lstat(projPath)).isDirectory()) continue
-          const files = await fsPromises.readdir(projPath)
-          for (const file of files) {
-            if (!file.endsWith('.jsonl')) continue
-            const sdkId = basename(file, '.jsonl')
-            if (activeSdkIds.has(sdkId)) continue
-            const freed = safeUnlink(join(projPath, file))
-            if (freed > 0) { freedBytes += freed; deletedCount++ }
-          }
-          // 若目录为空则删除
-          const remaining = await fsPromises.readdir(projPath)
-          if (remaining.length === 0) {
-            rmSyncWithRetry(projPath, { recursive: true, force: true })
-          }
-        } catch { /* skip */ }
-      }
-    } catch (e) {
-      errors.push(`清理孤儿 SDK projects 失败: ${e}`)
-    }
-  }
-
-  const fileHistoryDir = join(sdkDir, 'file-history')
-  if (existsSync(fileHistoryDir)) {
-    try {
-      const sdkIds = await fsPromises.readdir(fileHistoryDir)
-      for (const sdkId of sdkIds) {
-        if (activeSdkIds.has(sdkId)) continue
-        const histPath = join(fileHistoryDir, sdkId)
-        try {
-          if (!(await fsPromises.lstat(histPath)).isDirectory()) continue
-          const freed = await safeRmDir(histPath)
-          if (freed > 0) { freedBytes += freed; deletedCount++ }
-        } catch { /* skip */ }
-      }
-    } catch (e) {
-      errors.push(`清理孤儿 file-history 失败: ${e}`)
-    }
-  }
-
-  return { freedBytes, deletedCount, errors }
-}
-
 async function cleanupOrphanWorkspaces(): Promise<CleanupResult> {
   const wsDir = getAgentWorkspacesDir()
   const activeIds = getActiveSessionIds()
@@ -638,7 +522,7 @@ async function cleanupOrphanWorkspaces(): Promise<CleanupResult> {
       } catch { /* skip */ }
     }
   } catch (e) {
-    errors.push(`清理孤儿工作区目录失败: ${e}`)
+    errors.push(`清理孤儿项目配置目录失败: ${e}`)
   }
 
   return { freedBytes, deletedCount, errors }
@@ -647,7 +531,6 @@ async function cleanupOrphanWorkspaces(): Promise<CleanupResult> {
 function cleanupArchivedSessions(beforeDays: number): CleanupResult {
   const cutoff = Date.now() - beforeDays * 24 * 60 * 60 * 1000
   const sessions = listAgentSessions()
-  const sdkDir = getSdkConfigDir()
   let freedBytes = 0, deletedCount = 0
   const errors: string[] = []
 
@@ -660,17 +543,6 @@ function cleanupArchivedSessions(beforeDays: number): CleanupResult {
       const freed = safeUnlink(msgPath)
       if (freed > 0) { freedBytes += freed; deletedCount++ }
     }
-
-    // 清理 SDK file-history（同步删除，safeRmDir 的同步路径）
-    if (session.sdkSessionId) {
-      const histDir = join(sdkDir, 'file-history', session.sdkSessionId)
-      if (existsSync(histDir)) {
-        try {
-          rmSyncWithRetry(histDir, { recursive: true, force: true })
-          deletedCount++
-        } catch { /* skip */ }
-      }
-    }
   }
 
   if (freedBytes > 0) {
@@ -680,6 +552,14 @@ function cleanupArchivedSessions(beforeDays: number): CleanupResult {
 }
 
 export async function cleanupStorage(options: CleanupOptions): Promise<CleanupResult> {
+  if (options.orphansOnly && !ORPHAN_DATA_CLEANUP_ENABLED) {
+    return {
+      freedBytes: 0,
+      deletedCount: 0,
+      errors: ['孤儿数据清理功能已默认关闭，未删除任何数据'],
+    }
+  }
+
   let totalFreed = 0, totalDeleted = 0
   const allErrors: string[] = []
 
@@ -698,7 +578,6 @@ export async function cleanupStorage(options: CleanupOptions): Promise<CleanupRe
     if (options.orphansOnly) {
       switch (cat) {
         case 'agent-sessions': merge(await cleanupOrphanAgentSessions()); break
-        case 'sdk-config': merge(await cleanupOrphanSdkConfig()); break
         case 'workspaces': merge(await cleanupOrphanWorkspaces()); break
       }
     } else if (options.archivedBeforeDays > 0) {

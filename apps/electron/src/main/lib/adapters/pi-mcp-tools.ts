@@ -11,15 +11,18 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { AgentToolResult } from '@earendil-works/pi-agent-core'
 import type { TextContent, ImageContent } from '@earendil-works/pi-ai'
 import type { TSchema } from 'typebox'
 import { Type } from 'typebox'
+import { sanitizeToolResultImageContent } from '../image-content-validation'
 
 const DEFAULT_MCP_REQUEST_TIMEOUT_MS = 60_000
 const DEFAULT_MCP_STARTUP_TIMEOUT_MS = 30_000
+const OPTIONAL_MCP_BOOTSTRAP_TIMEOUT_MS = 500
+const HTTP_SESSION_REJECTION_PATTERN = /missing session id|no valid session id provided|mcp-session-id header is required/i
 
 interface PiMcpServerConfig {
   type?: unknown
@@ -30,6 +33,7 @@ interface PiMcpServerConfig {
   headers?: unknown
   startup_timeout_sec?: unknown
   timeout?: unknown
+  required?: unknown
 }
 
 type PiMcpServers = Record<string, Record<string, unknown>>
@@ -41,7 +45,22 @@ type McpCallToolResult = Awaited<ReturnType<Client['callTool']>>
 interface McpConnection {
   client: Client
   transport: Transport
+  close: () => Promise<void>
   tools?: McpToolInfo[]
+  toolsPromise?: Promise<McpToolInfo[]>
+}
+
+interface McpConnectionEntry {
+  promise: Promise<McpConnection>
+  activeLeases: number
+  stale: boolean
+  closed: boolean
+}
+
+interface McpConnectionLease {
+  key: string
+  entry: McpConnectionEntry
+  connection: McpConnection
 }
 
 interface McpToolBinding {
@@ -197,26 +216,51 @@ function convertMcpResult(result: McpCallToolResult): AgentToolResult<unknown> {
   }
 
   return {
-    content,
+    content: sanitizeToolResultImageContent(content),
     details: result,
   } as AgentToolResult<unknown>
 }
 
+/**
+ * Optional MCP 服务首次连接在后台继续；首轮消息最多为它等待短暂的 bootstrap 窗口。
+ * 连接完成后，manager 会缓存 tools，后续回合直接复用，不会重复冷启动 stdio 进程。
+ */
+async function listOptionalMcpTools(
+  manager: PiMcpClientManager,
+  serverName: string,
+  config: PiMcpServerConfig,
+): Promise<McpToolInfo[] | undefined> {
+  const toolsPromise = manager.listTools(serverName, config)
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      toolsPromise,
+      new Promise<undefined>((resolve) => {
+        timeout = setTimeout(() => resolve(undefined), OPTIONAL_MCP_BOOTSTRAP_TIMEOUT_MS)
+      }),
+    ])
+  } finally {
+    if (timeout) clearTimeout(timeout)
+  }
+}
+
 class PiMcpClientManager {
-  private readonly connections = new Map<string, Promise<McpConnection>>()
+  private readonly connections = new Map<string, McpConnectionEntry>()
+  private lifecycleGeneration = 0
 
   /**
    * 关闭所有活跃的 MCP 连接，释放 stdio 子进程和网络资源。
    * 应在 app quit 或 agent session 结束时调用。
    */
   async dispose(): Promise<void> {
-    const entries = [...this.connections.entries()]
+    this.lifecycleGeneration += 1
+    const entries = [...this.connections.values()]
     this.connections.clear()
     await Promise.allSettled(
-      entries.map(async ([, connPromise]) => {
+      entries.map(async (entry) => {
         try {
-          const conn = await connPromise
-          await conn.transport.close()
+          const conn = await entry.promise
+          await conn.close()
         } catch {
           // 连接本身就失败了，忽略
         }
@@ -225,54 +269,179 @@ class PiMcpClientManager {
   }
 
   async listTools(serverName: string, config: PiMcpServerConfig): Promise<McpToolInfo[]> {
-    const connection = await this.getConnection(serverName, config)
-    if (connection.tools) return connection.tools
-    const result = await connection.client.listTools(undefined, { timeout: DEFAULT_MCP_REQUEST_TIMEOUT_MS })
-    connection.tools = result.tools
-    return result.tools
+    return this.executeWithSessionRecovery(serverName, config, undefined, async (connection) => {
+      if (connection.tools) return connection.tools
+      if (!connection.toolsPromise) {
+        connection.toolsPromise = connection.client.listTools(undefined, { timeout: DEFAULT_MCP_REQUEST_TIMEOUT_MS })
+          .then((result) => {
+            connection.tools = result.tools
+            return result.tools
+          })
+          .catch((error) => {
+            connection.toolsPromise = undefined
+            throw error
+          })
+      }
+      return connection.toolsPromise
+    })
   }
 
   async callTool(serverName: string, config: PiMcpServerConfig, toolName: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<McpCallToolResult> {
-    const connection = await this.getConnection(serverName, config)
-    return connection.client.callTool(
-      { name: toolName, arguments: args },
-      undefined,
-      { signal, timeout: DEFAULT_MCP_REQUEST_TIMEOUT_MS, resetTimeoutOnProgress: true },
-    )
+    return this.executeWithSessionRecovery(serverName, config, signal, (connection) =>
+      connection.client.callTool(
+        { name: toolName, arguments: args },
+        undefined,
+        { signal, timeout: DEFAULT_MCP_REQUEST_TIMEOUT_MS, resetTimeoutOnProgress: true },
+      ))
   }
 
-  private async getConnection(serverName: string, config: PiMcpServerConfig): Promise<McpConnection> {
+  private async executeWithSessionRecovery<T>(
+    serverName: string,
+    config: PiMcpServerConfig,
+    signal: AbortSignal | undefined,
+    operation: (connection: McpConnection) => Promise<T>,
+  ): Promise<T> {
+    const lifecycleGeneration = this.lifecycleGeneration
+    const lease = await this.acquireConnection(serverName, config)
+    let leaseReleased = false
+    try {
+      try {
+        return await operation(lease.connection)
+      } catch (error) {
+        if (!this.isRejectedHttpSession(error, lease.connection)) {
+          throw error
+        }
+
+        this.markConnectionStale(lease)
+        await this.releaseConnection(lease)
+        leaseReleased = true
+        if (signal?.aborted || this.lifecycleGeneration !== lifecycleGeneration) throw error
+
+        console.info(`[Pi MCP] MCP 服务器 ${serverName} Session 已失效，正在重新握手`)
+
+        const replacement = await this.acquireConnection(serverName, config)
+        try {
+          try {
+            return await operation(replacement.connection)
+          } catch (retryError) {
+            if (this.isRejectedHttpSession(retryError, replacement.connection)) {
+              this.markConnectionStale(replacement)
+            }
+            throw retryError
+          }
+        } finally {
+          await this.releaseConnection(replacement)
+        }
+      }
+    } finally {
+      if (!leaseReleased) {
+        await this.releaseConnection(lease)
+      }
+    }
+  }
+
+  private isRejectedHttpSession(error: unknown, connection: McpConnection): boolean {
+    if (!(connection.transport instanceof StreamableHTTPClientTransport)) return false
+    if (connection.transport.sessionId === undefined) return false
+    if (!(error instanceof StreamableHTTPError)) return false
+    if (error.code === 404) return true
+    return error.code === 400 && HTTP_SESSION_REJECTION_PATTERN.test(error.message)
+  }
+
+  private async acquireConnection(serverName: string, config: PiMcpServerConfig): Promise<McpConnectionLease> {
     const key = `${serverName}:${configHash(config)}`
-    const existing = this.connections.get(key)
-    if (existing) return existing
+    let entry = this.connections.get(key)
 
-    const connectionPromise = this.createConnection(serverName, config, key).catch((error) => {
-      this.connections.delete(key)
+    if (!entry) {
+      let createdEntry!: McpConnectionEntry
+      const promise = this.createConnection(serverName, config, () => {
+        createdEntry.stale = true
+        createdEntry.closed = true
+        if (this.connections.get(key) === createdEntry) {
+          this.connections.delete(key)
+        }
+      }).catch((error) => {
+        createdEntry.stale = true
+        if (this.connections.get(key) === createdEntry) {
+          this.connections.delete(key)
+        }
+        throw error
+      })
+      createdEntry = {
+        promise,
+        activeLeases: 0,
+        stale: false,
+        closed: false,
+      }
+      entry = createdEntry
+      this.connections.set(key, entry)
+    }
+
+    entry.activeLeases += 1
+    try {
+      return {
+        key,
+        entry,
+        connection: await entry.promise,
+      }
+    } catch (error) {
+      entry.activeLeases -= 1
       throw error
-    })
-    this.connections.set(key, connectionPromise)
-    return connectionPromise
+    }
   }
 
-  private async createConnection(serverName: string, config: PiMcpServerConfig, key: string): Promise<McpConnection> {
+  private markConnectionStale(lease: McpConnectionLease): void {
+    lease.entry.stale = true
+    if (this.connections.get(lease.key) === lease.entry) {
+      this.connections.delete(lease.key)
+    }
+  }
+
+  private async releaseConnection(lease: McpConnectionLease): Promise<void> {
+    lease.entry.activeLeases -= 1
+    if (!lease.entry.stale || lease.entry.closed || lease.entry.activeLeases > 0) return
+    try {
+      await lease.connection.close()
+    } catch {
+      // Session 已由服务端终止，关闭旧 transport 失败不影响重新握手。
+    }
+  }
+
+  private async createConnection(
+    serverName: string,
+    config: PiMcpServerConfig,
+    onClose: () => void,
+  ): Promise<McpConnection> {
     const transport = createTransport(serverName, config)
     if (!transport) throw new Error(`无法创建 MCP transport: ${serverName}`)
 
     const client = new Client({ name: 'proma-pi-agent-mcp-bridge', version: '0.1.0' }, { capabilities: {} })
     await client.connect(transport, { timeout: getTimeoutMs(config) })
 
+    let closing = false
+
     const previousOnError = transport.onerror
     transport.onerror = (error) => {
       previousOnError?.(error)
-      console.warn(`[Pi MCP] MCP 服务器 ${serverName} transport error:`, error)
+      if (!closing) {
+        console.warn(`[Pi MCP] MCP 服务器 ${serverName} transport error:`, error)
+      }
     }
     const previousOnClose = transport.onclose
     transport.onclose = () => {
+      closing = true
       previousOnClose?.()
-      this.connections.delete(key)
+      onClose()
     }
 
-    return { client, transport }
+    return {
+      client,
+      transport,
+      close: async () => {
+        closing = true
+        await transport.close()
+      },
+    }
   }
 }
 
@@ -315,7 +484,13 @@ export async function buildPiMcpTools(mcpServers: PiMcpServers): Promise<ToolDef
   const results = await Promise.allSettled(
     entries.map(async ([serverName, rawConfig]) => {
       const config = rawConfig as PiMcpServerConfig
-      const mcpTools = await manager.listTools(serverName, config)
+      const mcpTools = config.required === false
+        ? await listOptionalMcpTools(manager, serverName, config)
+        : await manager.listTools(serverName, config)
+      if (!mcpTools) {
+        console.info(`[Pi MCP] 可选 MCP 服务器 ${serverName} 尚在后台启动，本回合跳过`)
+        return { serverName, config, mcpTools: [] }
+      }
       return { serverName, config, mcpTools }
     }),
   )

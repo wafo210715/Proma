@@ -1,7 +1,7 @@
 /**
  * DiffTabContent — 单文件 Diff 或纯文件预览内容
  *
- * previewOnly=true 时：代码高亮预览（@pierre/diffs File）或 Markdown 渲染
+ * previewOnly=true 时：代码高亮预览（@pierre/diffs File）、Markdown 或 HTML 渲染
  * previewOnly=false（默认）：显示 git diff（旧版本 vs 磁盘）
  */
 
@@ -27,6 +27,7 @@ import {
   selectedModelAtom,
 } from '@/atoms/chat-atoms'
 import { markdownTocOpenAtom } from '@/atoms/markdown-toc'
+import { useFocusAgentSessionInput } from '@/hooks/useFocusAgentSessionInput'
 import { useShortcut } from '@/hooks/useShortcut'
 import { initShortcutRegistry } from '@/lib/shortcut-registry'
 import { DiffView } from './DiffView'
@@ -38,8 +39,24 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { PIERRE_FILE_CSS } from '@/components/agent/tool-result-renderers/pierre-styles'
 import { SelectionActionPopover } from '@/components/selection/SelectionActionPopover'
 import { SELECTION_ACTION_POPOVER_SELECTOR } from '@/lib/quoted-selection'
+import { copyTextToClipboard } from '@/lib/clipboard'
+import {
+  clearMarkdownEditorStateForSession,
+  createMarkdownEditorCacheKey,
+  createMarkdownEditorViewState,
+  enqueueMarkdownEditorSave,
+  getMarkdownEditorStateSessionEpoch,
+  getMarkdownEditorViewState,
+  isMarkdownEditorOwnerCurrent,
+  canPersistMarkdownEditorState,
+  setMarkdownEditorViewState,
+  type MarkdownEditorOwner,
+  type MarkdownEditorViewState,
+  type MarkdownScrollPosition,
+} from '@/lib/markdown-editor-state'
 
 const MD_EXTS = new Set(['.md', '.markdown'])
+const HTML_EXTS = new Set(['.html', '.htm'])
 const PLAIN_TEXT_EDIT_EXTS = new Set(['.txt', '.text', '.log'])
 const PDF_EXTS = new Set(['.pdf'])
 const DOCX_EXTS = new Set(['.docx'])
@@ -66,6 +83,10 @@ type CacheEntry = {
   docxHtml?: string
   officeHtml?: string
   officeText?: string
+  /** HTML 预览的目录级 token URL，允许加载同目录相对资源 */
+  htmlPreviewUrl?: string
+  /** 二进制或其他不可安全内联渲染的文件提示 */
+  unsupportedPreviewReason?: string
 }
 
 interface DeepSelection {
@@ -89,16 +110,16 @@ const MAX_PREVIEW_CHARS = 500_000
 /** 选中文本最大字符数（与 Bozeman DOM 模式一致） */
 const MAX_QUOTED_CHARS = 2000
 
-/** 滚动位置持久化：key = `${sessionId}:${filePath}` */
+/** 滚动位置持久化，按会话、路径与预览解析范围隔离。 */
 const scrollPositionCache = new Map<string, { top: number; left: number }>()
 
-function scrollCacheKey(sessionId: string, filePath: string): string {
-  return `${sessionId}:${filePath}`
+function scrollCacheKey(sessionId: string, filePath: string, scope = ''): string {
+  return `${sessionId}:${filePath}:${scope}`
 }
 
 /** 获取缓存的滚动位置 */
-export function getPreviewScrollPosition(sessionId: string, filePath: string): { top: number; left: number } | undefined {
-  return scrollPositionCache.get(scrollCacheKey(sessionId, filePath))
+export function getPreviewScrollPosition(sessionId: string, filePath: string, scope?: string): { top: number; left: number } | undefined {
+  return scrollPositionCache.get(scrollCacheKey(sessionId, filePath, scope))
 }
 
 /**
@@ -112,6 +133,7 @@ export function clearPreviewCacheForSession(sessionId: string): void {
   for (const key of contentCache.keys()) {
     if (key.startsWith(prefix)) contentCache.delete(key)
   }
+  clearMarkdownEditorStateForSession(sessionId)
 }
 function cacheGet(key: string): CacheEntry | undefined {
   const v = contentCache.get(key)
@@ -225,6 +247,10 @@ interface DiffTabContentProps {
   readOnly?: boolean
   /** 候选基础目录（previewOnly 模式下用于路径解析） */
   basePaths?: string[]
+  /** Managed Skill workspace slug for a relocatable relative path. */
+  workspaceSkillSlug?: string
+  /** Original absolute Skill entry path used as a legacy fallback. */
+  legacySkillFilePath?: string
   /** diff 模式下检测到内容为空（无差异）时回调，用于自动关闭预览面板 */
   onEmptyDiff?: () => void
   /** 由外层场景注入的额外工具按钮，例如默认应用打开、返回会话 */
@@ -233,20 +259,80 @@ interface DiffTabContentProps {
   baseRef?: string
 }
 
-export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewOnly, readOnly, basePaths, onEmptyDiff, toolbarActions, baseRef }: DiffTabContentProps): React.ReactElement {
+export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewOnly, readOnly, basePaths, workspaceSkillSlug, legacySkillFilePath, onEmptyDiff, toolbarActions, baseRef }: DiffTabContentProps): React.ReactElement {
+  const ext = getExtension(filePath)
+  const isMarkdown = previewOnly && MD_EXTS.has(ext)
+  const isHtml = previewOnly && HTML_EXTS.has(ext)
+  const isPlainTextEditable = previewOnly && PLAIN_TEXT_EDIT_EXTS.has(ext)
+  const isEditableText = isMarkdown || isPlainTextEditable
+  const isPdf = previewOnly && PDF_EXTS.has(ext)
+  const isDocx = previewOnly && DOCX_EXTS.has(ext)
+  const isOfficePreview = previewOnly && OFFICE_PREVIEW_EXTS.has(ext)
+  const isLegacyOffice = previewOnly && LEGACY_OFFICE_EXTS.has(ext)
+  const isImage = previewOnly && IMAGE_EXTS.has(ext)
+  const markdownEditorCacheKey = React.useMemo(
+    () => createMarkdownEditorCacheKey({ filePath, dirPath, gitRoot, basePaths }),
+    [basePaths, dirPath, filePath, gitRoot],
+  )
+  const initialMarkdownEditorState = React.useMemo(() => {
+    if (!isEditableText || readOnly) return undefined
+    return getMarkdownEditorViewState(sessionId, markdownEditorCacheKey)
+  }, [isEditableText, markdownEditorCacheKey, readOnly, sessionId])
+  const markdownEditorScrollScope = `${markdownEditorCacheKey}:${readOnly ? 'readonly' : 'editable'}`
+
   const [viewMode, setViewMode] = useAtom(agentDiffViewModeAtom)
   const [oldContent, setOldContent] = React.useState('')
   const [newContent, setNewContent] = React.useState('')
-  const [markdownEditing, setMarkdownEditing] = React.useState(false)
-  const [markdownSourceMode, setMarkdownSourceMode] = React.useState(false)
-  const [markdownDraft, setMarkdownDraft] = React.useState('')
+  const [unsupportedPreviewReason, setUnsupportedPreviewReason] = React.useState('')
+  const [markdownEditing, setMarkdownEditing] = React.useState(
+    () => Boolean(initialMarkdownEditorState?.editing),
+  )
+  const [markdownSourceMode, setMarkdownSourceMode] = React.useState(
+    () => Boolean(initialMarkdownEditorState?.editing && initialMarkdownEditorState.sourceMode && isMarkdown),
+  )
+  const [markdownDraft, setMarkdownDraft] = React.useState(
+    () => initialMarkdownEditorState?.draft ?? '',
+  )
   const [markdownSaving, setMarkdownSaving] = React.useState(false)
   const [autosaveStatus, setAutosaveStatus] = React.useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
-  const lastSavedDraftRef = React.useRef('')
+  const lastSavedDraftRef = React.useRef(initialMarkdownEditorState?.lastSavedDraft ?? '')
+  const markdownEditorStateRef = React.useRef<MarkdownEditorViewState>(
+    initialMarkdownEditorState ?? createMarkdownEditorViewState(),
+  )
+  const markdownEditorStateOwnerRef = React.useRef({ sessionId, cacheKey: markdownEditorCacheKey })
+  const markdownEditingRef = React.useRef(markdownEditing)
+  markdownEditingRef.current = markdownEditing
+  const activeMarkdownEditing = Boolean(markdownEditing && !Boolean(readOnly) && isEditableText)
+  const markdownOwnerSessionEpoch = getMarkdownEditorStateSessionEpoch(sessionId)
+  const ownerSignatureRef = React.useRef({ sessionId, cacheKey: markdownEditorCacheKey, readOnly: Boolean(readOnly), sessionEpoch: markdownOwnerSessionEpoch })
+  const markdownOwnerRef = React.useRef<MarkdownEditorOwner>({ sessionId, cacheKey: markdownEditorCacheKey, generation: 0, sessionEpoch: markdownOwnerSessionEpoch })
+  if (
+    ownerSignatureRef.current.sessionId !== sessionId
+    || ownerSignatureRef.current.cacheKey !== markdownEditorCacheKey
+    || ownerSignatureRef.current.readOnly !== Boolean(readOnly)
+    || ownerSignatureRef.current.sessionEpoch !== markdownOwnerSessionEpoch
+  ) {
+    markdownOwnerRef.current = {
+      sessionId,
+      cacheKey: markdownEditorCacheKey,
+      generation: markdownOwnerRef.current.generation + 1,
+      sessionEpoch: getMarkdownEditorStateSessionEpoch(sessionId),
+    }
+    ownerSignatureRef.current = { sessionId, cacheKey: markdownEditorCacheKey, readOnly: Boolean(readOnly), sessionEpoch: getMarkdownEditorStateSessionEpoch(sessionId) }
+  }
+  const ownerGeneration = markdownOwnerRef.current.generation
+  const componentMountedRef = React.useRef(true)
   const autosaveTimerRef = React.useRef<number | null>(null)
+  const sourceTextareaRef = React.useRef<HTMLTextAreaElement>(null)
+  const pendingPreviewScrollRestoreRef = React.useRef<MarkdownScrollPosition | null>(null)
+  const preserveScrollOnNextRefreshRef = React.useRef(false)
+  const [previewScrollRestoreVersion, setPreviewScrollRestoreVersion] = React.useState(0)
   const [docxHtml, setDocxHtml] = React.useState('')
   const [officeHtml, setOfficeHtml] = React.useState('')
   const [officeText, setOfficeText] = React.useState('')
+  // HTML 默认展示运行后的页面；用户可随时切换回源码高亮预览。
+  const [htmlPreviewUrl, setHtmlPreviewUrl] = React.useState('')
+  const [htmlSourceMode, setHtmlSourceMode] = React.useState(false)
   const [pdfSrc, setPdfSrc] = React.useState('')
   const [pdfZoom, setPdfZoom] = React.useState(100)
   const pdfIframeRef = React.useRef<HTMLIFrameElement>(null)
@@ -270,19 +356,11 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
   const [codeWrap, setCodeWrap] = useAtom(previewCodeWrapAtom)
   const [tocOpen, setTocOpen] = useAtom(markdownTocOpenAtom)
 
-  const ext = getExtension(filePath)
-  const isMarkdown = previewOnly && MD_EXTS.has(ext)
-  const isPlainTextEditable = previewOnly && PLAIN_TEXT_EDIT_EXTS.has(ext)
-  const isEditableText = isMarkdown || isPlainTextEditable
-  const isPdf = previewOnly && PDF_EXTS.has(ext)
-  const isDocx = previewOnly && DOCX_EXTS.has(ext)
-  const isOfficePreview = previewOnly && OFFICE_PREVIEW_EXTS.has(ext)
-  const isLegacyOffice = previewOnly && LEGACY_OFFICE_EXTS.has(ext)
-  const isImage = previewOnly && IMAGE_EXTS.has(ext)
   const canTogglePreviewWrap =
     previewOnly &&
-    !markdownEditing &&
+    !activeMarkdownEditing &&
     !isMarkdown &&
+    (!isHtml || htmlSourceMode) &&
     !isPdf &&
     !isImage &&
     !isDocx &&
@@ -314,9 +392,11 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
     oldLength: oldContent.length,
     docxLength: docxHtml.length,
     officeLength: officeHtml.length,
-    markdownEditing,
-    markdownSourceMode,
-  }), [docxHtml.length, filePath, loading, markdownEditing, markdownSourceMode, newContent.length, officeHtml.length, oldContent.length, previewOnly, viewMode])
+    htmlPreviewUrl,
+    htmlSourceMode,
+    markdownEditing: activeMarkdownEditing,
+    markdownSourceMode: activeMarkdownEditing && markdownSourceMode,
+  }), [docxHtml.length, filePath, loading, activeMarkdownEditing, markdownSourceMode, newContent.length, officeHtml.length, htmlPreviewUrl, htmlSourceMode, oldContent.length, previewOnly, viewMode])
 
   // 目录提取只需在「文件本身或其内容」变化时重建，避免 loading/编辑态切换造成的抖动
   const tocContentKey = React.useMemo(
@@ -333,6 +413,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
   const setSideChatMap = useSetAtom(agentSideChatMapAtom)
   const setSidePanelOpen = useSetAtom(agentSidePanelOpenAtom)
   const setSidePanelTabMap = useSetAtom(agentDiffPanelTabAtom)
+  const focusAgentSessionInput = useFocusAgentSessionInput()
   const [previewSelection, setPreviewSelection] = React.useState<PreviewTextSelection | null>(null)
   const filePathRef = React.useRef(filePath)
   filePathRef.current = filePath
@@ -357,7 +438,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
   /** 捕获预览面板中的文本选中，显示动作弹层 */
   const handleSelectionCapture = React.useCallback(() => {
     if (!previewOnly) return
-    if (markdownEditing) return
+    if (activeMarkdownEditing) return
     const container = scrollContainerRef.current
     if (!container) return
 
@@ -395,7 +476,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
     } else {
       dismissTruncationToast()
     }
-  }, [clearPreviewSelection, dismissTruncationToast, markdownEditing, previewOnly, sessionId])
+  }, [clearPreviewSelection, dismissTruncationToast, activeMarkdownEditing, previewOnly, sessionId])
 
   const scheduleSelectionCapture = React.useCallback((): void => {
     if (captureTimerRef.current != null) {
@@ -482,10 +563,14 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
 
   const fileAccess = React.useMemo(() => ({
     sessionId,
+    // 预览必须覆盖 Agent 实际操作的外部文件，与右侧文件面板保持一致。
+    unrestricted: true,
+    ...(workspaceSkillSlug ? { workspaceSkillSlug } : {}),
+    ...(legacySkillFilePath ? { legacySkillFilePath } : {}),
     // 历史工具调用的预览仅有相对 filePath；以当前 dirPath（通常是会话 CWD）补全解析上下文。
     // 绝对路径不追加该回退，避免失效路径按同名文件误命中会话目录。
     candidateBasePaths: getPreviewCandidateBasePaths(basePaths, isAbsoluteFilePath(filePath) ? undefined : dirPath),
-  }), [sessionId, basePaths, dirPath, filePath])
+  }), [sessionId, basePaths, dirPath, filePath, workspaceSkillSlug, legacySkillFilePath])
 
   const contentCacheScope = React.useMemo(() => JSON.stringify({
     dirPath,
@@ -519,16 +604,37 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
     for (const basePath of basePaths ?? []) {
       if (basePath && !candidateBasePaths.includes(basePath)) candidateBasePaths.push(basePath)
     }
-    return { sessionId, candidateBasePaths }
-  }, [basePaths, dirPath, filePath, sessionId])
+    return {
+      sessionId,
+      ...(workspaceSkillSlug ? { workspaceSkillSlug } : {}),
+      ...(legacySkillFilePath ? { legacySkillFilePath } : {}),
+      candidateBasePaths,
+    }
+  }, [basePaths, dirPath, filePath, sessionId, workspaceSkillSlug, legacySkillFilePath])
 
   // props 变化时立即清空内容状态，避免在 useEffect 执行前渲染旧数据
   React.useEffect(() => {
+    const restoredEditorState = !readOnly && isEditableText
+      ? getMarkdownEditorViewState(sessionId, markdownEditorCacheKey)
+      : undefined
+    const nextEditorState = restoredEditorState ?? createMarkdownEditorViewState()
+
+    markdownEditorStateRef.current = nextEditorState
+    markdownEditorStateOwnerRef.current = { sessionId, cacheKey: markdownEditorCacheKey }
+    if (restoredEditorState) {
+      scrollPositionCache.set(scrollCacheKey(sessionId, filePath, markdownEditorScrollScope), restoredEditorState.previewScroll)
+    }
+    lastSavedDraftRef.current = nextEditorState.lastSavedDraft
+    markdownEditingRef.current = Boolean(nextEditorState.editing && isEditableText && !readOnly)
+    pendingPreviewScrollRestoreRef.current = null
+
     setOldContent('')
     setNewContent('')
     setDocxHtml('')
     setOfficeHtml('')
     setOfficeText('')
+    setHtmlPreviewUrl('')
+    setHtmlSourceMode(false)
     setPdfSrc('')
     setPdfZoom(100)
     setImagePath('')
@@ -536,11 +642,12 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
     setImageZoom(0.25)
     setImageNaturalSize({ w: 0, h: 0 })
     setLoading(!isLegacyOffice)
-    setMarkdownEditing(false)
-    setMarkdownSourceMode(false)
-    setMarkdownDraft('')
+    setMarkdownEditing(Boolean(nextEditorState.editing && isEditableText && !readOnly))
+    setMarkdownSourceMode(Boolean(nextEditorState.editing && nextEditorState.sourceMode && isMarkdown && !readOnly))
+    setMarkdownDraft(nextEditorState.draft)
     setMarkdownSaving(false)
-  }, [filePath, sessionId, previewOnly, isLegacyOffice])
+    setAutosaveStatus('idle')
+  }, [filePath, sessionId, previewOnly, isLegacyOffice, isEditableText, isMarkdown, readOnly, markdownEditorCacheKey])
 
   // non-passive wheel listener for pinch-to-zoom on image
   React.useEffect(() => {
@@ -570,9 +677,96 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
   const lastNewContentRef = React.useRef('')
   const lastOldContentRef = React.useRef('')
 
-  // 滚动位置持久化 key（sessionId:filePath）。主加载 effect 在缓存未命中时
+  // 滚动位置持久化 key（会话、文件和预览解析范围）。主加载 effect 在缓存未命中时
   // 也会读它判断是否需要恢复滚动，故声明须早于该 effect。
-  const scrollKey = scrollCacheKey(sessionId, filePath)
+  const scrollKey = scrollCacheKey(sessionId, filePath, markdownEditorScrollScope)
+
+  if (
+    markdownEditorStateOwnerRef.current.sessionId === sessionId
+    && markdownEditorStateOwnerRef.current.cacheKey === markdownEditorCacheKey
+  ) {
+    markdownEditorStateRef.current = {
+      ...markdownEditorStateRef.current,
+      editing: markdownEditing,
+      sourceMode: markdownSourceMode,
+      draft: markdownDraft,
+      lastSavedDraft: lastSavedDraftRef.current,
+    }
+  }
+
+  const persistMarkdownEditorViewState = React.useCallback((state: MarkdownEditorViewState) => {
+    if (markdownOwnerRef.current.sessionId !== sessionId
+      || markdownOwnerRef.current.cacheKey !== markdownEditorCacheKey
+      || getMarkdownEditorStateSessionEpoch(sessionId) !== markdownOwnerRef.current.sessionEpoch) return
+    markdownEditorStateRef.current = state
+    markdownEditorStateOwnerRef.current = { sessionId, cacheKey: markdownEditorCacheKey }
+    setMarkdownEditorViewState(sessionId, markdownEditorCacheKey, state)
+  }, [markdownEditorCacheKey, sessionId])
+
+  const updateMarkdownEditorViewState = React.useCallback(
+    (update: (state: MarkdownEditorViewState) => MarkdownEditorViewState) => {
+      if (!canPersistMarkdownEditorState(isEditableText, Boolean(readOnly))) return
+      const nextState = update(markdownEditorStateRef.current)
+      persistMarkdownEditorViewState(nextState)
+    },
+    [isEditableText, persistMarkdownEditorViewState, readOnly],
+  )
+
+  React.useEffect(() => {
+    if (!canPersistMarkdownEditorState(isEditableText, Boolean(readOnly))) return
+    persistMarkdownEditorViewState(markdownEditorStateRef.current)
+  }, [isEditableText, markdownDraft, markdownEditing, markdownSourceMode, persistMarkdownEditorViewState, readOnly])
+
+  const updateMarkdownDraft = React.useCallback((draft: string) => {
+    updateMarkdownEditorViewState((state) => ({ ...state, draft }))
+    setMarkdownDraft(draft)
+  }, [updateMarkdownEditorViewState])
+
+  const reconcileCleanMarkdownEditorContent = React.useCallback((content: string) => {
+    if (!markdownEditingRef.current || !isEditableText || readOnly) return
+    const currentState = getMarkdownEditorViewState(sessionId, markdownEditorCacheKey) ?? markdownEditorStateRef.current
+    if (currentState.draft !== currentState.lastSavedDraft || currentState.draft === content) return
+    const nextState: MarkdownEditorViewState = {
+      ...currentState,
+      draft: content,
+      lastSavedDraft: content,
+    }
+    lastSavedDraftRef.current = content
+    persistMarkdownEditorViewState(nextState)
+    setMarkdownDraft(content)
+  }, [isEditableText, markdownEditorCacheKey, persistMarkdownEditorViewState, readOnly, sessionId])
+
+  const handleRichScrollPositionChange = React.useCallback((position: MarkdownScrollPosition) => {
+    if (!canPersistMarkdownEditorState(isEditableText, Boolean(readOnly))) return
+    updateMarkdownEditorViewState((state) => ({
+      ...state,
+      richScroll: { ...position },
+    }))
+  }, [isEditableText, readOnly, updateMarkdownEditorViewState])
+
+  const handleRichSelectionChange = React.useCallback((selection: { from: number; to: number }) => {
+    if (!canPersistMarkdownEditorState(isEditableText, Boolean(readOnly))) return
+    updateMarkdownEditorViewState((state) => ({
+      ...state,
+      richSelection: { ...selection },
+    }))
+  }, [isEditableText, readOnly, updateMarkdownEditorViewState])
+
+  const handleSourceScroll = React.useCallback((event: React.UIEvent<HTMLTextAreaElement>) => {
+    const { scrollTop, scrollLeft } = event.currentTarget
+    updateMarkdownEditorViewState((state) => ({
+      ...state,
+      sourceScroll: { top: scrollTop, left: scrollLeft },
+    }))
+  }, [updateMarkdownEditorViewState])
+
+  const handleSourceSelection = React.useCallback((event: React.SyntheticEvent<HTMLTextAreaElement>) => {
+    const { selectionStart, selectionEnd } = event.currentTarget
+    updateMarkdownEditorViewState((state) => ({
+      ...state,
+      sourceSelection: { start: selectionStart, end: selectionEnd },
+    }))
+  }, [updateMarkdownEditorViewState])
 
   // 主加载 effect：上下文变化（filePath/dirPath/gitRoot/previewOnly）时触发；
   // 纯预览模式也跟随 refreshVersion 失效，保证同一文件二次写入后重新读盘。
@@ -585,10 +779,17 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
       ? getContentCacheKey('preview', previewContentVersion)
       : getContentCacheKey('diff', refreshVersion)
     const cached = cacheGet(cacheKey)
+    // 保存或窗口恢复触发 refreshVersion 时，仍在编辑的 Markdown 必须继续留在
+    // 当前 ProseMirror 实例中；后台读取可以更新预览缓存，但不能先挂载 loading
+    // 占位，从而卸载编辑器并丢失内层滚动和选区。
+    const preserveMarkdownEditor = Boolean(isEditableText && activeMarkdownEditing)
 
     if (cached) {
       // 命中：直接同步渲染，不闪
-      restoreScrollRef.current = true
+      restoreScrollRef.current = !preserveMarkdownEditor
+      if (preserveMarkdownEditor) {
+        reconcileCleanMarkdownEditorContent(cached.newContent)
+      }
       lastNewContentRef.current = cached.newContent
       lastOldContentRef.current = cached.oldContent
       setOldContent(cached.oldContent)
@@ -596,6 +797,8 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
       setDocxHtml(cached.docxHtml ?? '')
       setOfficeHtml(cached.officeHtml ?? '')
       setOfficeText(cached.officeText ?? '')
+      setHtmlPreviewUrl(cached.htmlPreviewUrl ?? '')
+      setUnsupportedPreviewReason(cached.unsupportedPreviewReason ?? '')
       setPdfSrc(cached.pdfSrc ?? '')
       setPdfZoom(100)
       setImagePath(cached.imagePath ?? '')
@@ -605,23 +808,31 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
       setLoading(false)
       return // 缓存命中，直接返回，不执行 load()
     } else {
-      if (!isLegacyOffice) setLoading(true)
-      setOldContent('')
-      setNewContent('')
-      setDocxHtml('')
-      setOfficeHtml('')
-      setOfficeText('')
-      setPdfSrc('')
-      setPdfZoom(100)
-      setImagePath('')
-      setImageDataUrl('')
-      setImageZoom(0.25)
-      setImageNaturalSize({ w: 0, h: 0 })
-      lastNewContentRef.current = ''
-      lastOldContentRef.current = ''
+      if (preserveMarkdownEditor) {
+        setLoading(false)
+      } else if (!isLegacyOffice) {
+        setLoading(true)
+      }
+      if (!preserveMarkdownEditor) {
+        setOldContent('')
+        setNewContent('')
+        setDocxHtml('')
+        setOfficeHtml('')
+        setOfficeText('')
+        setHtmlPreviewUrl('')
+        setUnsupportedPreviewReason('')
+        setPdfSrc('')
+        setPdfZoom(100)
+        setImagePath('')
+        setImageDataUrl('')
+        setImageZoom(0.25)
+        setImageNaturalSize({ w: 0, h: 0 })
+        lastNewContentRef.current = ''
+        lastOldContentRef.current = ''
+      }
       // 内容缓存被 LRU 淘汰但滚动位置仍在时（如切走会话后预览 Tab 重建），
       // 也标记需要恢复，待 load() 重新拉取渲染后回到上次滚动位置。
-      if (scrollPositionCache.has(scrollKey)) {
+      if (!preserveMarkdownEditor && scrollPositionCache.has(scrollKey)) {
         restoreScrollRef.current = true
       }
     }
@@ -630,6 +841,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
       try {
         let content = cached?.newContent ?? ''
         let old = cached?.oldContent ?? ''
+        let htmlUrl = cached?.htmlPreviewUrl ?? ''
 
         if (!cached) {
           if (previewOnly) {
@@ -678,7 +890,21 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
             }
             const result = await window.electronAPI.resolveAndReadFile(filePath, fileAccess)
             if (cancelled) return
+            if (result?.isBinary || result?.isTooLarge) {
+              const reason = result.isTooLarge
+                ? '此文本文件超过 5 MB，无法安全进行内联预览，请使用默认应用打开。'
+                : '此二进制或编码异常文件暂不支持内联预览，请使用默认应用打开。'
+              setUnsupportedPreviewReason(reason)
+              cacheSet(cacheKey, { oldContent: '', newContent: '', unsupportedPreviewReason: reason })
+              return
+            }
             content = result?.content ?? ''
+            if (isHtml) {
+              const preview = await window.electronAPI.resolveHtmlPreviewPath(filePath, fileAccess)
+              if (cancelled) return
+              htmlUrl = preview?.url ?? ''
+              setHtmlPreviewUrl(htmlUrl)
+            }
           } else {
             const result = await window.electronAPI.getDiffContents({ dirPath, filePath, gitRoot, sessionId, baseRef })
             if (cancelled) return
@@ -686,12 +912,15 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
             old = result?.oldContent ?? ''
           }
 
+          if (preserveMarkdownEditor) {
+            reconcileCleanMarkdownEditorContent(content)
+          }
           lastNewContentRef.current = content
           lastOldContentRef.current = old
           setOldContent(old)
           setNewContent(content)
 
-          if (cacheKey) cacheSet(cacheKey, { oldContent: old, newContent: content })
+          if (cacheKey) cacheSet(cacheKey, { oldContent: old, newContent: content, htmlPreviewUrl: htmlUrl || undefined })
         }
 
         if (previewOnly && !MD_EXTS.has(ext) && content) {
@@ -707,7 +936,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
     load()
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filePath, dirPath, gitRoot, previewOnly, previewContentVersion, fileAccess, isPdf, isDocx, isOfficePreview, isLegacyOffice, isImage, sessionId, ext, getContentCacheKey])
+  }, [filePath, dirPath, gitRoot, previewOnly, previewContentVersion, fileAccess, isPdf, isDocx, isOfficePreview, isLegacyOffice, isImage, isHtml, sessionId, ext, getContentCacheKey])
 
   // refreshVersion 触发的静默刷新：仅 diff 模式、内容有变化时才更新 state
   const prevRefreshRef = React.useRef(-1)
@@ -780,7 +1009,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
     }
   }, [previewOnly, loading, filePath, ext, isLegacyOffice, isPdf, pdfSrc, isDocx, docxHtml, isOfficePreview, officeHtml, isImage, imageDataUrl])
 
-  // scrollPosition persistent: module-level Map keyed by sessionId:filePath
+  // scrollPosition persistent: module-level Map scoped by session, file path, and resolution context
   // content changes (refreshVersion bump) → delete stored position;
   // cached mount → restore; scroll → save.
   const prevRefreshVersionRef = React.useRef(refreshVersion)
@@ -788,15 +1017,29 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
   const restoreRafRef = React.useRef(0)
 
   // WHEN content version changes (refreshVersion bump): delete stored scroll position
-  // 只在内容变化时清除，切换文件时保留位置以支持返回导航
+  // 只在内容变化时清除，切换文件时保留位置以支持返回导航。正在编辑的 Markdown
+  // 由独立内层滚动容器维护，refresh 不应把它当作新文档重置。
   React.useEffect(() => {
     if (loading) return // still loading, don't clear yet
     if (prevRefreshVersionRef.current !== refreshVersion) {
+      prevRefreshVersionRef.current = refreshVersion
+      if (isEditableText && activeMarkdownEditing) return
+      if (preserveScrollOnNextRefreshRef.current) {
+        preserveScrollOnNextRefreshRef.current = false
+        return
+      }
       scrollPositionCache.delete(scrollKey)
       restoreScrollRef.current = false
-      prevRefreshVersionRef.current = refreshVersion
     }
-  }, [scrollKey, refreshVersion, loading])
+  }, [scrollKey, refreshVersion, loading, isEditableText])
+
+  React.useEffect(() => {
+    const position = pendingPreviewScrollRestoreRef.current
+    if (!position) return
+    pendingPreviewScrollRestoreRef.current = null
+    scrollPositionCache.set(scrollKey, position)
+    restoreScrollRef.current = true
+  }, [previewScrollRestoreVersion, scrollKey])
 
   // RESTORE scroll position after cached content renders.
   // 等待滚动容器内容高度连续 3 帧稳定后再恢复，避免异步渲染
@@ -840,7 +1083,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
         restoreRafRef.current = 0
       }
     }
-  }, [loading, scrollKey])
+  }, [loading, previewScrollRestoreVersion, scrollKey])
 
   // SAVE scroll position on scroll (throttled via rAF)
   const scrollRafRef = React.useRef(0)
@@ -850,10 +1093,17 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
       scrollRafRef.current = 0
       const el = scrollContainerRef.current
       if (el) {
-        scrollPositionCache.set(scrollKey, { top: el.scrollTop, left: el.scrollLeft })
+        const position = { top: el.scrollTop, left: el.scrollLeft }
+        scrollPositionCache.set(scrollKey, position)
+        if (isEditableText && !readOnly) {
+          updateMarkdownEditorViewState((state) => ({
+            ...state,
+            previewScroll: position,
+          }))
+        }
       }
     })
-  }, [scrollKey])
+  }, [isEditableText, readOnly, scrollKey, updateMarkdownEditorViewState])
 
   // Cleanup rAF on unmount to prevent stale writes
   React.useEffect(() => {
@@ -865,64 +1115,132 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
 
   const handleCopy = React.useCallback(async () => {
     try {
-      const copyText = markdownEditing ? markdownDraft : (isOfficePreview ? officeText : newContent)
-      await navigator.clipboard.writeText(copyText)
+      const copyText = activeMarkdownEditing ? markdownDraft : (isOfficePreview ? officeText : newContent)
+      await copyTextToClipboard(copyText)
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     } catch {
       // 复制失败
     }
-  }, [isOfficePreview, markdownDraft, markdownEditing, newContent, officeText])
+  }, [activeMarkdownEditing, isOfficePreview, markdownDraft, newContent, officeText])
+
 
   const startMarkdownEdit = React.useCallback(() => {
-    if (!isEditableText) return
-    setMarkdownDraft(newContent)
-    lastSavedDraftRef.current = newContent
+    if (!isEditableText || readOnly) return
+    const currentEditorState = getMarkdownEditorViewState(sessionId, markdownEditorCacheKey) ?? markdownEditorStateRef.current
+    const hasPendingDraft = currentEditorState.draft !== currentEditorState.lastSavedDraft
+    const draft = hasPendingDraft ? currentEditorState.draft : newContent
+    const lastSavedDraft = hasPendingDraft ? currentEditorState.lastSavedDraft : newContent
+    const previewScroll = scrollContainerRef.current
+      ? { top: scrollContainerRef.current.scrollTop, left: scrollContainerRef.current.scrollLeft }
+      : currentEditorState.previewScroll
+    const nextEditorState: MarkdownEditorViewState = {
+      ...currentEditorState,
+      editing: true,
+      sourceMode: false,
+      draft,
+      lastSavedDraft,
+      previewScroll,
+      richScroll: { ...previewScroll },
+      sourceScroll: { ...previewScroll },
+      richSelection: null,
+      sourceSelection: null,
+    }
+    lastSavedDraftRef.current = lastSavedDraft
+    markdownEditingRef.current = true
+    persistMarkdownEditorViewState(nextEditorState)
     setAutosaveStatus('idle')
     setMarkdownSourceMode(false)
+    setMarkdownDraft(draft)
     setMarkdownEditing(true)
-  }, [isEditableText, newContent])
+  }, [isEditableText, markdownEditorCacheKey, newContent, persistMarkdownEditorViewState, readOnly, sessionId])
 
   // ref 形式的 persist：避免 callback / effect 因 refreshVersion 频繁变化而重建
-  const persistRef = React.useRef<(draft: string, fp: string, fa: typeof fileAccess) => Promise<boolean>>(async () => false)
+  const persistRef = React.useRef<(draft: string, fp: string, fa: typeof fileAccess, cacheKey: string) => Promise<boolean>>(async () => false)
 
   const exitMarkdownEdit = React.useCallback(() => {
     // 退出前 flush 待保存的草稿，避免用户在 debounce 窗口内退出时丢失输入。
-    // 不再用 `draft !== ''` 过滤：清空整个文件也是合法编辑，依靠
-    // `draft !== lastSavedDraftRef.current` 已能避免初次进入时无意义写盘
-    // （startMarkdownEdit 时 lastSavedDraftRef = newContent）。
     if (autosaveTimerRef.current !== null) {
       window.clearTimeout(autosaveTimerRef.current)
       autosaveTimerRef.current = null
     }
-    if (markdownDraft !== lastSavedDraftRef.current) {
-      void persistRef.current(markdownDraft, filePath, fileAccess)
+    const hasPendingSave = markdownDraft !== lastSavedDraftRef.current
+    if (hasPendingSave) preserveScrollOnNextRefreshRef.current = true
+    if (hasPendingSave) {
+      void persistRef.current(markdownDraft, filePath, fileAccess, markdownEditorCacheKey)
     }
+
+    const sourceTextarea = sourceTextareaRef.current
+    const sourceScroll = sourceTextarea
+      ? { top: sourceTextarea.scrollTop, left: sourceTextarea.scrollLeft }
+      : markdownEditorStateRef.current.sourceScroll
+    const sourceSelection = sourceTextarea
+      ? { start: sourceTextarea.selectionStart, end: sourceTextarea.selectionEnd }
+      : markdownEditorStateRef.current.sourceSelection
+    const activeScroll = isMarkdown && !markdownSourceMode
+      ? markdownEditorStateRef.current.richScroll
+      : sourceScroll
+    const nextEditorState: MarkdownEditorViewState = {
+      ...markdownEditorStateRef.current,
+      editing: false,
+      sourceMode: false,
+      draft: markdownDraft,
+      lastSavedDraft: lastSavedDraftRef.current,
+      previewScroll: { ...activeScroll },
+      sourceScroll,
+      sourceSelection,
+    }
+
+    persistMarkdownEditorViewState(nextEditorState)
+    pendingPreviewScrollRestoreRef.current = { ...activeScroll }
+    setPreviewScrollRestoreVersion((version) => version + 1)
+    markdownEditingRef.current = false
     setMarkdownSourceMode(false)
     setMarkdownEditing(false)
     setAutosaveStatus('idle')
-  }, [markdownDraft, filePath, fileAccess])
+  }, [fileAccess, filePath, isMarkdown, markdownDraft, markdownEditorCacheKey, markdownSourceMode, persistMarkdownEditorViewState])
 
   // 写盘核心：不退出编辑模式，被 autosave、saveMarkdownEdit、flush 共用。
   // 接收显式参数（不依赖闭包），保证切换文件后 flush 用旧文件路径。
   // 同一份 draft 重复触发会被 `draft === lastSavedDraftRef.current` 短路，
   // 因此 autosave timer 与 unmount cleanup 偶发的双重 fire 不会真的写两次。
-  const persistMarkdownDraft = React.useCallback(async (
+  const persistMarkdownDraft = React.useCallback((
     draft: string,
     fp: string,
     fa: typeof fileAccess,
+    editorCacheKey: string,
   ): Promise<boolean> => {
-    if (draft === lastSavedDraftRef.current) return true
-    setAutosaveStatus('saving')
-    try {
-      const ok = await window.electronAPI.writeTextFile(fp, draft, fa)
-      if (!ok) {
-        setAutosaveStatus('error')
-        return false
+    const targetSessionId = fa.sessionId ?? sessionId
+    const saveOwner: MarkdownEditorOwner = {
+      sessionId: targetSessionId,
+      cacheKey: editorCacheKey,
+      generation: ownerGeneration,
+      sessionEpoch: getMarkdownEditorStateSessionEpoch(targetSessionId),
+    }
+    const run = async (): Promise<boolean> => {
+      const isLiveOwner = (): boolean => componentMountedRef.current
+        && isMarkdownEditorOwnerCurrent(saveOwner, markdownOwnerRef.current)
+      const isCurrentOwner = isLiveOwner()
+      const cachedState = getMarkdownEditorViewState(targetSessionId, editorCacheKey)
+      if (draft === (cachedState?.lastSavedDraft ?? (isCurrentOwner ? lastSavedDraftRef.current : undefined))) {
+        return true
       }
-      lastSavedDraftRef.current = draft
-      // 仅当当前展示的仍是这个文件时，才同步 UI state，避免覆盖刚切到的新文件
-      if (fp === filePathRef.current) {
+      if (isCurrentOwner) setAutosaveStatus('saving')
+      try {
+        const ok = await window.electronAPI.writeTextFile(fp, draft, fa)
+        // 文件写入必须保留，但过期 owner 不能再触碰新组件的 UI、refresh 或缓存。
+        if (!isLiveOwner()) return ok
+        if (!ok) {
+          setAutosaveStatus('error')
+          return false
+        }
+
+        lastSavedDraftRef.current = draft
+        const nextEditorState: MarkdownEditorViewState = {
+          ...markdownEditorStateRef.current,
+          lastSavedDraft: draft,
+        }
+        persistMarkdownEditorViewState(nextEditorState)
         lastNewContentRef.current = draft
         lastOldContentRef.current = ''
         setOldContent('')
@@ -934,34 +1252,58 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
           return m
         })
         setAutosaveStatus('saved')
+        return true
+      } catch (err) {
+        console.error('[DiffTabContent] Markdown save failed:', err)
+        if (isLiveOwner()) setAutosaveStatus('error')
+        return false
       }
-      return true
-    } catch (err) {
-      console.error('[DiffTabContent] Markdown save failed:', err)
-      setAutosaveStatus('error')
-      return false
     }
-  }, [getContentCacheKey, refreshVersion, sessionId, setRefreshVersionMap])
+
+    return enqueueMarkdownEditorSave(targetSessionId, editorCacheKey, run)
+  }, [componentMountedRef, getContentCacheKey, markdownEditorCacheKey, ownerGeneration, persistMarkdownEditorViewState, refreshVersion, sessionId, setRefreshVersionMap])
+
 
   const saveMarkdownEdit = React.useCallback(async () => {
-    if (!isEditableText || markdownSaving) return
-    // autosaveTimerRef 由 autosave effect 创建；这里手动清是为了避免
-    // "立即保存"返回后 effect cleanup 再次清掉一个已经 null 的句柄（无害但冗余），
-    // 同时也确保不会在 await 期间触发延迟回调
+    if (!isEditableText || readOnly || markdownSaving) return
+    // 立即保存只抢占 debounce，不改变编辑模式或当前滚动位置。
     if (autosaveTimerRef.current !== null) {
       window.clearTimeout(autosaveTimerRef.current)
       autosaveTimerRef.current = null
     }
     setMarkdownSaving(true)
-    const ok = await persistMarkdownDraft(markdownDraft, filePath, fileAccess)
+    const ok = await persistMarkdownDraft(markdownDraft, filePath, fileAccess, markdownEditorCacheKey)
+    if (!componentMountedRef.current || markdownOwnerRef.current.generation !== ownerGeneration) return
     setMarkdownSaving(false)
     if (!ok) {
       window.alert('保存失败：没有写入权限或文件不存在')
-      return
     }
-    setMarkdownSourceMode(false)
-    setMarkdownEditing(false)
-  }, [fileAccess, filePath, isEditableText, markdownDraft, markdownSaving, persistMarkdownDraft])
+  }, [componentMountedRef, fileAccess, filePath, isEditableText, markdownDraft, markdownEditorCacheKey, markdownSaving, ownerGeneration, persistMarkdownDraft, readOnly])
+
+  const toggleMarkdownSourceMode = React.useCallback(() => {
+    if (!isEditableText || readOnly) return
+    const sourceTextarea = sourceTextareaRef.current
+    const sourceScroll = sourceTextarea
+      ? { top: sourceTextarea.scrollTop, left: sourceTextarea.scrollLeft }
+      : markdownEditorStateRef.current.sourceScroll
+    const sourceSelection = sourceTextarea
+      ? { start: sourceTextarea.selectionStart, end: sourceTextarea.selectionEnd }
+      : markdownEditorStateRef.current.sourceSelection
+    const nextSourceMode = !markdownSourceMode
+    const nextEditorState: MarkdownEditorViewState = {
+      ...markdownEditorStateRef.current,
+      sourceMode: nextSourceMode,
+      richScroll: nextSourceMode
+        ? markdownEditorStateRef.current.richScroll
+        : { ...sourceScroll },
+      sourceScroll: nextSourceMode
+        ? { ...markdownEditorStateRef.current.richScroll }
+        : sourceScroll,
+      sourceSelection,
+    }
+    persistMarkdownEditorViewState(nextEditorState)
+    setMarkdownSourceMode(nextSourceMode)
+  }, [isEditableText, markdownSourceMode, persistMarkdownEditorViewState, readOnly])
 
   const handleManualRefresh = React.useCallback(() => {
     setRefreshVersionMap((prev) => {
@@ -986,8 +1328,8 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
     })
     window.getSelection()?.removeAllRanges()
     clearPreviewSelection()
-    toast.success('已添加到 Agent 引用')
-  }, [clearPreviewSelection, previewSelection, sessionId, setQuotedSelectionMap])
+    focusAgentSessionInput(sessionId)
+  }, [clearPreviewSelection, focusAgentSessionInput, previewSelection, sessionId, setQuotedSelectionMap])
 
   const handleOpenSelectionChat = React.useCallback(async (): Promise<void> => {
     if (!previewSelection) return
@@ -1057,11 +1399,29 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
     persistRef.current = persistMarkdownDraft
   }, [persistMarkdownDraft])
 
+  React.useLayoutEffect(() => {
+    if (loading || !activeMarkdownEditing || (isMarkdown && !markdownSourceMode)) return
+    const textarea = sourceTextareaRef.current
+    if (!textarea) return
+
+    const { sourceScroll, sourceSelection } = markdownEditorStateRef.current
+    const frameId = requestAnimationFrame(() => {
+      textarea.scrollTop = sourceScroll.top
+      textarea.scrollLeft = sourceScroll.left
+      if (sourceSelection) {
+        const start = Math.max(0, Math.min(sourceSelection.start, textarea.value.length))
+        const end = Math.max(start, Math.min(sourceSelection.end, textarea.value.length))
+        textarea.setSelectionRange(start, end)
+      }
+    })
+    return () => cancelAnimationFrame(frameId)
+  }, [filePath, isMarkdown, loading, activeMarkdownEditing, markdownSourceMode, sessionId])
+
   // 自动保存：编辑模式下停止输入 1.5s 后写盘。
   // timer 所有权：autosave effect 创建并在 cleanup 中清；saveMarkdownEdit / exitMarkdownEdit
   // 也会主动清以抢占 debounce。多处清理都是幂等的（设 null 后再清是 no-op）。
   React.useEffect(() => {
-    if (!markdownEditing || !isEditableText) return
+    if (!activeMarkdownEditing || !isEditableText || readOnly) return
     if (markdownDraft === lastSavedDraftRef.current) return
     if (autosaveTimerRef.current !== null) {
       window.clearTimeout(autosaveTimerRef.current)
@@ -1069,9 +1429,10 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
     const draftSnapshot = markdownDraft
     const fpSnapshot = filePath
     const faSnapshot = fileAccess
+    const editorCacheKeySnapshot = markdownEditorCacheKey
     autosaveTimerRef.current = window.setTimeout(() => {
       autosaveTimerRef.current = null
-      void persistRef.current(draftSnapshot, fpSnapshot, faSnapshot)
+      void persistRef.current(draftSnapshot, fpSnapshot, faSnapshot, editorCacheKeySnapshot)
     }, 1500)
     return () => {
       if (autosaveTimerRef.current !== null) {
@@ -1079,7 +1440,8 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
         autosaveTimerRef.current = null
       }
     }
-  }, [markdownDraft, markdownEditing, isEditableText, filePath, fileAccess])
+  }, [markdownDraft, activeMarkdownEditing, isEditableText, filePath, fileAccess, markdownEditorCacheKey, readOnly])
+
 
   // saved → 1.5s 后回到 idle，避免指示器一直停在"已保存"
   React.useEffect(() => {
@@ -1088,28 +1450,50 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
     return () => window.clearTimeout(id)
   }, [autosaveStatus])
 
-  // 切换文件 / 卸载：若有未保存的 draft，fire-and-forget flush 到旧文件。
-  // persistMarkdownDraft 内的 short-circuit 保证即便 autosave timer 刚 fire 过、
-  // 这里又 flush 一次，也不会真的写两次盘。
-  const flushStateRef = React.useRef({ draft: '', editing: false, filePath, fileAccess })
-  flushStateRef.current = { draft: markdownDraft, editing: markdownEditing, filePath, fileAccess }
+  // 切换文件 / scope / 只读生命周期时，cleanup 必须绑定创建它的不可变 owner。
+  // 最新 draft、滚动和选区优先从按 owner 保存的 cache 读取，避免旧 render 快照覆盖事件后的 ref。
   React.useEffect(() => {
+    const cleanupOwner = markdownOwnerRef.current
+    const cleanupFilePath = filePath
+    const cleanupFileAccess = fileAccess
+    const cleanupIsEditableText = isEditableText
+    const cleanupReadOnly = Boolean(readOnly)
+    componentMountedRef.current = true
+
     return () => {
       if (autosaveTimerRef.current !== null) {
         window.clearTimeout(autosaveTimerRef.current)
         autosaveTimerRef.current = null
       }
-      const { draft, editing, filePath: fp, fileAccess: fa } = flushStateRef.current
-      // 不过滤空 draft：startMarkdownEdit 已把 lastSavedDraftRef 设为 newContent，
-      // 因此"原本就空、未编辑"的情况会被 dirty 比较自动跳过；而"非空清空"是合法操作必须落盘。
-      if (editing && isEditableText && draft !== lastSavedDraftRef.current) {
-        void persistRef.current(draft, fp, fa)
+      if (markdownOwnerRef.current.generation === cleanupOwner.generation) {
+        componentMountedRef.current = false
+      }
+      if (cleanupReadOnly || !cleanupIsEditableText) return
+
+      if (getMarkdownEditorStateSessionEpoch(cleanupOwner.sessionId) !== cleanupOwner.sessionEpoch) return
+      const cachedState = getMarkdownEditorViewState(cleanupOwner.sessionId, cleanupOwner.cacheKey)
+      const ownerState = cachedState
+        ?? (markdownEditorStateOwnerRef.current.sessionId === cleanupOwner.sessionId
+          && markdownEditorStateOwnerRef.current.cacheKey === cleanupOwner.cacheKey
+          ? markdownEditorStateRef.current
+          : createMarkdownEditorViewState())
+      const sourceTextarea = sourceTextareaRef.current
+      const latestState = sourceTextarea
+        ? {
+            ...ownerState,
+            sourceScroll: { top: sourceTextarea.scrollTop, left: sourceTextarea.scrollLeft },
+            sourceSelection: { start: sourceTextarea.selectionStart, end: sourceTextarea.selectionEnd },
+          }
+        : ownerState
+      const dirty = latestState.draft !== latestState.lastSavedDraft
+      setMarkdownEditorViewState(cleanupOwner.sessionId, cleanupOwner.cacheKey, latestState)
+      if (latestState.editing && dirty) {
+        void persistMarkdownDraft(latestState.draft, cleanupFilePath, cleanupFileAccess, cleanupOwner.cacheKey)
       }
     }
-    // 仅依赖 filePath/sessionId：切文件时执行 cleanup 触发 flush；
-    // draft/editing/fileAccess 通过 ref 读取最新值
+    // 只在 owner/readOnly 生命周期变化时执行；cleanup 内部读取 owner cache 的最新快照。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filePath, sessionId])
+  }, [filePath, fileAccess, isEditableText, markdownEditorCacheKey, readOnly, sessionId])
 
   return (
     <div className="flex flex-col h-full">
@@ -1136,13 +1520,25 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
           </div>
         )}
 
+        {previewOnly && isHtml && (
+          <button
+            type="button"
+            onClick={() => setHtmlSourceMode((sourceMode) => !sourceMode)}
+            className="ml-auto p-1 rounded hover:bg-foreground/[0.06] text-foreground/40 hover:text-foreground/60 shrink-0"
+            title={htmlSourceMode ? '切换到渲染预览' : '切换到源码预览'}
+            aria-label={htmlSourceMode ? '切换到渲染预览' : '切换到源码预览'}
+          >
+            {htmlSourceMode ? <Eye className="size-3.5" /> : <Code2 className="size-3.5" />}
+          </button>
+        )}
+
         {previewOnly && isEditableText && !readOnly && (
           markdownEditing ? (
             <div className="ml-auto flex items-center gap-1">
               {isMarkdown && (
                 <button
                   type="button"
-                  onClick={() => setMarkdownSourceMode((v) => !v)}
+                  onClick={toggleMarkdownSourceMode}
                   disabled={markdownSaving}
                   className="p-1 rounded hover:bg-foreground/[0.06] text-foreground/40 hover:text-foreground/60 disabled:opacity-50 shrink-0"
                   title={markdownSourceMode ? '切换到富文本编辑' : '切换到源码编辑'}
@@ -1174,7 +1570,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
                     ? '自动保存失败，点击重试'
                     : autosaveStatus === 'saved'
                       ? '已保存'
-                      : '立即保存并退出'
+                      : '立即保存'
                 }
               >
                 <Save className="size-3.5" />
@@ -1228,7 +1624,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
           </Tooltip>
         )}
 
-        {isMarkdown && !markdownEditing && (
+        {isMarkdown && !activeMarkdownEditing && (
           <button
             type="button"
             onClick={() => setTocOpen((v) => !v)}
@@ -1256,10 +1652,10 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
         <MarkdownToc
           containerRef={scrollContainerRef}
           contentKey={tocContentKey}
-          enabled={Boolean(isMarkdown && !markdownEditing && tocOpen)}
+          enabled={Boolean(isMarkdown && !activeMarkdownEditing && tocOpen)}
           onOpenChange={setTocOpen}
         />
-        {isMarkdown && !markdownEditing && !tocOpen && (
+        {isMarkdown && !activeMarkdownEditing && !tocOpen && (
           <Tooltip>
             <TooltipTrigger asChild>
               <button
@@ -1278,7 +1674,11 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
           {loading ? (
             <div className="flex items-center justify-center h-full text-muted-foreground text-[12px]">加载中...</div>
           ) : previewOnly ? (
-            isPdf ? (
+            unsupportedPreviewReason ? (
+              <div className="flex h-full items-center justify-center px-6 text-center text-[13px] text-muted-foreground">
+                {unsupportedPreviewReason}
+              </div>
+            ) : isPdf ? (
               pdfSrc ? (
                 <div className="relative h-full">
                 <div className="absolute top-2 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 px-2 py-1 rounded-lg bg-background/80 backdrop-filter backdrop-blur-sm border border-border/30 shadow-sm">
@@ -1372,11 +1772,28 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
                   dangerouslySetInnerHTML={{ __html: officeHtml }}
                 />
               ) : null
-            ) : isLegacyOffice ? null : isMarkdown ? (
-              markdownEditing && markdownSourceMode ? (
+            ) : isLegacyOffice ? null : isHtml && !htmlSourceMode ? (
+              htmlPreviewUrl ? (
+                <iframe
+                  src={htmlPreviewUrl}
+                  className="h-full w-full border-0 bg-white"
+                  title={`${filePath.split('/').pop() || 'HTML'} 渲染预览`}
+                  sandbox="allow-scripts allow-forms"
+                  referrerPolicy="no-referrer"
+                />
+              ) : (
+                <div className="flex h-full items-center justify-center px-6 text-center text-[13px] text-muted-foreground">
+                  无法加载 HTML 预览资源，请切换到源码预览或刷新后重试。
+                </div>
+              )
+            ) : isMarkdown ? (
+              activeMarkdownEditing && markdownSourceMode ? (
                 <textarea
+                  ref={sourceTextareaRef}
                   value={markdownDraft}
-                  onChange={(e) => setMarkdownDraft(e.target.value)}
+                  onChange={(e) => updateMarkdownDraft(e.target.value)}
+                  onScroll={handleSourceScroll}
+                  onSelect={handleSourceSelection}
                   onKeyDown={(e) => {
                     if (e.key === 'Escape') {
                       e.preventDefault()
@@ -1393,21 +1810,28 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
                 />
               ) : (
                 <MarkdownRichEditor
-                  value={markdownEditing ? markdownDraft : newContent}
-                  editing={markdownEditing}
-                  onChange={setMarkdownDraft}
+                  value={activeMarkdownEditing ? markdownDraft : newContent}
+                  editing={activeMarkdownEditing}
+                  onChange={updateMarkdownDraft}
                   onSave={() => void saveMarkdownEdit()}
                   onCancel={exitMarkdownEdit}
-                  onRequestEdit={startMarkdownEdit}
-                  disabled={markdownSaving}
+                  renderMermaidInEditor
+                  disabled={markdownSaving || Boolean(readOnly)}
                   fileAccess={markdownFileAccess}
                   shikiTheme={theme === 'dark' ? 'github-dark' : 'github-light'}
+                  initialScrollPosition={activeMarkdownEditing ? markdownEditorStateRef.current.richScroll : undefined}
+                  onScrollPositionChange={handleRichScrollPositionChange}
+                  initialSelection={activeMarkdownEditing ? markdownEditorStateRef.current.richSelection : undefined}
+                  onSelectionChange={handleRichSelectionChange}
                 />
               )
-            ) : isPlainTextEditable && markdownEditing ? (
+            ) : isPlainTextEditable && activeMarkdownEditing ? (
               <textarea
+                ref={sourceTextareaRef}
                 value={markdownDraft}
-                onChange={(e) => setMarkdownDraft(e.target.value)}
+                onChange={(e) => updateMarkdownDraft(e.target.value)}
+                onScroll={handleSourceScroll}
+                onSelect={handleSourceSelection}
                 onKeyDown={(e) => {
                   if (e.key === 'Escape') {
                     e.preventDefault()

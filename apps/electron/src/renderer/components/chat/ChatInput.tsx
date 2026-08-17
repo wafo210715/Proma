@@ -40,6 +40,8 @@ import {
 import { getActiveAccelerator, getAcceleratorDisplay } from '@/lib/shortcut-registry'
 import {
   conversationDraftsAtom,
+  conversationDraftSyncVersionsAtom,
+  conversationDraftSyncVersionAtomFamily,
 } from '@/atoms/chat-atoms'
 import type { PendingAttachment } from '@/atoms/chat-atoms'
 import { quotedSelectionMapAtom } from '@/atoms/preview-atoms'
@@ -79,7 +81,9 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
   const setQuotedSelectionMap = useSetAtom(quotedSelectionMapAtom)
   const currentQuotedSelection = quotedSelectionMap.get(conversationId) ?? null
   const content = draftsMap.get(conversationId) ?? ''
-  const setContent = React.useCallback((value: string) => {
+  const draftSyncVersion = useAtomValue(conversationDraftSyncVersionAtomFamily(conversationId))
+  const setDraftSyncVersions = useSetAtom(conversationDraftSyncVersionsAtom)
+  const setContentFromEditor = React.useCallback((value: string) => {
     setDraftsMap((prev) => {
       const map = new Map(prev)
       if (value.trim() === '') {
@@ -90,11 +94,20 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
       return map
     })
   }, [conversationId, setDraftsMap])
+  const setContent = React.useCallback((value: string) => {
+    setDraftSyncVersions((prev) => {
+      const map = new Map(prev)
+      map.set(conversationId, (map.get(conversationId) ?? 0) + 1)
+      return map
+    })
+    setContentFromEditor(value)
+  }, [conversationId, setContentFromEditor, setDraftSyncVersions])
 
   const [selectedModel] = useConversationModel()
   const [thinkingEnabled, setThinkingEnabled] = useConversationThinkingEnabled()
   const setPendingAttachments = onSetPendingAttachments
   const [isDragOver, setIsDragOver] = React.useState(false)
+  const chatVoiceInputId = React.useId()
 
   const canSend = (content.trim().length > 0 || pendingAttachments.length > 0)
     && selectedModel !== null
@@ -256,17 +269,21 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
   }, [setPendingAttachments])
 
   /** 发送消息 */
-  const handleSend = React.useCallback((): void => {
-    if (!canSend) return
+  const handleSend = React.useCallback((contentOverride?: string): void => {
+    const contentToSend = contentOverride ?? content
+    const canSendCurrentContent = (contentToSend.trim().length > 0 || pendingAttachments.length > 0)
+      && selectedModel !== null
+      && !streaming
+    if (!canSendCurrentContent) return
     // 发送前检查网络状态：离线时立即反馈，避免消息发出后静默失败
     if (!navigator.onLine) {
       toast.error('当前无网络连接，请检查网络后重试')
       return
     }
-    onSend(content.trim())
+    onSend(contentToSend.trim())
     setContent('')
     // 附件清理由 ChatView 的 handleSend 负责
-  }, [canSend, content, onSend])
+  }, [content, onSend, pendingAttachments.length, selectedModel, streaming])
 
   /** 粘贴文件回调 */
   const handlePasteFiles = React.useCallback((files: File[]): void => {
@@ -318,7 +335,7 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
   }, [])
 
   const toolbarItems = React.useMemo<ToolbarItem[]>(() => [
-    { key: 'model', node: <ModelSelector excludedProviders={['openai-codex']} useSharedOpenState /> },
+    { key: 'model', node: <ModelSelector excludedProviders={['openai-codex', 'xai']} useSharedOpenState /> },
     {
       key: 'thinking',
       node: (
@@ -364,11 +381,11 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
         </Tooltip>
       ),
     },
-    { key: 'speech', node: <SpeechButton className={inputToolbarButtonClass} /> },
+    { key: 'speech', node: <SpeechButton className={inputToolbarButtonClass} voiceInputId={chatVoiceInputId} /> },
     { key: 'tools', node: <ToolSelectorPopover /> },
     { key: 'context', node: <ContextSettingsPopover /> },
     { key: 'clear', node: <ClearContextButton onClick={onClearContext} /> },
-  ], [handleOpenFileDialog, thinkingEnabled, setThinkingEnabled, onClearContext])
+  ], [handleOpenFileDialog, thinkingEnabled, setThinkingEnabled, onClearContext, chatVoiceInputId])
 
   const trailingNode = streaming ? (
     <Tooltip>
@@ -395,7 +412,7 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
       className={cn(
         canSend ? inputToolbarSendButtonClass : inputToolbarDisabledButtonClass
       )}
-      onClick={handleSend}
+      onClick={() => handleSend()}
       disabled={!canSend}
     >
       <CornerDownLeft className="size-[22px]" />
@@ -458,11 +475,14 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
           {/* TipTap 富文本编辑器 */}
           <RichTextInput
             value={content}
-            onChange={setContent}
+            onChange={setContentFromEditor}
             onSubmit={handleSend}
             onPasteFiles={handlePasteFiles}
+            voiceInputId={chatVoiceInputId}
             placeholder={sendWithCmdEnter ? '输入消息... (⌘/Ctrl+Enter 发送，Enter 换行)' : '输入消息... (Enter 发送，Shift+Enter 换行)'}
             autoFocusTrigger={conversationId}
+            draftScopeKey={conversationId}
+            draftSyncVersion={draftSyncVersion}
             sendWithCmdEnter={sendWithCmdEnter}
           />
 

@@ -12,8 +12,20 @@ export const SAFE_TOOLS: readonly string[] = [
   'Grep',            // 内容搜索
   'WebSearch',       // 网络搜索
   'WebFetch',        // 网页获取
+  // Pi 受管浏览器：网页隔离、私网/下载/弹窗/权限已在主进程策略层拦截。
+  'BrowserObserve',
+  'BrowserNavigate',
+  'BrowserClick',
+  'BrowserFill',
+  'BrowserPress',
+  'BrowserScreenshot',
+  'BrowserListTabs',
+  'BrowserNewTab',
+  'BrowserSelectTab',
+  'BrowserCloseTab',
+  'BrowserPreviewOpen',
   'TodoRead',        // Todo 列表读取
-  'TodoWrite',       // Todo 列表写入（无安全风险）
+
   'TaskOutput',      // 后台任务输出
   // 注意：AskUserQuestion 不在此列表 — 由 canUseTool 拦截并展示交互式 UI
 ]

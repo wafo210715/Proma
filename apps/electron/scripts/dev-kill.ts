@@ -2,16 +2,19 @@
  * 跨平台清理残留的 electronmon / electron 进程
  * 替代 pkill（Windows 不支持）
  *
- * 传入 --vite 时，额外清理占用 Vite 端口（5174）的残留进程。
+ * 传入 --vite 时，额外清理占用 Vite 端口（5173）的残留进程。
  * 该清理仅应在 concurrently 拉起 dev:vite 之前跑一次（顶层 dev 脚本），
  * 不要在与 dev:vite 并发的 dev:electron 内部跑，否则会误杀本次刚启动的 vite。
  */
 import { execSync } from 'child_process'
+import { resolve } from 'path'
 
 const isWin = process.platform === 'win32'
 const killVite = process.argv.includes('--vite')
+// bun workspace script 的 cwd 可能是仓库根；由脚本自身位置推导，确保精准清理当前 worktree。
+const workspaceRootPattern = resolve(import.meta.dir, '../../..').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 /** 与 vite.config.ts 的 server.port 保持一致 */
-const VITE_PORT = 5174
+const VITE_PORT = 5173
 
 function kill(pattern: string): void {
   try {
@@ -74,9 +77,8 @@ function killStaleVite(port: number): void {
   }
 }
 
-// 使用项目路径限定进程匹配，避免杀掉其他 Proma 开发实例（如 proma-ext）的进程。
-// __dirname 在编译后是 dist/ 的父目录（apps/electron），可据此区分不同 fork。
-const projectMarker = __dirname.replace(/\\/g, '/').includes('/Proma/') ? 'Proma' : 'electron'
-kill(isWin ? 'electronmon.exe' : `electronmon .*${projectMarker}`)
-kill(isWin ? 'electron.exe' : `electron.*${projectMarker}.*dist/main`)
+kill(isWin ? 'electronmon.exe' : 'electronmon \\.')
+// Electron 的实际可执行文件不含 dist/main，旧模式无法清理其孤儿进程，
+// 使新 dev 实例拿不到 SingletonLock 并一直停在 electronmon 的 waiting 状态。
+kill(isWin ? 'electron.exe' : `${workspaceRootPattern}/node_modules/electron/dist/Electron\\.app/Contents/MacOS/Electron`)
 if (killVite) killStaleVite(VITE_PORT)

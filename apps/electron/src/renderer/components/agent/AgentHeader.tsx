@@ -6,15 +6,16 @@
  */
 
 import * as React from 'react'
-import { useAtom, useAtomValue, useSetAtom } from 'jotai'
-import { Pencil, Check, X, Columns2, Link2, Link2Off, Plus } from 'lucide-react'
-import type { ModelOption } from '@proma/shared'
+import { useAtom, useAtomValue, useSetAtom, useStore } from 'jotai'
+import { Pencil, Check, X, Columns2, Link2, Link2Off, Plus, Shapes } from 'lucide-react'
 import { agentSessionsAtom, agentSessionStreamingStateAtomFamily } from '@/atoms/agent-atoms'
-import { tabsAtom, updateTabTitle } from '@/atoms/tab-atoms'
+import { tabsAtom, updateTabTitle, canvasPanelOpenAtom, canvasPanelSessionIdAtom } from '@/atoms/tab-atoms'
+import { toggleSessionCanvas } from '@/components/canvas/canvas-opener'
 import { comparePairsAtom, compareLinkedAtom, getComparePartner, removePairContaining, addPair } from '@/atoms/compare-atoms'
 import { useCompareActions } from '@/hooks/useCompareActions'
 import { ModelSelector } from '@/components/chat/ModelSelector'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import type { ModelOption } from '@proma/shared'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { replaceAgentSessionInFreshnessOrder } from '@/lib/agent-session-list'
 import { detectIsWindows, WINDOW_CONTROLS_INSET_RIGHT } from '@/lib/platform'
@@ -34,6 +35,10 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
   const [editing, setEditing] = React.useState(false)
   const [editTitle, setEditTitle] = React.useState('')
   const inputRef = React.useRef<HTMLInputElement>(null)
+  // Canvas 分屏按钮状态
+  const canvasPanelOpen = useAtomValue(canvasPanelOpenAtom)
+  const canvasPanelSessionId = useAtomValue(canvasPanelSessionIdAtom)
+  const store = useStore()
 
   // 双开对比控件状态
   const [comparePairs, setComparePairs] = useAtom(comparePairsAtom)
@@ -66,6 +71,7 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
     setPickerOpen(false)
     await requestInherit(session, option.channelId, option.modelId, sourceRunning)
   }, [session, requestInherit, sourceRunning])
+  const canvasActive = canvasPanelOpen && canvasPanelSessionId === sessionId
 
   if (!session) return null
 
@@ -152,11 +158,24 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
           >
             <Pencil className="size-3.5" />
           </button>
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => toggleSessionCanvas(store, sessionId)}
+            className={cn(
+              'titlebar-no-drag p-1 transition-colors',
+              canvasActive
+                ? 'text-primary hover:text-primary'
+                : 'text-muted-foreground hover:text-foreground',
+            )}
+            aria-label={canvasActive ? '关闭画布分屏' : '打开画布分屏'}
+            title={canvasActive ? '关闭画布分屏' : '打开画布分屏'}
+          >
+            <Shapes className="size-3.5" />
+          </button>
         </div>
       )}
 
-      {/* 双开对比控件：未配对显示「分屏对比」按钮；已配对显示联动开关 + 解绑 */}
-      <div className="titlebar-no-drag flex items-center gap-1 flex-shrink-0">
         {inComparePair ? (
           <>
             <Tooltip>
@@ -165,10 +184,10 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
                   type="button"
                   onClick={() => setCompareLinked((v) => !v)}
                   className={cn(
-                    'p-1.5 rounded-md transition-colors',
+                    'titlebar-no-drag p-1 transition-colors',
                     compareLinked
-                      ? 'text-primary bg-primary/10 hover:bg-primary/20'
-                      : 'text-muted-foreground hover:text-foreground hover:bg-muted',
+                      ? 'text-primary hover:text-primary'
+                      : 'text-muted-foreground hover:text-foreground',
                   )}
                   aria-label={compareLinked ? '联动已开启' : '联动已关闭'}
                 >
@@ -182,7 +201,7 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
                 <button
                   type="button"
                   onClick={() => setComparePairs((prev) => removePairContaining(prev, sessionId))}
-                  className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                  className="titlebar-no-drag p-1 rounded-md text-muted-foreground hover:text-foreground transition-colors"
                   aria-label="解绑分屏对比"
                 >
                   <X className="size-3.5" />
@@ -196,7 +215,7 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
             <PopoverTrigger asChild>
               <button
                 type="button"
-                className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                className="titlebar-no-drag p-1 rounded-md text-muted-foreground hover:text-foreground transition-colors"
                 aria-label="分屏对比"
                 title="分屏对比：选择另一个 session 并排"
               >
@@ -254,7 +273,6 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
             </PopoverContent>
           </Popover>
         )}
-      </div>
     </div>
   )
 }

@@ -7,16 +7,22 @@
  */
 
 import * as React from 'react'
+import type { BrowserViewState } from '@proma/shared'
 import { useAtomValue, useSetAtom, useAtom, useStore } from 'jotai'
-import { toast } from 'sonner'
-import { Loader2 } from 'lucide-react'
 import {
   tabsAtom,
   activeTabIdAtom,
   activeTabAtom,
   scratchPadPanelOpenAtom,
+  canvasPanelOpenAtom,
+  canvasPanelSessionIdAtom,
   rightWorkspaceSplitRatioAtom,
 } from '@/atoms/tab-atoms'
+import { CanvasPane } from '@/components/canvas/CanvasView'
+import { closeCanvasInSplit } from '@/components/canvas/canvas-opener'
+import { TabErrorBoundary } from './TabErrorBoundary'
+import { toast } from 'sonner'
+import { Loader2 } from 'lucide-react'
 import { Panel } from '@/components/app-shell/Panel'
 import { WelcomeView } from '@/components/welcome/WelcomeView'
 import { previewPanelOpenMapAtom, previewSplitRatioAtom } from '@/atoms/preview-atoms'
@@ -24,9 +30,6 @@ import { PreviewPanel } from '@/components/diff/PreviewPanel'
 import { ScratchPadPane } from '@/components/scratch-pad/ScratchPadView'
 import { closeScratchInSplit } from '@/components/scratch-pad/scratch-pad-opener'
 import { useTrackSessionView } from '@/hooks/useTrackSessionView'
-import { TabBar } from './TabBar'
-import { TabContent } from './TabContent'
-import { TabErrorBoundary } from './TabErrorBoundary'
 import { AgentView } from '@/components/agent'
 import { agentSessionsAtom, agentStreamingStatesAtom } from '@/atoms/agent-atoms'
 import {
@@ -37,17 +40,20 @@ import {
   comparePendingFileLinksAtom,
   compareSplitRatioAtom,
   findPairContaining,
-  removePairContaining,
   pendingInheritAtom,
 } from '@/atoms/compare-atoms'
 import { useCompareActions } from '@/hooks/useCompareActions'
+import { TabBar } from './TabBar'
+import { TabContent } from './TabContent'
 import { AutomationFormView } from '@/components/automation/AutomationFormView'
-import { AutomationsListView } from '@/components/automation/AutomationsListView'
+import { PlanningView } from '@/components/planning/PlanningView'
 import { AgentSkillsView } from '@/components/agent-skills/AgentSkillsView'
 import { automationFormAtom } from '@/atoms/automation-atoms'
 import { activeViewAtom } from '@/atoms/active-view'
 import { interfaceVariantAtom } from '@/atoms/theme'
 import { cn } from '@/lib/utils'
+import { browserPanelOpenMapAtom, browserPendingNavigationMapAtom, browserStateMapAtom } from '@/atoms/browser-atoms'
+import { BrowserPanel } from '@/components/browser/BrowserPanel'
 
 export function MainArea(): React.ReactElement {
   // 记录每个会话上次停留的视图（对话 / 预览），供切回时重建预览 Tab
@@ -67,15 +73,23 @@ export function MainArea(): React.ReactElement {
   // DiffTabContent → ProseMirror editor mount + Shiki tokenize）让出主线程，避免点击 tab
   // 后必须等主区域渲染完才能看到 tab 切换效果
   const deferredActiveTabId = React.useDeferredValue(activeTabId)
+  // Agent 历史当前是完整 DOM，切换时使用当前 active tab，避免 deferred value 让旧会话继续占屏。
+  // Chat/Preview 仍保留 deferred 渲染，避免它们的重型编辑器阻塞 TabBar 响应。
+  const contentTabId = activeTab?.type === 'agent' ? activeTabId : deferredActiveTabId
 
   const previewOpenMap = useAtomValue(previewPanelOpenMapAtom)
+  const [browserOpenMap, setBrowserOpenMap] = useAtom(browserPanelOpenMapAtom)
+  const [browserStateMap, setBrowserStateMap] = useAtom(browserStateMapAtom)
+  const setPendingNavigationMap = useSetAtom(browserPendingNavigationMapAtom)
   const [splitRatio, setSplitRatio] = useAtom(previewSplitRatioAtom)
   const [rightWorkspaceRatio, setRightWorkspaceRatio] = useAtom(rightWorkspaceSplitRatioAtom)
   const previewDragging = React.useRef(false)
   const rightWorkspaceDragging = React.useRef(false)
+  const browserSessionId = activeTab?.type === 'agent' ? activeTab.sessionId : null
 
-  // 双开对比：当前活跃 tab 属于某个配对时，右栏放 partner 的 AgentView。
-  // 点配对中的任一 session 都恢复分屏。对比态优先接管右 slot（与 preview/scratch 互斥）。
+  // ── 双开对比（compare）状态 ──
+  const agentSessions = useAtomValue(agentSessionsAtom)
+  const streamingStates = useAtomValue(agentStreamingStatesAtom)
   const [comparePairs, setComparePairs] = useAtom(comparePairsAtom)
   const setCompareFocusedSessionId = useSetAtom(compareFocusedSessionIdAtom)
   const compareLinked = useAtomValue(compareLinkedAtom)
@@ -83,16 +97,41 @@ export function MainArea(): React.ReactElement {
   const setCompareBroadcast = useSetAtom(compareBroadcastAtom)
   const setComparePendingFileLinks = useSetAtom(comparePendingFileLinksAtom)
   const [pendingInherit, setPendingInherit] = useAtom(pendingInheritAtom)
-  const agentSessions = useAtomValue(agentSessionsAtom)
-  const streamingStates = useAtomValue(agentStreamingStatesAtom)
   const { executeInherit } = useCompareActions()
   const compareDragging = React.useRef(false)
   const pendingInheritInFlightRef = React.useRef<typeof pendingInherit>(null)
   const previousComparePairsRef = React.useRef(comparePairs)
   const previousCompareLinkedRef = React.useRef(compareLinked)
 
+  const publishBrowserState = React.useCallback((state: BrowserViewState) => {
+    setBrowserStateMap((previous) => { const next = new Map(previous); next.set(state.sessionId, state); return next })
+    setBrowserOpenMap((previous) => { const next = new Map(previous); next.set(state.sessionId, true); return next })
+  }, [setBrowserOpenMap, setBrowserStateMap])
+
+  React.useEffect(() => {
+    // Vite renderer 可在 preload 热重载前先更新；旧 bridge 时浏览器功能不可用，
+    // 但绝不能让整个主界面崩溃。完整 Electron preload 就绪后会正常订阅。
+    const subscribe = (window.electronAPI as Partial<typeof window.electronAPI>).onAgentBrowserStateChanged
+    if (typeof subscribe !== 'function') return
+    return subscribe(publishBrowserState)
+  }, [publishBrowserState])
+
+  React.useEffect(() => {
+    if (!browserSessionId) return
+    const getState = (window.electronAPI as Partial<typeof window.electronAPI>).getAgentBrowserState
+    if (typeof getState !== 'function') return
+    let cancelled = false
+    void getState(browserSessionId)
+      .then((state) => {
+        if (!cancelled && state) publishBrowserState(state)
+      })
+      // 后台会话及已删除会话会被主进程拒绝或返回空状态；无需打断当前界面。
+      .catch(() => undefined)
+    return () => { cancelled = true }
+  }, [browserSessionId, publishBrowserState])
+
   // 当前活跃 tab 对应的配对信息：activePair = 配对对象，activeCompareRole = 当前 session 是 left 还是 right
-  const activeSessionId = activeTab?.type === 'agent' ? activeTab.sessionId : null
+  const activeSessionId = browserSessionId
   const activeCompareMatch = activeSessionId
     ? findPairContaining(comparePairs, activeSessionId)
     : null
@@ -184,12 +223,18 @@ export function MainArea(): React.ReactElement {
       })
   }, [agentSessions, executeInherit, pendingInherit, setPendingInherit, streamingStates])
 
+  const showBrowserPanel = !!browserSessionId && (browserOpenMap.get(browserSessionId) ?? false) && activeView === 'conversations'
+  const browserState = browserSessionId ? browserStateMap.get(browserSessionId) ?? null : null
   const previewOpen =
-    activeTab?.type === 'agent' && (previewOpenMap.get(activeTab.sessionId) ?? false)
+    activeTab?.type === 'agent' && (previewOpenMap.get(activeTab.sessionId) ?? false) && !showBrowserPanel
   const previewSessionId = activeTab?.type === 'agent' ? activeTab.sessionId : null
   const scratchPanelOpen = useAtomValue(scratchPadPanelOpenAtom)
   const showScratchPanel =
-    activeTab?.type === 'agent' && scratchPanelOpen && activeView === 'conversations'
+    activeTab?.type === 'agent' && scratchPanelOpen && activeView === 'conversations' && !showBrowserPanel
+  const canvasPanelOpen = useAtomValue(canvasPanelOpenAtom)
+  const canvasPanelSessionId = useAtomValue(canvasPanelSessionIdAtom)
+  const showCanvasPanel =
+    activeTab?.type === 'agent' && canvasPanelOpen && activeView === 'conversations'
 
   // 关闭动画状态：当 previewOpen 从 true → false 时，播放退出动画再移除 DOM
   // 在 render 阶段同步派生 closing，避免中间帧出现 flex: 1 1 auto 导致左侧瞬间跳到 100% 宽
@@ -254,42 +299,6 @@ export function MainArea(): React.ReactElement {
     document.addEventListener('mouseup', onMouseUp)
   }, [splitRatio, setSplitRatio])
 
-  const handleRightWorkspaceDragStart = React.useCallback((e: React.MouseEvent) => {
-    e.preventDefault()
-    rightWorkspaceDragging.current = true
-    const startX = e.clientX
-    const startRatio = rightWorkspaceRatio
-    const containerEl = (e.currentTarget as HTMLElement).closest('[data-right-workspace]') as HTMLElement | null
-    const containerWidth = containerEl?.clientWidth ?? 1
-    let rafId = 0
-
-    document.body.style.userSelect = 'none'
-    document.body.style.cursor = 'col-resize'
-    document.querySelectorAll('iframe').forEach((f) => { (f as HTMLElement).style.pointerEvents = 'none' })
-
-    const onMouseMove = (ev: MouseEvent) => {
-      if (!rightWorkspaceDragging.current) return
-      if (rafId) return
-      rafId = requestAnimationFrame(() => {
-        rafId = 0
-        const delta = ev.clientX - startX
-        const newRatio = Math.max(0.3, Math.min(0.7, startRatio + delta / containerWidth))
-        setRightWorkspaceRatio(newRatio)
-      })
-    }
-    const onMouseUp = () => {
-      rightWorkspaceDragging.current = false
-      if (rafId) cancelAnimationFrame(rafId)
-      document.body.style.userSelect = ''
-      document.body.style.cursor = ''
-      document.querySelectorAll('iframe').forEach((f) => { (f as HTMLElement).style.pointerEvents = '' })
-      document.removeEventListener('mousemove', onMouseMove)
-      document.removeEventListener('mouseup', onMouseUp)
-    }
-    document.addEventListener('mousemove', onMouseMove)
-    document.addEventListener('mouseup', onMouseUp)
-  }, [rightWorkspaceRatio, setRightWorkspaceRatio])
-
   const handleCompareDragStart = React.useCallback((e: React.MouseEvent) => {
     e.preventDefault()
     compareDragging.current = true
@@ -326,6 +335,42 @@ export function MainArea(): React.ReactElement {
     document.addEventListener('mouseup', onMouseUp)
   }, [compareSplitRatio, setCompareSplitRatio])
 
+  const handleRightWorkspaceDragStart = React.useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    rightWorkspaceDragging.current = true
+    const startX = e.clientX
+    const startRatio = rightWorkspaceRatio
+    const containerEl = (e.currentTarget as HTMLElement).closest('[data-right-workspace]') as HTMLElement | null
+    const containerWidth = containerEl?.clientWidth ?? 1
+    let rafId = 0
+
+    document.body.style.userSelect = 'none'
+    document.body.style.cursor = 'col-resize'
+    document.querySelectorAll('iframe').forEach((f) => { (f as HTMLElement).style.pointerEvents = 'none' })
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!rightWorkspaceDragging.current) return
+      if (rafId) return
+      rafId = requestAnimationFrame(() => {
+        rafId = 0
+        const delta = ev.clientX - startX
+        const newRatio = Math.max(0.3, Math.min(0.7, startRatio + delta / containerWidth))
+        setRightWorkspaceRatio(newRatio)
+      })
+    }
+    const onMouseUp = () => {
+      rightWorkspaceDragging.current = false
+      if (rafId) cancelAnimationFrame(rafId)
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+      document.querySelectorAll('iframe').forEach((f) => { (f as HTMLElement).style.pointerEvents = '' })
+      document.removeEventListener('mousemove', onMouseMove)
+      document.removeEventListener('mouseup', onMouseUp)
+    }
+    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('mouseup', onMouseUp)
+  }, [rightWorkspaceRatio, setRightWorkspaceRatio])
+
   const handleCloseScratchPanel = React.useCallback(() => {
     closeScratchInSplit(store)
   }, [store])
@@ -358,8 +403,8 @@ export function MainArea(): React.ReactElement {
 
   // 左侧容器宽度：右侧工作区打开时固定占 splitRatio；其他情况（含 closing 动画期间）
   // 直接 1 1 auto 占满——closing 时右侧 absolute 脱离 flex 流，所以左侧自然占 100%。
-  // 对比态优先接管右 slot：此时不显示 preview/scratch 右面板
-  const showRightPanel = !showComparePane && (showScratchPanel || showPreviewPane)
+  // 对比态优先接管右 slot：此时不显示 preview/scratch/canvas 右面板
+  const showRightPanel = !showComparePane && (showBrowserPanel || showScratchPanel || showPreviewPane || showCanvasPanel)
   const leftFlexStyle: React.CSSProperties = showComparePane
     ? { flex: `0 0 calc(${compareSplitRatio * 100}% - 6px)` }
     : showRightPanel
@@ -387,13 +432,12 @@ export function MainArea(): React.ReactElement {
             className={cn('flex flex-col min-w-0 h-full relative', showPreview && 'mr-0.5')}
             style={leftFlexStyle}
           >
-            {activeView === 'automations' ? (
+            {activeView === 'planning' ? (
               automationFormOpen ? (
-                // 定时任务设置页：与列表同层级替换中间区，不经过 TabBar，避免切换时闪出会话 Tab。
+                // 自动化设置页：与任务/日程同层级替换中间区，不经过 TabBar。
                 <AutomationFormView />
               ) : (
-                // Automations 列表视图：全屏取代 TabBar + TabContent
-                <AutomationsListView />
+                <PlanningView />
               )
             ) : activeView === 'agent-skills' ? (
               // Agent 技能视图：全屏取代 TabBar + TabContent
@@ -406,16 +450,16 @@ export function MainArea(): React.ReactElement {
                   <AutomationFormView />
                 ) : tabs.length === 0 ? (
                   <WelcomeView />
-                ) : deferredActiveTabId ? (
+                ) : contentTabId ? (
                   <div className="flex-1 min-h-0 titlebar-no-drag">
-                    <TabContent tabId={deferredActiveTabId} />
+                    <TabContent tabId={contentTabId} />
                   </div>
                 ) : null}
               </>
             )}
           </div>
 
-          {/* 右侧：双开对比栏（partner 的 AgentView）。对比态接管右 slot，优先于 preview/scratch。 */}
+          {/* 右侧：双开对比栏（partner 的 AgentView）。对比态接管右 slot，优先于 preview/scratch/canvas。 */}
           {/* 右栏延迟一帧挂载：左栏先渲染完，避免两个重组件同时初始化导致卡顿。 */}
           {showComparePane && comparePartnerId && (
             <>
@@ -458,8 +502,21 @@ export function MainArea(): React.ReactElement {
                 />
               )}
               <div className="flex flex-1 min-w-0 h-full overflow-hidden" data-right-workspace>
+                {showBrowserPanel && browserSessionId && (
+                  <div className="min-w-0 h-full overflow-hidden flex-1">
+                    <BrowserPanel
+                      sessionId={browserSessionId}
+                      state={browserState}
+                      onClose={() => {
+                        setBrowserOpenMap((previous) => { const next = new Map(previous); next.set(browserSessionId, false); return next })
+                        setBrowserStateMap((previous) => { const next = new Map(previous); next.delete(browserSessionId); return next })
+                        setPendingNavigationMap((previous) => { const next = new Map(previous); next.delete(browserSessionId); return next })
+                      }}
+                    />
+                  </div>
+                )}
                 {showPreviewPane && previewSessionId && (
-                  <div className="min-w-[260px] h-full overflow-hidden" style={previewPaneStyle}>
+                  <div className="min-w-0 h-full overflow-hidden" style={previewPaneStyle}>
                     <PreviewPanel sessionId={previewSessionId} />
                   </div>
                 )}
@@ -470,8 +527,24 @@ export function MainArea(): React.ReactElement {
                   />
                 )}
                 {showScratchPanel && (
-                  <div className="min-w-[260px] h-full overflow-hidden" style={scratchPaneStyle}>
+                  <div className="min-w-0 h-full overflow-hidden" style={scratchPaneStyle}>
                     <ScratchPadPane onClose={handleCloseScratchPanel} />
+                  </div>
+                )}
+                {showCanvasPanel && (
+                  <div className="min-w-[280px] h-full overflow-hidden" style={scratchPaneStyle}>
+                    {/* key 按会话 remount：切换 session 时重建干净的 nodes/history/refs/view，
+                        避免复用同一实例带旧会话遗留状态（新会话双击建 node 白屏）。
+                        TabErrorBoundary：画布渲染异常时降级为错误卡片，不再整树白屏。 */}
+                    <TabErrorBoundary
+                      key={canvasPanelSessionId ?? 'canvas-global'}
+                      sessionId={canvasPanelSessionId ?? 'canvas-global'}
+                    >
+                      <CanvasPane
+                        sessionId={canvasPanelSessionId ?? undefined}
+                        onClose={() => closeCanvasInSplit(store)}
+                      />
+                    </TabErrorBoundary>
                   </div>
                 )}
               </div>

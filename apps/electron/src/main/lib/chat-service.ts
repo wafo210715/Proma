@@ -211,13 +211,14 @@ export async function sendMessage(
     return
   }
 
-  // Codex OAuth uses the ChatGPT-specific Responses protocol, which Chat does
+  // Subscription OAuth uses Pi provider-specific transports, which Chat mode does
   // not currently implement. Keep this guard for historical conversations that
-  // still reference a formerly selectable Codex model.
-  if (channel.provider === 'openai-codex') {
+  // still reference a formerly selectable subscription model.
+  if (channel.provider === 'openai-codex' || channel.provider === 'xai') {
+    const providerName = channel.provider === 'xai' ? 'xAI（Grok OAuth）' : 'ChatGPT 订阅（Codex OAuth）'
     webContents.send(CHAT_IPC_CHANNELS.STREAM_ERROR, {
       conversationId,
-      error: 'Chat 模式暂不支持 ChatGPT 订阅（Codex OAuth），请切换到 Agent 模式使用。',
+      error: `Chat 模式暂不支持 ${providerName}，请切换到 Agent 模式使用。`,
     })
     return
   }
@@ -611,7 +612,8 @@ export async function generateTitle(input: GenerateTitleInput): Promise<string |
     apiKey = await resolveChannelRuntimeApiKey(channelId)
   } catch {
     console.warn('[标题生成] 解密 API Key 失败')
-    return null
+    // OpenCode Go / 自定义渠道无法解密也仍要完成重命名，避免对话长期停在默认标题。
+    return (channel.provider === 'opencode-go-openai' || channel.provider === 'custom') ? createFallbackTitle(userMessage) : null
   }
 
   try {
@@ -629,14 +631,15 @@ export async function generateTitle(input: GenerateTitleInput): Promise<string |
     const result = title ? sanitizeGeneratedTitle(title) : null
     if (!result) {
       console.warn('[标题生成] API 未返回可用标题')
-      // OpenCode Go 的服务端偶发返回空标题时，仍要完成重命名，避免对话长期停在默认标题。
-      return channel.provider === 'opencode-go-openai' ? createFallbackTitle(userMessage) : null
+      // OpenCode Go / 自定义渠道的服务端偶发返回空标题时，仍要完成重命名，避免对话长期停在默认标题。
+      return (channel.provider === 'opencode-go-openai' || channel.provider === 'custom') ? createFallbackTitle(userMessage) : null
     }
 
     console.log('[标题生成] 成功生成标题:', result)
     return result
   } catch (error) {
     console.warn('[标题生成] 请求失败:', error)
-    return null
+    // OpenCode Go / 自定义渠道的服务端偶发返回空标题/异常响应/超时，异常路径同样要完成重命名。
+    return (channel.provider === 'opencode-go-openai' || channel.provider === 'custom') ? createFallbackTitle(userMessage) : null
   }
 }

@@ -11,8 +11,8 @@
 import * as React from 'react'
 import { useAtom, useAtomValue, useSetAtom } from 'jotai'
 import { toast } from 'sonner'
-import { AlertTriangle, ArrowLeft, Bell, Box, Check, ChevronDown, Clock, Loader2, Pencil, Play, Settings, X } from 'lucide-react'
-import { detectIsWindows } from '@/lib/platform'
+import { AlertTriangle, ArrowLeft, Bell, Check, Clock, Loader2, Pencil, Play, Settings, X } from 'lucide-react'
+import { detectIsWindows, WINDOW_CONTROLS_INSET_RIGHT } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
@@ -34,12 +34,12 @@ import {
   automationToDraft,
   type AutomationDraft,
 } from '@/atoms/automation-atoms'
-import { agentWorkspacesAtom, agentSessionsAtom, agentChannelIdsAtom, agentRuntimeAtom, currentAgentWorkspaceIdAtom } from '@/atoms/agent-atoms'
+import { agentWorkspacesAtom, agentSessionsAtom, currentAgentWorkspaceIdAtom } from '@/atoms/agent-atoms'
 import { activeSessionIdAtom } from '@/atoms/tab-atoms'
 import { activeViewAtom, agentSkillsTabAtom } from '@/atoms/active-view'
-import { settingsOpenAtom, settingsTabAtom } from '@/atoms/settings-tab'
 import { useOpenSession } from '@/hooks/useOpenSession'
 import { MarkdownRichEditor } from '@/components/diff/MarkdownRichEditor'
+import { LocalProjectBadge } from '@/components/agent/LocalProjectBadge'
 import type {
   AutomationFeishuNotificationTarget,
   AutomationNotificationTarget,
@@ -47,7 +47,6 @@ import type {
   CreateAutomationInput,
   FeishuChatBinding,
   UpdateAutomationInput,
-  AgentRuntime,
 } from '@proma/shared'
 
 const NO_FEISHU_BINDING = '__none__'
@@ -72,6 +71,21 @@ function datetimeLocalToTs(value: string): number | undefined {
   return Number.isFinite(ts) ? ts : undefined
 }
 
+function getWeekdayPreset(days?: number[]): 'everyday' | 'weekdays' | 'weekends' | 'custom' {
+  const normalized = [...new Set(days ?? [])].sort((a, b) => a - b)
+  if (normalized.length === 0) return 'everyday'
+  if (normalized.join(',') === '1,2,3,4,5') return 'weekdays'
+  if (normalized.join(',') === '0,6') return 'weekends'
+  return 'custom'
+}
+
+function getWeekdaysFromPreset(value: string, current?: number[]): number[] {
+  if (value === 'weekdays') return [1, 2, 3, 4, 5]
+  if (value === 'weekends') return [0, 6]
+  if (value === 'custom') return current && current.length > 0 ? current : [1]
+  return []
+}
+
 function formatRunStatus(status: AutomationRun['status']): string {
   if (status === 'success') return '完成'
   if (status === 'error') return '失败'
@@ -83,7 +97,7 @@ function canPersistDraft(draft: AutomationDraft): boolean {
   return !!(draft.name.trim() && draft.prompt.trim())
 }
 
-/** 任务是否具备运行 / 启用所需的最小完整度（模型 + 工作区） */
+/** 任务是否具备运行 / 启用所需的最小完整度（模型 + 项目） */
 function isReadyToRun(draft: AutomationDraft): boolean {
   return canPersistDraft(draft) && !!draft.channelId && !!draft.workspaceId
 }
@@ -94,7 +108,7 @@ function listMissingFields(draft: AutomationDraft): string[] {
   if (!draft.name.trim()) missing.push('任务名称')
   if (!draft.prompt.trim()) missing.push('任务描述')
   if (!draft.channelId) missing.push('模型')
-  if (!draft.workspaceId) missing.push('工作区')
+  if (!draft.workspaceId) missing.push('项目')
   return missing
 }
 
@@ -105,12 +119,14 @@ function getDraftSignature(draft: AutomationDraft): string {
     prompt: draft.prompt.trim(),
     scheduleType: draft.scheduleType,
     intervalMinutes: draft.intervalMinutes,
+    activeWindowStart: draft.activeWindowStart ?? '',
+    activeWindowEnd: draft.activeWindowEnd ?? '',
+    activeWeekdays: draft.activeWeekdays ?? [],
     timeOfDay: draft.timeOfDay ?? '',
     dayOfWeek: draft.dayOfWeek ?? '',
     dayOfMonth: draft.dayOfMonth ?? '',
     scheduledAt: draft.scheduledAt ?? '',
     maxRuns: draft.maxRuns ?? '',
-    agentRuntime: draft.agentRuntime,
     channelId: draft.channelId,
     modelId: draft.modelId ?? '',
     workspaceId: draft.workspaceId ?? '',
@@ -127,12 +143,14 @@ function draftToCreateInput(draft: AutomationDraft): CreateAutomationInput {
     prompt: draft.prompt.trim(),
     scheduleType: draft.scheduleType,
     intervalMinutes: draft.intervalMinutes,
+    activeWindowStart: draft.activeWindowStart,
+    activeWindowEnd: draft.activeWindowEnd,
+    activeWeekdays: draft.activeWeekdays,
     timeOfDay: draft.timeOfDay,
     dayOfWeek: draft.dayOfWeek,
     dayOfMonth: draft.dayOfMonth,
     scheduledAt: draft.scheduledAt,
-    maxRuns: draft.maxRuns,
-    agentRuntime: draft.agentRuntime,
+    maxRuns: draft.maxRuns ?? null,
     channelId: draft.channelId,
     modelId: draft.modelId,
     workspaceId: draft.workspaceId,
@@ -151,12 +169,14 @@ function draftToUpdateInput(draft: AutomationDraft): UpdateAutomationInput {
     prompt: draft.prompt.trim(),
     scheduleType: draft.scheduleType,
     intervalMinutes: draft.intervalMinutes,
+    activeWindowStart: draft.activeWindowStart ?? null,
+    activeWindowEnd: draft.activeWindowEnd ?? null,
+    activeWeekdays: draft.activeWeekdays ?? null,
     timeOfDay: draft.timeOfDay,
     dayOfWeek: draft.dayOfWeek,
     dayOfMonth: draft.dayOfMonth,
     scheduledAt: draft.scheduledAt,
-    maxRuns: draft.maxRuns,
-    agentRuntime: draft.agentRuntime,
+    maxRuns: draft.maxRuns ?? null,
     channelId: draft.channelId,
     modelId: draft.modelId,
     workspaceId: draft.workspaceId ?? '',
@@ -192,22 +212,6 @@ function createFeishuTarget(binding: FeishuChatBinding): AutomationFeishuNotific
   }
 }
 
-function coerceAutomationDraftRuntime(
-  draft: AutomationDraft,
-  defaultAgentRuntime: AgentRuntime,
-  agentChannelIds: string[],
-): AutomationDraft {
-  const runtime: AgentRuntime = draft.id
-    ? draft.agentRuntime ?? defaultAgentRuntime
-    : defaultAgentRuntime
-
-  if (runtime === 'claude' && draft.channelId && !agentChannelIds.includes(draft.channelId)) {
-    return { ...draft, agentRuntime: runtime, channelId: '', modelId: undefined, active: false }
-  }
-
-  return draft.agentRuntime === runtime ? draft : { ...draft, agentRuntime: runtime }
-}
-
 function AutomationPromptEmptyGuide(): React.ReactElement {
   return (
     <div className="rounded-xl bg-foreground/[0.035] p-4 shadow-inner">
@@ -215,14 +219,14 @@ function AutomationPromptEmptyGuide(): React.ReactElement {
         <div>
           <div className="text-[13px] font-semibold text-foreground">推荐：让 Proma Agent 创建</div>
           <div className="mt-1 text-xs leading-relaxed text-muted-foreground">
-            在左侧会话里说清目标，并明确表示要求创建定时任务，Proma Agent 会生成任务描述，并补全周期、工作区和模型等配置，手动编辑更适合微调任务描述。
+            在左侧会话里说清目标，并明确表示要求创建定时任务，Proma Agent 会生成任务描述，并补全周期、项目和模型等配置，手动编辑更适合微调任务描述。
           </div>
         </div>
         <div className="h-px bg-border/50" />
         <div>
           <div className="text-[13px] font-medium text-foreground/85">手动编写时，只写任务本身</div>
           <div className="mt-1 text-xs leading-relaxed text-muted-foreground">
-            例：检查 Proma 仓库新增 issue，主动回复问答类问题，不清楚的部分整理到工作区目录下的 .context/issue-faq.md 文档；真正的 Bug 或请求罗列后发给我，不要记录任何重复的信息。
+            例：检查 Proma 仓库新增 issue，主动回复问答类问题，不清楚的部分整理到项目级 Context 的 .context/issue-faq.md 文档；真正的 Bug 或请求罗列后发给我，不要记录任何重复的信息。
           </div>
         </div>
       </div>
@@ -279,89 +283,21 @@ function SaveStatusBadge({
   )
 }
 
-const AGENT_RUNTIME_OPTIONS: Array<{ value: AgentRuntime; label: string; description: string }> = [
-  { value: 'claude', label: 'Claude', description: '使用 Claude Agent SDK；模型仅限已标记为 Agent 兼容的渠道' },
-  { value: 'pi', label: 'Pi', description: '使用 Pi Agent SDK；可选择任意已启用模型渠道' },
-]
-
-function AutomationRuntimeSelector({
-  runtime,
-  onChange,
-}: {
-  runtime: AgentRuntime
-  onChange: (runtime: AgentRuntime) => void
-}): React.ReactElement {
-  const [open, setOpen] = React.useState(false)
-  const current = AGENT_RUNTIME_OPTIONS.find((option) => option.value === runtime) ?? AGENT_RUNTIME_OPTIONS[0]!
-
-  const handleSelect = (nextRuntime: AgentRuntime): void => {
-    onChange(nextRuntime)
-    setOpen(false)
-  }
-
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          className="model-selector-trigger flex h-9 items-center justify-between rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors hover:bg-foreground/[0.02] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          aria-label={`Agent 内核：${current.label}`}
-        >
-          <span className="flex min-w-0 items-center gap-2">
-            <Box className="size-4 shrink-0 text-muted-foreground" />
-            <span className="truncate">{current.label}</span>
-          </span>
-          <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-        </button>
-      </PopoverTrigger>
-      <PopoverContent className="w-[260px] p-1.5" align="start" onOpenAutoFocus={(e) => e.preventDefault()}>
-        <div className="flex flex-col gap-1">
-          {AGENT_RUNTIME_OPTIONS.map((option) => {
-            const active = option.value === runtime
-            return (
-              <button
-                key={option.value}
-                type="button"
-                aria-pressed={active}
-                className={cn(
-                  'flex items-start gap-2 rounded-md px-2.5 py-2 text-left transition-colors hover:bg-accent hover:text-accent-foreground',
-                  active && 'bg-accent text-accent-foreground',
-                )}
-                onClick={() => handleSelect(option.value)}
-              >
-                <Box className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                <span className="min-w-0 flex-1">
-                  <span className="block text-xs font-medium">{option.label}</span>
-                  <span className="mt-0.5 block text-[11px] leading-relaxed text-muted-foreground">{option.description}</span>
-                </span>
-                {active && <Check className="mt-0.5 size-3.5 shrink-0" />}
-              </button>
-            )
-          })}
-        </div>
-      </PopoverContent>
-    </Popover>
-  )
-}
-
-export function AutomationFormView(): React.ReactElement | null {
+export function AutomationFormView({ standalone = false }: { standalone?: boolean } = {}): React.ReactElement | null {
   const isWindows = React.useMemo(() => detectIsWindows(), [])
   const [formState, setFormState] = useAtom(automationFormAtom)
   const setAutomations = useSetAtom(automationsAtom)
   const workspaces = useAtomValue(agentWorkspacesAtom)
   const automations = useAtomValue(automationsAtom)
-  const agentChannelIds = useAtomValue(agentChannelIdsAtom)
-  const defaultAgentRuntime = useAtomValue(agentRuntimeAtom)
   const [agentSessions, setAgentSessions] = useAtom(agentSessionsAtom)
   const activeSessionId = useAtomValue(activeSessionIdAtom)
   const currentAgentWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
   const setActiveView = useSetAtom(activeViewAtom)
   const setAgentSkillsTab = useSetAtom(agentSkillsTabAtom)
-  const setSettingsOpen = useSetAtom(settingsOpenAtom)
-  const setSettingsTab = useSetAtom(settingsTabAtom)
   const openSession = useOpenSession()
 
   const [form, setForm] = React.useState<AutomationDraft | null>(null)
+  const [weekdayPresetOverride, setWeekdayPresetOverride] = React.useState<'custom' | null>(null)
   const [editingName, setEditingName] = React.useState(false)
   const [runningNow, setRunningNow] = React.useState(false)
   const [feishuBindings, setFeishuBindings] = React.useState<FeishuChatBinding[]>([])
@@ -383,12 +319,9 @@ export function AutomationFormView(): React.ReactElement | null {
 
   React.useEffect(() => {
     if (formState.open && formState.draft) {
-      const draft = coerceAutomationDraftRuntime(
-        formState.draft,
-        defaultAgentRuntime,
-        agentChannelIds,
-      )
+      const draft = formState.draft
       setForm(draft)
+      setWeekdayPresetOverride(null)
       lastSavedSignatureRef.current = draft.id && canPersistDraft(draft)
         ? getDraftSignature(draft)
         : ''
@@ -576,7 +509,7 @@ export function AutomationFormView(): React.ReactElement | null {
   const handleRunNow = async (): Promise<void> => {
     const latest = latestFormRef.current
     if (!latest || !isReadyToRun(latest)) {
-      const missing = latest ? listMissingFields(latest) : ['任务名称', '任务描述', '模型', '工作区']
+      const missing = latest ? listMissingFields(latest) : ['任务名称', '任务描述', '模型', '项目']
       toast.error(`请先补全：${missing.join('、')}`)
       return
     }
@@ -656,15 +589,6 @@ export function AutomationFormView(): React.ReactElement | null {
   const selectedModel = form.channelId && form.modelId
     ? { channelId: form.channelId, modelId: form.modelId }
     : null
-  const modelFilterChannelIds = form.agentRuntime === 'pi' ? undefined : agentChannelIds
-  const handleRuntimeChange = (runtime: AgentRuntime): void => {
-    const patch: Partial<AutomationDraft> = { agentRuntime: runtime }
-    if (runtime === 'claude' && form.channelId && !agentChannelIds.includes(form.channelId)) {
-      patch.channelId = ''
-      patch.modelId = undefined
-    }
-    update(patch)
-  }
   const feishuTarget = getFeishuTarget(form.notificationTargets)
   const selectedFeishuBinding = feishuTarget
     ? feishuBindings.find((binding) => binding.botId === feishuTarget.botId && binding.chatId === feishuTarget.chatId)
@@ -677,7 +601,7 @@ export function AutomationFormView(): React.ReactElement | null {
     <div className="titlebar-no-drag absolute inset-0 z-10 bg-content-area flex animate-in fade-in duration-200">
       {/* 左栏：自然语言任务描述（主角） */}
       <div className="flex-1 min-w-0 flex flex-col">
-        <div className="flex items-center gap-2 px-6 py-4 flex-shrink-0">
+        <div className={cn('flex items-center gap-2 px-6 flex-shrink-0', standalone ? 'titlebar-drag-region pt-8 pb-4' : 'py-4')}>
           <button
             type="button"
             onClick={close}
@@ -689,7 +613,7 @@ export function AutomationFormView(): React.ReactElement | null {
           </button>
           <Clock className="size-4 text-primary flex-shrink-0" />
           {editingName ? (
-            <div className="flex items-center gap-1.5 flex-1 min-w-0">
+            <div className="titlebar-no-drag flex items-center gap-1.5 flex-1 min-w-0">
               <input
                 ref={nameInputRef}
                 value={form.name}
@@ -710,7 +634,7 @@ export function AutomationFormView(): React.ReactElement | null {
               </button>
             </div>
           ) : (
-            <div className="flex items-center gap-1.5 flex-1 min-w-0">
+            <div className="titlebar-no-drag flex items-center gap-1.5 flex-1 min-w-0">
               <span className="truncate text-sm font-semibold text-foreground">
                 {form.name.trim() || (isEdit ? '未命名任务' : '新建定时任务')}
               </span>
@@ -755,9 +679,10 @@ export function AutomationFormView(): React.ReactElement | null {
 
       {/* 右栏：配置 sidebar */}
       <div className="w-[340px] flex-shrink-0 border-l border-border/50 flex flex-col bg-content-area">
-        <div className="flex items-center justify-between gap-2 px-4 py-4 flex-shrink-0">
-          <span className="text-sm font-semibold text-foreground">配置</span>
-          <div className="flex items-center gap-1">
+        <div className={cn('relative flex items-center justify-between gap-2 px-4 flex-shrink-0', standalone ? 'titlebar-no-drag pt-8 pb-4' : 'py-4')}>
+          {standalone && <div className={cn('absolute inset-y-0 left-0 z-0 titlebar-drag-region', isWindows ? WINDOW_CONTROLS_INSET_RIGHT : 'right-0')} />}
+          <span className="relative z-[1] text-sm font-semibold text-foreground">配置</span>
+          <div className="relative z-[1] flex items-center gap-1">
             {!isWindows && (
             <button
               onClick={close}
@@ -833,11 +758,58 @@ export function AutomationFormView(): React.ReactElement | null {
               value={form.scheduleType}
               onValueChange={(v) => {
                 const next = v as AutomationDraft['scheduleType']
-                // 切到 once 且尚无触发时间时，默认填入 1 小时后，避免空值导致自动保存失败
-                if (next === 'once' && !form.scheduledAt) {
-                  update({ scheduleType: next, scheduledAt: Date.now() + 60 * 60 * 1000 })
+                // 默认值必须写入 draft：展示层 fallback 不会进入自动保存请求。
+                // 同时立即清除不适用字段，避免后端归一化后旧配置仍滞留本地并在切回时复活。
+                const clearIntervalFields = {
+                  activeWindowStart: undefined,
+                  activeWindowEnd: undefined,
+                  activeWeekdays: undefined,
+                }
+                if (next === 'interval') {
+                  update({
+                    scheduleType: next,
+                    intervalMinutes: form.intervalMinutes ?? 10,
+                    timeOfDay: undefined,
+                    dayOfWeek: undefined,
+                    dayOfMonth: undefined,
+                    scheduledAt: undefined,
+                  })
+                } else if (next === 'daily') {
+                  update({
+                    scheduleType: next,
+                    ...clearIntervalFields,
+                    timeOfDay: form.timeOfDay ?? '09:00',
+                    dayOfWeek: undefined,
+                    dayOfMonth: undefined,
+                    scheduledAt: undefined,
+                  })
+                } else if (next === 'weekly') {
+                  update({
+                    scheduleType: next,
+                    ...clearIntervalFields,
+                    timeOfDay: form.timeOfDay ?? '09:00',
+                    dayOfWeek: form.dayOfWeek ?? 1,
+                    dayOfMonth: undefined,
+                    scheduledAt: undefined,
+                  })
+                } else if (next === 'monthly') {
+                  update({
+                    scheduleType: next,
+                    ...clearIntervalFields,
+                    timeOfDay: form.timeOfDay ?? '09:00',
+                    dayOfWeek: undefined,
+                    dayOfMonth: form.dayOfMonth ?? 1,
+                    scheduledAt: undefined,
+                  })
                 } else {
-                  update({ scheduleType: next })
+                  update({
+                    scheduleType: next,
+                    ...clearIntervalFields,
+                    timeOfDay: undefined,
+                    dayOfWeek: undefined,
+                    dayOfMonth: undefined,
+                    scheduledAt: form.scheduledAt ?? Date.now() + 60 * 60 * 1000,
+                  })
                 }
               }}
             >
@@ -867,6 +839,76 @@ export function AutomationFormView(): React.ReactElement | null {
                 />
                 <span className="text-xs text-muted-foreground shrink-0">分钟一次</span>
               </div>
+              <div className="flex items-center justify-between pt-1">
+                <div>
+                  <Label htmlFor="auto-window-enabled">仅在每日时段内运行</Label>
+                  <p className="mt-0.5 text-xs text-muted-foreground">留空则全天按间隔运行</p>
+                </div>
+                <Switch
+                  id="auto-window-enabled"
+                  checked={!!(form.activeWindowStart && form.activeWindowEnd)}
+                  onCheckedChange={(enabled) => update(enabled
+                    ? { activeWindowStart: form.activeWindowStart ?? '09:00', activeWindowEnd: form.activeWindowEnd ?? '18:00' }
+                    : { activeWindowStart: undefined, activeWindowEnd: undefined })}
+                />
+              </div>
+              {form.activeWindowStart && form.activeWindowEnd && (
+                <div className="flex items-center gap-2 pt-1">
+                  <input
+                    aria-label="每日运行开始时间"
+                    type="time"
+                    value={form.activeWindowStart}
+                    onChange={(e) => update({ activeWindowStart: e.target.value })}
+                    className="flex h-9 min-w-0 flex-1 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  />
+                  <span className="text-xs text-muted-foreground">至</span>
+                  <input
+                    aria-label="每日运行结束时间"
+                    type="time"
+                    value={form.activeWindowEnd}
+                    onChange={(e) => update({ activeWindowEnd: e.target.value })}
+                    className="flex h-9 min-w-0 flex-1 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  />
+                </div>
+              )}
+              <div className="flex items-center justify-between pt-1">
+                <Label>运行日</Label>
+                <Select
+                  value={weekdayPresetOverride ?? getWeekdayPreset(form.activeWeekdays)}
+                  onValueChange={(value) => {
+                    if (value === 'custom') setWeekdayPresetOverride('custom')
+                    else setWeekdayPresetOverride(null)
+                    update({ activeWeekdays: getWeekdaysFromPreset(value, form.activeWeekdays) })
+                  }}
+                >
+                  <SelectTrigger className="h-9 w-[150px]"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="everyday">每天</SelectItem>
+                    <SelectItem value="weekdays">工作日（周一至周五）</SelectItem>
+                    <SelectItem value="weekends">周末（周六、周日）</SelectItem>
+                    <SelectItem value="custom">自定义</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {(weekdayPresetOverride ?? getWeekdayPreset(form.activeWeekdays)) === 'custom' && (
+                <div className="flex flex-wrap gap-1.5 pt-1">
+                  {AUTOMATION_WEEKDAY_OPTIONS.map((option) => {
+                    const selected = (form.activeWeekdays ?? []).includes(option.value)
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => update({ activeWeekdays: selected
+                          ? (form.activeWeekdays ?? []).filter((day) => day !== option.value)
+                          : [...(form.activeWeekdays ?? []), option.value].sort((a, b) => a - b) })}
+                        className={cn('rounded-md border px-2.5 py-1 text-xs transition-colors', selected ? 'border-primary bg-primary text-primary-foreground' : 'border-input text-muted-foreground hover:bg-foreground/[0.04]')}
+                      >
+                        {option.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
             </div>
           )}
 
@@ -1010,49 +1052,23 @@ export function AutomationFormView(): React.ReactElement | null {
             </div>
           )}
 
-          <div className="flex flex-col gap-2">
-            <Label>Agent 内核</Label>
-            <AutomationRuntimeSelector runtime={form.agentRuntime} onChange={handleRuntimeChange} />
-            <span className="pl-2.5 text-xs text-muted-foreground leading-relaxed">
-              Pi 内核支持选择任意已启用模型渠道；Claude 内核仅显示已勾选为 Agent 兼容的渠道。
-            </span>
-          </div>
-
-          {/* 选择模型（Claude 内核仅显示 Agent 兼容渠道；Pi 内核显示所有已启用渠道） */}
+          {/* Pi supports any enabled model channel. */}
           <div className="flex flex-col gap-2">
             <Label>选择模型</Label>
-            {form.agentRuntime === 'claude' && agentChannelIds.length === 0 ? (
-              <div className="flex items-center gap-2 rounded-md border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">
-                <Settings size={14} className="shrink-0" />
-                <span>尚未启用任何 Agent 兼容渠道</span>
-                <button
-                  type="button"
-                  className="ml-auto text-xs underline underline-offset-2 hover:text-foreground transition-colors"
-                  onClick={() => {
-                    setSettingsTab('channels')
-                    setSettingsOpen(true)
-                  }}
-                >
-                  前往渠道设置
-                </button>
-              </div>
-            ) : (
-              <ModelSelector
-                filterChannelIds={modelFilterChannelIds}
-                externalSelectedModel={selectedModel}
-                showChannelInTrigger
-                onModelSelect={(opt) => update({ channelId: opt.channelId, modelId: opt.modelId })}
-              />
-            )}
+            <ModelSelector
+              externalSelectedModel={selectedModel}
+              showChannelInTrigger
+              onModelSelect={(opt) => update({ channelId: opt.channelId, modelId: opt.modelId })}
+            />
           </div>
 
-          {/* 工作区（必选，默认填入当前会话所在工作区） */}
+          {/* 项目（必选，默认填入当前会话所在项目） */}
           <div className="flex flex-col gap-2">
-            <Label>工作区</Label>
+            <Label>项目</Label>
             {workspaces.length === 0 ? (
               <div className="flex items-center gap-2 rounded-md border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">
                 <Settings size={14} className="shrink-0" />
-                <span>尚未创建任何工作区</span>
+                <span>尚未创建任何项目</span>
                 <button
                   type="button"
                   className="ml-auto text-xs underline underline-offset-2 hover:text-foreground transition-colors"
@@ -1069,10 +1085,18 @@ export function AutomationFormView(): React.ReactElement | null {
                 value={form.workspaceId ?? ''}
                 onValueChange={(v) => update({ workspaceId: v })}
               >
-                <SelectTrigger><SelectValue placeholder="选择工作区" /></SelectTrigger>
+                <SelectTrigger><SelectValue placeholder="选择项目" /></SelectTrigger>
                 <SelectContent>
                   {workspaces.map((ws) => (
-                    <SelectItem key={ws.id} value={ws.id}>{ws.name}</SelectItem>
+                    <SelectItem key={ws.id} value={ws.id}>
+                      <span className="flex items-center gap-1.5">
+                        <span>{ws.name}</span>
+                        <LocalProjectBadge
+                          projectRootPath={ws.projectRootPath}
+                          projectRootStatus={ws.projectRootStatus}
+                        />
+                      </span>
+                    </SelectItem>
                   ))}
                 </SelectContent>
               </Select>

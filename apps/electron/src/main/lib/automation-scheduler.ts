@@ -19,7 +19,6 @@ import {
   AUTOMATION_MAX_CONSECUTIVE_FAILURES,
   AUTOMATION_IPC_CHANNELS,
   AUTOMATION_DEFAULT_SESSION_MODE,
-  type AgentRuntime,
   type Automation,
   type AutomationRun,
 } from '@proma/shared'
@@ -64,6 +63,15 @@ function isSameLocalDay(a: number, b: number): boolean {
   )
 }
 
+function formatWeekdays(days?: number[]): string {
+  const normalized = [...new Set(days ?? [])].sort((a, b) => a - b)
+  if (normalized.length === 0) return '每天'
+  if (normalized.join(',') === '1,2,3,4,5') return '工作日'
+  if (normalized.join(',') === '0,6') return '周末'
+  const names = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+  return normalized.map((day) => names[day] ?? '').join('、')
+}
+
 function formatScheduleLabel(a: Automation): string {
   if (a.scheduleType === 'once') {
     const when = a.scheduledAt
@@ -80,9 +88,10 @@ function formatScheduleLabel(a: Automation): string {
   }
   if (a.scheduleType === 'monthly') return `每月 ${a.dayOfMonth ?? 1} 号 ${a.timeOfDay ?? '09:00'}`
   const min = a.intervalMinutes
-  if (min < 60) return `每 ${min} 分钟`
-  if (min < 1440) return `每 ${min / 60} 小时`
-  return `每 ${min / 1440} 天`
+  const intervalLabel = min < 60 ? `每 ${min} 分钟` : min < 1440 ? `每 ${min / 60} 小时` : `每 ${min / 1440} 天`
+  const weekdayLabel = a.activeWeekdays && a.activeWeekdays.length > 0 ? `，${formatWeekdays(a.activeWeekdays)}` : ''
+  const windowLabel = a.activeWindowStart && a.activeWindowEnd ? `，${a.activeWindowStart}–${a.activeWindowEnd}` : ''
+  return `${intervalLabel}${weekdayLabel}${windowLabel}`
 }
 
 let tickTimer: NodeJS.Timeout | undefined
@@ -126,7 +135,6 @@ export async function runAutomation(automation: Automation, manual = false): Pro
     //  - daily：再叠加一层「同一自然日」+「上下文占用率 < 阈值」双重判断
     //    （基于 automation.lastRunAt 排除 skipped 运行；占用率读不到时按"未知"保守复用）
     const sessionMode = automation.sessionMode ?? AUTOMATION_DEFAULT_SESSION_MODE
-    const agentRuntime: AgentRuntime = automation.agentRuntime ?? 'claude'
 
     let reuseSessionId: string | undefined
     const lastSessionMeta = automation.lastSessionId ? getAgentSessionMeta(automation.lastSessionId) : undefined
@@ -157,20 +165,12 @@ export async function runAutomation(automation: Automation, manual = false): Pro
     if (reuseSessionId) {
       targetSessionId = reuseSessionId
     } else {
-      const created = createAgentSession(automation.name, automation.channelId, automation.workspaceId, automation.modelId, agentRuntime)
-      updateAgentSessionMeta(created.id, { sourceAutomationId: automation.id, agentRuntime })
+      const created = createAgentSession(automation.name, automation.channelId, automation.workspaceId, automation.modelId)
+      updateAgentSessionMeta(created.id, { sourceAutomationId: automation.id })
       targetSessionId = created.id
       setLastSessionId(automation.id, created.id)
     }
 
-    const targetSessionMeta = getAgentSessionMeta(targetSessionId)
-    const previousAgentRuntime: AgentRuntime = targetSessionMeta?.agentRuntime ?? 'claude'
-    if (targetSessionMeta && previousAgentRuntime !== agentRuntime) {
-      updateAgentSessionMeta(targetSessionId, {
-        agentRuntime,
-        sdkSessionId: undefined,
-      })
-    }
 
     await new Promise<void>((resolveRun) => {
       let settled = false
@@ -217,7 +217,6 @@ export async function runAutomation(automation: Automation, manual = false): Pro
           automationContext: `这是 Proma 定时任务「${automation.name}」的自动执行（ID: ${automation.id}，${formatScheduleLabel(automation)}）。这本身就是定时任务，不要建议用户再创建定时任务。直接执行任务即可。如发现本任务连续失败、输出价值低、频率不合适或提示词不完整，可以使用 automation 工具读取并更新当前任务。`,
           channelId: automation.channelId,
           modelId: automation.modelId,
-          agentRuntime,
           workspaceId: automation.workspaceId,
           permissionModeOverride: automation.permissionMode ?? 'bypassPermissions',
           triggeredBy: 'automation',
@@ -258,7 +257,7 @@ export async function runAutomationNow(id: string): Promise<void> {
   if (!automation) throw new Error(`定时任务不存在: ${id}`)
   // 草稿态（缺 channelId / workspaceId）拒绝运行，兜底前端 disabled 防止 IPC 绕过
   if (!automation.channelId || !automation.workspaceId) {
-    throw new Error('请先为该任务配置模型与工作区')
+    throw new Error('请先为该任务配置模型与项目')
   }
   await runAutomation(automation, true)
 }
