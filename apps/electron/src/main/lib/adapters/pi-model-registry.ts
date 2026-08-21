@@ -123,19 +123,21 @@ function compilePiReasoningCapabilities(
         },
         thinkingLevelMap,
       }
-    case 'zai-toggle':
-      return {
-        compat: {
-          supportsDeveloperRole: false,
-          supportsReasoningEffort: false,
-          thinkingFormat: 'zai',
-          zaiToolStream: true,
-        },
-        thinkingLevelMap,
-      }
-    case 'anthropic-manual':
-      return { thinkingLevelMap }
   }
+}
+
+/**
+ * Proma re-registers every non-OAuth channel as an ephemeral Pi provider. Preserve
+ * only this protocol-safe catalog flag: current Claude models require adaptive
+ * thinking, while copying the complete catalog compat object could leak unrelated
+ * tool/sampling behaviour across provider protocols.
+ */
+export function shouldForcePiAdaptiveThinking(
+  api: Api,
+  catalogModel: { api: Api, compat?: unknown } | undefined,
+): boolean {
+  if (api !== 'anthropic-messages' || catalogModel?.api !== 'anthropic-messages') return false
+  return (catalogModel.compat as { forceAdaptiveThinking?: unknown } | undefined)?.forceAdaptiveThinking === true
 }
 
 const CODEX_56_THINKING_LEVEL_MAP = compilePiReasoningCapabilities('openai-responses', 'gpt-5.6')?.thinkingLevelMap
@@ -323,6 +325,7 @@ function normalizePiApi(provider: ProviderType): Api {
     case 'opencode-go-openai':
     case 'zhipu':
     case 'doubao':
+    case 'doubao-api':
     case 'qwen':
     case 'custom':
       return 'openai-completions'
@@ -552,16 +555,19 @@ async function resolvePiModelDefaults(input: PiAgentQueryOptions): Promise<PiMod
   const api = normalizePiApi(input.provider)
   const providerSpecificCapabilities = compilePiReasoningCapabilities(api, input.model)
   const glmModelId = input.model?.toLowerCase()
-  const isVolcengineGlm5x = (input.provider === 'doubao' || input.provider === 'ark-coding-plan')
+  const isVolcengineGlm5x = (input.provider === 'doubao' || input.provider === 'doubao-api' || input.provider === 'ark-coding-plan')
     && (glmModelId === 'glm-5.2' || glmModelId === 'glm-5.3')
   const isCatalogMissingGlm53 = !catalogModel && glmModelId === 'glm-5.3'
   const catalogContextWindow = catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
   const inferredContextWindow = inferContextWindow(input.model) ?? DEFAULT_CONTEXT_WINDOW
+  const shouldForceAdaptiveThinking = shouldForcePiAdaptiveThinking(api, catalogModel)
   return {
     reasoning: catalogModel?.reasoning ?? true,
     thinkingLevelMap: providerSpecificCapabilities?.thinkingLevelMap
       ?? catalogModel?.thinkingLevelMap,
-    compat: providerSpecificCapabilities?.compat,
+    compat: shouldForceAdaptiveThinking
+      ? { ...providerSpecificCapabilities?.compat, forceAdaptiveThinking: true }
+      : providerSpecificCapabilities?.compat,
     input: catalogModel ? [...catalogModel.input] : ['text', 'image'],
     cost: catalogModel ? { ...catalogModel.cost } : { ...ZERO_MODEL_COST },
     // Codex 对齐策略优先；其他模型仍保留 catalog 与 shared inference 中更大的已验证能力。
