@@ -4,11 +4,11 @@
  * 1M 上下文已随各家模型转正为默认能力（Anthropic 于 2026-03 对 Opus 4.6 /
  * Sonnet 4.6 起 GA，无需 context-1m beta header；Sonnet 5 / Opus 4.7+ 延续），
  * 故不再下发任何 beta。Proma 统一按模型能力推断窗口，前端展示、后端用量统计和运行时注册
- * 必须共用同一份判定，避免出现"UI 显示 1M 但实际只 200K"的不一致。
+ * 必须共用同一份判定，避免出现"UI 显示 1M 但实际只 262K"的不一致。
  */
 
-/** 默认上下文窗口（无法识别模型时使用） */
-export const DEFAULT_CONTEXT_WINDOW = 200_000
+/** 默认上下文窗口（无法识别模型时使用），即 256 Ki tokens。 */
+export const DEFAULT_CONTEXT_WINDOW = 262_144
 
 /** 1M 上下文窗口 */
 export const ONE_MILLION_CONTEXT_WINDOW = 1_000_000
