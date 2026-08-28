@@ -1,22 +1,19 @@
 /**
  * Canvas 侧边分屏入口。
  *
- * 与 Scratch Pad / Browser 的 tear-off 保持同一交互模式：
+ * 与 Browser 的 tear-off 保持同一交互模式：
  * - openCanvasInSplit: 回到最近的 Agent 会话，把全局画布固定到右侧分屏
  * - openSessionCanvasInSplit: 打开指定 session 的专属画布到右侧分屏
  * - closeCanvasInSplit: 关闭分屏，恢复 Canvas 固定 Tab
  *
- * 互斥：Scratch Pad / Browser / Canvas 三者共享右侧槽位，同时只显示一个。
+ * 互斥：Browser / Canvas 共享右侧槽位，同时只显示一个。
  */
 
 import type { useStore } from 'jotai'
 import {
   activeTabIdAtom,
-  scratchPadPanelOpenAtom,
   canvasPanelOpenAtom,
   canvasPanelSessionIdAtom,
-  SCRATCH_PAD_ID,
-  SCRATCH_PAD_TITLE,
   CANVAS_ID,
   CANVAS_TITLE,
   tabsAtom,
@@ -98,8 +95,7 @@ export function openCanvasInSplit(store: JotaiStore): boolean {
     }).catch(console.error)
   }
 
-  // 互斥：Scratch / Canvas 二选一
-  store.set(scratchPadPanelOpenAtom, false)
+  // Browser / Canvas 右侧槽位互斥由各自面板的显示优先级保证；此处只打开画布。
   store.set(canvasPanelOpenAtom, true)
   store.set(canvasPanelSessionIdAtom, null) // 全局画布
   return true
@@ -118,8 +114,7 @@ export function openSessionCanvasInSplit(store: JotaiStore, sessionId: string): 
   const session = sessions.find((s) => s.id === sessionId)
   if (!session) return false
 
-  // 互斥：Scratch / Canvas 二选一
-  store.set(scratchPadPanelOpenAtom, false)
+  // 右侧槽位切到画布（Browser 面板由其自身显示条件让位）。
   store.set(canvasPanelOpenAtom, true)
   store.set(canvasPanelSessionIdAtom, sessionId)
   return true
@@ -151,12 +146,6 @@ export function closeCanvasInSplit(store: JotaiStore): void {
   // 如果 Canvas Tab 已被 tear-off 移除，恢复固定 Tab 顺序
   if (tabs.some((tab) => tab.id === CANVAS_ID)) return
 
-  const nonPinnedTabs = tabs.filter(
-    (t) => t.id !== SCRATCH_PAD_ID && t.id !== CANVAS_ID
-  )
-  const scratchTab: TabItem = tabs.find((t) => t.id === SCRATCH_PAD_ID) ?? {
-    id: SCRATCH_PAD_ID, type: 'scratch', sessionId: SCRATCH_PAD_ID, title: SCRATCH_PAD_TITLE,
-  }
   const canvasTab: TabItem = tabs.find((t) => t.id === CANVAS_ID) ?? createCanvasTab()
-  store.set(tabsAtom, [scratchTab, canvasTab, ...nonPinnedTabs])
+  store.set(tabsAtom, [canvasTab, ...tabs.filter((t) => t.id !== CANVAS_ID)])
 }

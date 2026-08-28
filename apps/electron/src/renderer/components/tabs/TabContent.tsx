@@ -14,7 +14,6 @@ import { AgentView } from '@/components/agent'
 import { PreviewTabContent } from '@/components/diff/PreviewTabContent'
 import { MarkdownRichEditor } from '@/components/diff/MarkdownRichEditor'
 import { MarkdownToc } from '@/components/diff/MarkdownToc'
-import { ScratchPadView } from '@/components/scratch-pad/ScratchPadView'
 import { CanvasView } from '@/components/canvas/CanvasView'
 import { TabErrorBoundary } from './TabErrorBoundary'
 
@@ -26,23 +25,12 @@ export function TabContent({ tabId }: TabContentProps): React.ReactElement {
   const tabs = useAtomValue(tabsAtom)
   const tab = tabs.find((t) => t.id === tabId)
 
-  // [FLASH-DEBUG] 监控 tab 查找失败（说明 tabId 指向了不存在的标签）
-  React.useEffect(() => {
-    if (!tab) {
-      console.warn(`[FLASH-DEBUG] TabContent: tab not found for tabId="${tabId}"`, { tabIds: tabs.map(t => t.id) })
-    }
-  }, [tab, tabId, tabs])
-
   if (!tab) {
     return (
       <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
         标签页不存在
       </div>
     )
-  }
-
-  if (tab.type === 'scratch') {
-    return <ScratchPadView />
   }
 
   if (tab.type === 'canvas') {

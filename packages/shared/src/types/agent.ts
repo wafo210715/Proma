@@ -769,6 +769,14 @@ export interface AgentSessionMeta {
   attachedFiles?: string[]
   /** 分叉来源：源会话的 Proma 工作目录（SDK session 文件在此目录的项目空间中，首次 resume 后清除） */
   forkSourceDir?: string
+  /** Pi `/tree` 探索分支所属的主线会话；仅探索分支设置，普通 fork 保持 undefined。 */
+  explorationParentSessionId?: string
+  /** Pi `/tree` 探索分支的 assistant 分叉锚点。 */
+  explorationSourceMessageId?: string
+  /** 用户可读的分叉来源，用于重新打开探索分支时恢复上下文提示。 */
+  explorationSourceLabel?: string
+  /** 探索分支的首条新增用户消息已触发过一次标题初始化，防止后续对话覆盖该名称。 */
+  explorationTitleInitializedAt?: number
   /** 历史兼容字段：旧版手动保留状态 */
   manualWorking?: boolean
   /** Agent 执行完成但用户尚未清除完成状态 */
@@ -982,6 +990,60 @@ export interface WorkspaceMcpConfig {
   servers: Record<string, McpServerEntry>
 }
 
+/** Result of an atomic main-process MCP enable/install and validation operation. */
+export interface McpConnectionMutationResult {
+  config: WorkspaceMcpConfig
+  verification: {
+    success: boolean
+    message: string
+  }
+}
+
+export interface McpInstallMutationResult extends McpConnectionMutationResult {
+  installed: boolean
+}
+
+/** OAuth-capable remote MCP provider currently supported by the built-in connector flow. */
+export type McpOAuthProvider = 'notion' | 'github'
+
+/** Renderer-to-main request for a remote MCP authorization-code + PKCE flow. */
+export interface StartMcpOAuthInput {
+  workspaceSlug: string
+  serverName: string
+  provider: McpOAuthProvider
+  serverUrl: string
+}
+
+/** OAuth connection result that deliberately excludes all secret material. */
+export interface McpOAuthStartResult {
+  provider: McpOAuthProvider
+  serverName: string
+  expiresAt?: number
+}
+
+export interface SaveWorkspaceMcpConfigOptions {
+  /** Names explicitly disabled by a user action; cancels any in-flight validation. */
+  explicitlyDisabledServerNames?: string[]
+}
+
+/** Store a static MCP token in Keychain-backed safeStorage; never persisted in mcp.json. */
+export interface SaveMcpApiKeyInput {
+  workspaceSlug: string
+  serverName: string
+  serverUrl: string
+  headerName: string
+  value: string
+}
+
+/** Non-sensitive status for a CLI integration. Secret values are never returned to the renderer. */
+export interface CliIntegrationStatus {
+  id: string
+  /** Whether the third-party CLI reports an authenticated account. */
+  connected: boolean
+  /** Whether Proma is permitted to use this CLI in the current workspace. */
+  enabled: boolean
+}
+
 // ===== Skill 元数据 =====
 
 /** 从其他工作区导入的 Skill 来源元数据 */
@@ -1138,7 +1200,16 @@ export interface WorkspaceMemorySummary {
 
 /** 工作区能力摘要（MCP + Skill 计数） */
 export interface WorkspaceCapabilities {
-  mcpServers: Array<{ name: string; enabled: boolean; type: McpTransportType }>
+  /** Only non-sensitive validation evidence required for UI state and # MCP filtering. */
+  mcpServers: Array<{
+    name: string
+    enabled: boolean
+    type: McpTransportType
+    lastTestResult?: {
+      success: boolean
+      timestamp: number
+    }
+  }>
   builtinMcpServers: BuiltinMcpServerSummary[]
   skills: SkillMeta[]
   memory: WorkspaceMemorySummary
@@ -1182,8 +1253,8 @@ export interface AgentSendInput {
   startedAt?: number
   /** 用户点击错误消息的重试时，指向本轮开始前应删除的错误 UUID。 */
   retryOfErrorUuid?: string
-  /** 触发来源：用户手动、定时任务、父 Agent 委派（用于 UI 区分标记） */
-  triggeredBy?: 'user' | 'automation' | 'delegation'
+  /** 触发来源：用户手动、定时任务、父 Agent 委派或外部 Bridge（用于权限与 UI 区分）。 */
+  triggeredBy?: 'user' | 'automation' | 'delegation' | 'external'
   /** 定时任务执行上下文（注入到系统提示词，用户不可见） */
   automationContext?: string
 }
@@ -1193,6 +1264,22 @@ export interface AgentSendInput {
 /** 等待当前 run 结束后由主进程启动的消息。 */
 export interface AgentDeferredQueueMessageInput extends AgentSendInput {
   queueMessageId: string
+}
+
+/**
+ * 消息提交意图。由主进程基于实时运行状态原子决定注入活跃 Agent 或保留到 deferred queue，
+ * 不能依赖 renderer 的 streaming 快照。
+ */
+export interface AgentSubmitOrEnqueueInput extends AgentDeferredQueueMessageInput {
+  /** after_current：本轮结束后发送；now：尽量立即注入，通道已结束时自动降级为 deferred queue。 */
+  dispatch: 'after_current' | 'now'
+  /** dispatch=now 时，是否软中断当前 turn。 */
+  interrupt?: boolean
+}
+
+export interface AgentSubmitOrEnqueueResult {
+  /** injected：已注入当前活跃 Agent；queued：已由主进程接管，等待或启动下一轮。 */
+  disposition: 'injected' | 'queued'
 }
 
 /** 流式追加消息的输入参数（Agent 流式中发送新消息） */
@@ -1264,6 +1351,8 @@ export interface ForkSessionInput {
   upToMessageUuid?: string
   /** 目标模型 ID。省略时继承源会话模型；传入时必须属于源会话同一渠道且已启用 */
   modelId?: string
+  /** 标记为 Pi `/tree` 探索分支，并持久化其在主线中的来源，供关闭后重新打开。 */
+  explorationSourceLabel?: string
 }
 
 /** 快照回退输入（同一会话内回退到指定点） */
@@ -1288,40 +1377,6 @@ export interface RewindSessionResult {
   }
 }
 
-// ===== 后台任务管理 =====
-
-/**
- * 获取任务输出请求
- */
-export interface GetTaskOutputInput {
-  /** 任务 ID */
-  taskId: string
-  /** 是否阻塞等待完成（默认 false） */
-  block?: boolean
-}
-
-/**
- * 获取任务输出响应
- */
-export interface GetTaskOutputResult {
-  /** 任务输出内容 */
-  output: string
-  /** 任务是否已完成 */
-  isComplete: boolean
-}
-
-/**
- * 停止任务请求
- */
-export interface StopTaskInput {
-  /** 会话 ID */
-  sessionId: string
-  /** 任务 ID */
-  taskId: string
-  /** 任务类型 */
-  type: 'agent' | 'shell'
-}
-
 // ===== Agent 流式事件载荷 =====
 
 /**
@@ -1334,6 +1389,12 @@ export interface AgentStreamEvent {
   payload: AgentStreamPayload
   /** @deprecated 兼容旧格式，Phase 2 后移除 */
   event?: AgentEvent
+}
+
+export interface AgentActiveSessionSnapshot {
+  sessionId: string
+  /** 对应当前运行实例的启动时间，用于拒绝陈旧的 renderer 恢复快照。 */
+  startedAt: number
 }
 
 /**
@@ -1663,6 +1724,8 @@ export const AGENT_IPC_CHANNELS = {
   COUNT_ARCHIVED_SESSIONS: 'agent:count-archived-sessions',
   /** 创建会话 */
   CREATE_SESSION: 'agent:create-session',
+  /** 获取当前主进程仍在执行的 Agent 会话快照 */
+  ACTIVE_SESSIONS_SNAPSHOT: 'agent:active-sessions-snapshot',
   /** 获取会话 SDKMessage（Phase 4 新格式） */
   GET_SDK_MESSAGES: 'agent:get-sdk-messages',
   /** 更新会话标题 */
@@ -1671,6 +1734,8 @@ export const AGENT_IPC_CHANNELS = {
   UPDATE_SESSION_MODEL: 'agent:update-session-model',
   /** 选择或清除当前会话的活动 worktree */
   SET_ACTIVE_WORKTREE: 'agent:set-active-worktree',
+  /** 主进程通知 Renderer：Agent 主动切换了会话的活动 worktree */
+  ACTIVE_WORKTREE_UPDATED: 'agent:active-worktree-updated',
   /** 删除会话 */
   DELETE_SESSION: 'agent:delete-session',
   /** 迁移 Chat 对话记录到 Agent 会话 */
@@ -1739,12 +1804,7 @@ export const AGENT_IPC_CHANNELS = {
   RELOAD_BROWSER: 'agent:reload-browser',
   CLOSE_BROWSER: 'agent:close-browser',
   BROWSER_STATE_CHANGED: 'agent:browser-state-changed',
-
-  // 后台任务管理
-  /** 获取任务输出 */
-  GET_TASK_OUTPUT: 'agent:get-task-output',
-  /** 停止任务 */
-  STOP_TASK: 'agent:stop-task',
+  BROWSER_TAB_FOCUSED: 'agent:browser-tab-focused',
 
   // 工作区能力（MCP + Skill）
   /** 获取工作区能力摘要 */
@@ -1753,6 +1813,22 @@ export const AGENT_IPC_CHANNELS = {
   GET_MCP_CONFIG: 'agent:get-mcp-config',
   /** 保存工作区 MCP 配置 */
   SAVE_MCP_CONFIG: 'agent:save-mcp-config',
+  /** 刷新并持久化工作区 MCP 真实连接状态 */
+  REFRESH_MCP_CONNECTIONS: 'agent:refresh-mcp-connections',
+  /** 原子切换 MCP 启用状态，并在启用时条件持久化真实验证结果。 */
+  SET_MCP_ENABLED_AND_VALIDATE: 'agent:set-mcp-enabled-and-validate',
+  /** 原子新增 MCP，并在初始启用时条件持久化真实验证结果。 */
+  INSTALL_MCP_AND_VALIDATE: 'agent:install-mcp-and-validate',
+  /** 启动远程 MCP 的 OAuth PKCE 授权 */
+  START_MCP_OAUTH: 'agent:start-mcp-oauth',
+  /** 安全保存远程 MCP 的静态 API Key / Token */
+  SAVE_MCP_API_KEY: 'agent:save-mcp-api-key',
+  /** 删除工作区 MCP 对应的系统安全凭据，不返回任何凭据。 */
+  DELETE_MCP_CREDENTIAL: 'agent:delete-mcp-credential',
+  /** 查询本机 CLI 集成是否已完成官方配置，不返回任何凭据。 */
+  GET_CLI_INTEGRATION_STATUSES: 'agent:get-cli-integration-statuses',
+  /** 更新 Proma 对工作区 CLI 集成的启用状态；绝不调用第三方 CLI 登出或撤销授权。 */
+  SET_CLI_INTEGRATION_ENABLED: 'agent:set-cli-integration-enabled',
   /** 测试 MCP 服务器连接 */
   TEST_MCP_SERVER: 'agent:test-mcp-server',
   /** 启用或关闭 Proma 内置 MCP */
@@ -1936,7 +2012,9 @@ export const AGENT_IPC_CHANNELS = {
   // 队列消息（Agent 运行中排队发送）
   /** 流式追加发送消息 */
   QUEUE_MESSAGE: 'agent:queue-message',
-  /** 排队发送消息（主进程 deferred queue） */
+  /** 原子提交消息：注入当前运行或交由主进程 deferred queue。 */
+  SUBMIT_OR_ENQUEUE_MESSAGE: 'agent:submit-or-enqueue-message',
+  /** 排队发送消息（兼容旧调用；主进程 deferred queue） */
   ENQUEUE_QUEUED_MESSAGE: 'agent:enqueue-queued-message',
   /** 取消队列消息 */
   CANCEL_QUEUED_MESSAGE: 'agent:cancel-queued-message',
