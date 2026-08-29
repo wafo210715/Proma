@@ -77,7 +77,8 @@ const MAX_SESSION_REFERENCE_LIMIT = 200
 
 /** 全局 Agent 会话正文搜索的结果预算。 */
 const MAX_SEARCH_SESSIONS = 100
-const MAX_SEARCH_HITS_PER_SESSION = 2
+/** 搜索时每个会话最多返回的正文命中数；含 user 与 assistant 的 text 块。 */
+const MAX_SEARCH_HITS_PER_SESSION = 5
 
 /**
  * 会话引用的正文搜索是输入框补全路径，必须有独立 I/O 预算。

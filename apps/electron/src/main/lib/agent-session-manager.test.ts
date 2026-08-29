@@ -292,7 +292,7 @@ describe('Agent 会话 runtime 元数据', () => {
 })
 
 describe('Agent 会话正文搜索', () => {
-  test('Given 用户/助手正文和内部块 When 搜索 Then 只返回最多两个不同正文消息命中', async () => {
+  test('Given 用户/助手正文和内部块 When 搜索 Then 最多返回五个不同正文消息命中', async () => {
     writeAgentSessionsIndex([{
       id: 'search-content-session',
       title: '正文搜索测试',
@@ -335,7 +335,7 @@ describe('Agent 会话正文搜索', () => {
     expect(results.every((result) => result.role === 'user' || result.role === 'assistant')).toBe(true)
   })
 
-  test('Given 单会话中有多个不同质量的命中 When 搜索 Then 只保留两条最佳结果并让 user 同分优先', async () => {
+  test('Given 单会话命中超过上限 When 搜索 Then 只保留五条最佳结果并让 user 同分优先', async () => {
     writeAgentSessionsIndex([{
       id: 'ranked-search-session',
       title: '排序搜索测试',
@@ -348,12 +348,21 @@ describe('Agent 会话正文搜索', () => {
       JSON.stringify({ type: 'assistant', uuid: 'fragment', message: { content: [{ type: 'text', text: '搜索优化内容' }] } }),
       JSON.stringify({ type: 'assistant', uuid: 'assistant-exact', message: { content: [{ type: 'text', text: '搜索优化方案' }] } }),
       JSON.stringify({ type: 'user', uuid: 'user-exact', message: { content: [{ type: 'text', text: '搜索优化方案' }] } }),
+      JSON.stringify({ type: 'assistant', uuid: 'assistant-extra-1', message: { content: [{ type: 'text', text: '搜索优化方案的补充说明' }] } }),
+      JSON.stringify({ type: 'user', uuid: 'user-extra-2', message: { content: [{ type: 'text', text: '搜索优化方案的用户追问' }] } }),
     ])
 
     const results = await manager.searchAgentSessionMessages('搜索优化方案')
 
-    expect(results.map((result) => result.messageId)).toEqual(['user-exact', 'assistant-exact'])
-    expect(results.map((result) => result.role)).toEqual(['user', 'assistant'])
+    expect(results).toHaveLength(5)
+    expect(results.map((result) => result.messageId)).toEqual([
+      'user-exact',
+      'user-extra-2',
+      'assistant-exact',
+      'assistant-extra-1',
+      'fuzzy',
+    ])
+    expect(results.map((result) => result.role)).toEqual(['user', 'user', 'assistant', 'assistant', 'assistant'])
   })
 
   test('Given 重复的 Agent SDK snapshot When 搜索 Then 每个 messageId 只返回最佳命中一次', async () => {
@@ -376,7 +385,7 @@ describe('Agent 会话正文搜索', () => {
     expect(results).toHaveLength(2)
   })
 
-  test('Given 超过 100 个命中会话 When 搜索 Then 最多返回 100 个会话且每个最多两个命中', async () => {
+  test('Given 超过 100 个命中会话 When 搜索 Then 最多返回 100 个会话且每个会话命中全量保留', async () => {
     const sessions = createIndexedSessions(101)
     writeAgentSessionsIndex(sessions)
     for (const session of sessions) {
@@ -391,9 +400,9 @@ describe('Agent 会话正文搜索', () => {
     const sessionIds = new Set(results.map((result) => result.sessionId))
 
     expect(sessionIds).toHaveLength(100)
-    expect(results).toHaveLength(200)
+    expect(results).toHaveLength(300)
     expect([...sessionIds][0]).toBe('session-100')
-    expect(results.filter((result) => result.sessionId === 'session-100')).toHaveLength(2)
+    expect(results.filter((result) => result.sessionId === 'session-100')).toHaveLength(3)
   })
 })
 
