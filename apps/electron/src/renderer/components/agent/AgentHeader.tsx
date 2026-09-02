@@ -5,11 +5,10 @@
  */
 
 import * as React from 'react'
-import { useAtom, useAtomValue, useSetAtom, useStore } from 'jotai'
-import { Pencil, Check, X, ChevronDown, Columns2, Link2, Link2Off, PanelRight, Plus, Shapes, Split } from 'lucide-react'
+import { useAtom, useAtomValue, useSetAtom } from 'jotai'
+import { Pencil, Check, X, ChevronDown, Columns2, Link2, Link2Off, PanelRight, Split } from 'lucide-react'
 import { agentSessionsAtom, agentSessionStreamingStateAtomFamily, agentSideTemporaryAgentMapAtom, agentDiffPanelTabAtom, currentSessionSidePanelOpenAtom, getExplorationSidePanelTab } from '@/atoms/agent-atoms'
-import { tabsAtom, updateTabTitle, canvasPanelOpenAtom, canvasPanelSessionIdAtom } from '@/atoms/tab-atoms'
-import { toggleSessionCanvas } from '@/components/canvas/canvas-opener'
+import { tabsAtom, updateTabTitle } from '@/atoms/tab-atoms'
 import { comparePairsAtom, compareLinkedAtom, getComparePartner, removePairContaining, addPair } from '@/atoms/compare-atoms'
 import { useCompareActions } from '@/hooks/useCompareActions'
 import { ModelSelector } from '@/components/chat/ModelSelector'
@@ -41,35 +40,18 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
   const [editing, setEditing] = React.useState(false)
   const [editTitle, setEditTitle] = React.useState('')
   const inputRef = React.useRef<HTMLInputElement>(null)
-  // Canvas 分屏按钮状态
-  const canvasPanelOpen = useAtomValue(canvasPanelOpenAtom)
-  const canvasPanelSessionId = useAtomValue(canvasPanelSessionIdAtom)
-  const store = useStore()
 
   // 双开对比控件状态
   const [comparePairs, setComparePairs] = useAtom(comparePairsAtom)
   const [compareLinked, setCompareLinked] = useAtom(compareLinkedAtom)
   const [pickerOpen, setPickerOpen] = React.useState(false)
-  const [creatingCompare, setCreatingCompare] = React.useState(false)
   const comparePartnerId = getComparePartner(comparePairs, sessionId)
   const inComparePair = comparePartnerId !== null
   const otherSessions = sessions.filter((s) => s.id !== sessionId)
-  const { createBlankCompare, requestInherit } = useCompareActions()
+  const { requestInherit } = useCompareActions()
   // 源会话是否正在跑：继承上下文时用于决定「立即执行」还是「变待办等这轮结束」
   const srcStreaming = useAtomValue(agentSessionStreamingStateAtomFamily(sessionId))
   const sourceRunning = !!srcStreaming?.running
-
-  /** 新建空白会话并对比 */
-  const handleCreateBlank = React.useCallback(async (): Promise<void> => {
-    if (creatingCompare || !session) return
-    setCreatingCompare(true)
-    try {
-      await createBlankCompare(session)
-      setPickerOpen(false)
-    } finally {
-      setCreatingCompare(false)
-    }
-  }, [creatingCompare, session, createBlankCompare])
 
   /** 新建并继承上下文：用户在模型选择器里选定目标模型后触发 */
   const handleInheritWithModel = React.useCallback(async (option: ModelOption): Promise<void> => {
@@ -77,7 +59,6 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
     setPickerOpen(false)
     await requestInherit(session, option.channelId, option.modelId, sourceRunning)
   }, [session, requestInherit, sourceRunning])
-  const canvasActive = canvasPanelOpen && canvasPanelSessionId === sessionId
 
   const explorationBranches = React.useMemo(() => sessions
     .filter((item) => item.explorationParentSessionId === sessionId && item.explorationSourceMessageId)
@@ -231,21 +212,6 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
           <PanelRight className="size-4" />
         </button>
       )}
-      <button
-        type="button"
-        onMouseDown={(e) => e.preventDefault()}
-        onClick={() => toggleSessionCanvas(store, sessionId)}
-        className={cn(
-          'titlebar-no-drag p-1 transition-colors',
-          canvasActive
-            ? 'text-primary hover:text-primary'
-            : 'text-muted-foreground hover:text-foreground',
-        )}
-        aria-label={canvasActive ? '关闭画布分屏' : '打开画布分屏'}
-        title={canvasActive ? '关闭画布分屏' : '打开画布分屏'}
-      >
-        <Shapes className="size-3.5" />
-      </button>
 
         {inComparePair ? (
           <>
@@ -294,16 +260,6 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
               </button>
             </PopoverTrigger>
             <PopoverContent align="end" className="w-72 p-1">
-              {/* 新建空白会话并对比（pin 到源会话模型，右栏可自行改） */}
-              <button
-                type="button"
-                disabled={creatingCompare}
-                onClick={() => { void handleCreateBlank() }}
-                className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-sm text-foreground hover:bg-muted transition-colors disabled:opacity-50"
-              >
-                <Plus className="size-3.5 flex-shrink-0 text-muted-foreground" />
-                <span className="truncate">新建空白会话并对比</span>
-              </button>
               {/* 新建并继承当前上下文：选目标模型 → 同渠道 fork / 跨渠道注入；源会话在跑则变待办 */}
               <div className="px-2 py-1.5">
                 <div className="mb-1 text-xs text-muted-foreground">

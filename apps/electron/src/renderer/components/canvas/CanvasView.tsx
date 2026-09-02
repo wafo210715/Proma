@@ -2,7 +2,8 @@
  * CanvasView — JSON Canvas 自由画布
  *
  * 采用 JSON Canvas 开源格式（github.com/obsidianmd/jsoncanvas），与 Obsidian Canvas 互通。
- * 内容持久化到 ~/.proma/canvas.canvas，自动保存由 CanvasPersistence 统一管理。
+ * 作为右侧工作区的会话画布 Tab；内容持久化为 session 专属画布文件，
+ * 自动保存由 sessionCanvas atoms + IPC（saveSessionCanvas）统一管理。
  *
  * 交互方案对齐 Figma/Miro：
  * - 空白双击 → 新建节点并进入编辑
@@ -15,17 +16,14 @@
  */
 
 import * as React from 'react'
-import { useAtom, useAtomValue, useStore } from 'jotai'
-import { LayoutGrid, Crosshair, Undo2, Redo2, Group, Upload, Mic, X, PanelRight } from 'lucide-react'
+import { useAtom } from 'jotai'
+import { LayoutGrid, Crosshair, Undo2, Redo2, Group, Upload, Mic, X } from 'lucide-react'
 import { toast } from 'sonner'
 import {
-  canvasContentAtom,
-  canvasLoadedAtom,
   sessionCanvasContentsAtom,
   sessionCanvasLoadedAtom,
 } from '@/atoms/tab-atoms'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { tearOffCanvasToSplit, closeCanvasInSplit } from './canvas-opener'
 import {
   COLOR_PRESETS,
   NEW_NODE_WIDTH,
@@ -76,53 +74,37 @@ const ALL_SIDES: NodeSide[] = ['top', 'right', 'bottom', 'left']
 const HISTORY_LIMIT = 80
 
 export interface CanvasViewProps {
-  /** variant='page' 时作为独立 Tab；variant='pane' 时作为右侧分屏 */
-  variant?: 'page' | 'pane'
-  /** sessionId 存在时使用 session 专属画布，否则使用全局画布 */
-  sessionId?: string
-  /** pane 模式的关闭回调 */
+  /** 画布归属的 Agent 会话；内容持久化为该会话的专属画布 */
+  sessionId: string
+  /** 可选的关闭回调；右侧工作区 Tab 场景由 Tab 自带的关闭按钮承载，不传即可 */
   onClose?: () => void
 }
 
 export function CanvasView({
-  variant = 'page',
   sessionId,
   onClose,
 }: CanvasViewProps): React.ReactElement {
-  const isSession = !!sessionId
-  const isPane = variant === 'pane'
-
-  // 全局画布 atoms（始终订阅，保持兼容）
-  const [globalContent, setGlobalContent] = useAtom(canvasContentAtom)
-  const globalLoaded = useAtomValue(canvasLoadedAtom)
-
   // Session 画布 atoms
   const [sessionContents, setSessionContents] = useAtom(sessionCanvasContentsAtom)
   const [sessionLoadedMap, setSessionLoadedMap] = useAtom(sessionCanvasLoadedAtom)
-  const sessionLoaded = isSession ? (sessionLoadedMap.get(sessionId!) ?? false) : false
+  const sessionLoaded = sessionLoadedMap.get(sessionId) ?? false
 
-  // 当前活跃的 content / loaded / setContent
-  const content = isSession ? (sessionContents.get(sessionId!) ?? '') : globalContent
-  const loaded = isSession ? sessionLoaded : globalLoaded
+  const content = sessionContents.get(sessionId) ?? ''
+  const loaded = sessionLoaded
 
   const setContent = React.useCallback(
     (val: string): void => {
-      if (isSession && sessionId) {
-        setSessionContents((prev) => {
-          const next = new Map(prev)
-          next.set(sessionId, val)
-          return next
-        })
-      } else {
-        setGlobalContent(val)
-      }
+      setSessionContents((prev) => {
+        const next = new Map(prev)
+        next.set(sessionId, val)
+        return next
+      })
     },
-    [isSession, sessionId, setSessionContents, setGlobalContent],
+    [sessionId, setSessionContents],
   )
 
   // Session canvas 的初始加载
   React.useEffect(() => {
-    if (!isSession || !sessionId) return
     if (sessionLoadedMap.get(sessionId)) return // 已加载
 
     // 从文件加载，加载完成后才标记 loaded=true
@@ -147,7 +129,44 @@ export function CanvasView({
         return next
       })
     })
-  }, [isSession, sessionId, sessionLoadedMap, setSessionContents, setSessionLoadedMap])
+  }, [sessionId, sessionLoadedMap, setSessionContents, setSessionLoadedMap])
+
+  // ===== 自动保存：内容变化防抖写盘；卸载与 beforeunload 时同步兑底 =====
+  // 旧实现的缺口：session 画布只加载不保存，重启即丢。现在由组件自身负责持久化，
+  // 加载完成（loaded）后才允许写盘，避免把空内容覆盖到磁盘上的真实画布。
+  const latestContentRef = React.useRef('')
+  React.useEffect(() => { latestContentRef.current = content }, [content])
+  const loadedRef = React.useRef(false)
+  React.useEffect(() => { loadedRef.current = loaded }, [loaded])
+
+  React.useEffect(() => {
+    if (!loaded) return
+    const timer = setTimeout(() => {
+      const json = latestContentRef.current
+      if (!json) return
+      window.electronAPI.saveSessionCanvas?.(sessionId, json).catch((err) => {
+        console.error('[Canvas] session canvas 保存失败:', err)
+      })
+    }, 500)
+    return () => clearTimeout(timer)
+  }, [content, loaded, sessionId])
+
+  React.useEffect(() => () => {
+    // Tab 关闭/切换卸载时同步兑底，避免防抖窗口内的最后一段编辑丢失
+    if (!loadedRef.current) return
+    const json = latestContentRef.current
+    if (json) window.electronAPI.saveSessionCanvasSync?.(sessionId, json)
+  }, [sessionId])
+
+  React.useEffect(() => {
+    const flushOnUnload = (): void => {
+      if (!loadedRef.current) return
+      const json = latestContentRef.current
+      if (json) window.electronAPI.saveSessionCanvasSync?.(sessionId, json)
+    }
+    window.addEventListener('beforeunload', flushOnUnload)
+    return () => window.removeEventListener('beforeunload', flushOnUnload)
+  }, [sessionId])
 
   const [nodes, setNodes] = React.useState<CanvasNode[]>([])
   const [edges, setEdges] = React.useState<CanvasEdge[]>([])
@@ -817,12 +836,6 @@ export function CanvasView({
     requestAnimationFrame(() => fitView(cloned))
   }, [commit, fitView])
 
-  // Page 模式：拖到右侧分屏所需的 store 引用
-  const store = useStore()
-  const handleTearOff = React.useCallback((): void => {
-    tearOffCanvasToSplit(store)
-  }, [store])
-
   // ===== 成组 =====
   const handleGroup = React.useCallback((): void => {
     const sel = selectedRef.current
@@ -919,14 +932,9 @@ export function CanvasView({
 
   return (
     <div className="relative flex h-full flex-col overflow-hidden bg-content-area titlebar-no-drag">
-      {/* 工具栏（titlebar-no-drag：pane 模式下工具栏位于窗口顶部 50px 拖拽带内，不标 no-drag 会被 OS 拖拽区吞掉点击/hover） */}
-      <div className={`flex ${isPane ? 'h-[34px]' : 'h-[38px]'} flex-shrink-0 items-center gap-1 border-b border-border/30 px-3`}>
-        <span className="text-xs text-muted-foreground">{isPane ? (isSession ? '会话画布' : 'Canvas') : 'Canvas'}</span>
-        {!isPane && (
-          <span className="ml-1 hidden text-[11px] text-muted-foreground/60 sm:inline">
-            双击新建 · 拖连线 · ⌘C/V 复制粘贴 · ⌘G 成组 · ⌘Z 撤销
-          </span>
-        )}
+      {/* 工具栏（titlebar-no-drag：右侧工作区 Tab 场景下工具栏可能位于窗口顶部拖拽带内，不标 no-drag 会被 OS 拖拽区吞掉点击/hover） */}
+      <div className="flex h-[34px] flex-shrink-0 items-center gap-1 border-b border-border/30 px-3">
+        <span className="text-xs text-muted-foreground">会话画布</span>
         <div className="ml-auto flex items-center gap-0.5">
           {selectedTextCount > 0 && (
             <>
@@ -944,11 +952,8 @@ export function CanvasView({
           <div className="mx-1 h-4 w-px bg-border/50" />
           <ToolbarButton label="自动整理" onClick={handleAutoLayout} icon={<LayoutGrid className="size-3.5" />} />
           <ToolbarButton label="回到中心" onClick={() => fitView(nodesRef.current)} icon={<Crosshair className="size-3.5" />} />
-          {!isPane && (
-            <ToolbarButton label="拖到 Agent 右侧分屏" onClick={handleTearOff} icon={<PanelRight className="size-3.5" />} />
-          )}
-          {isPane && onClose && (
-            <ToolbarButton label="关闭分屏" onClick={onClose} icon={<X className="size-3.5" />} />
+          {onClose && (
+            <ToolbarButton label="关闭画布" onClick={onClose} icon={<X className="size-3.5" />} />
           )}
         </div>
       </div>
@@ -1459,18 +1464,5 @@ function ToolbarButton({ label, onClick, icon, disabled }: ToolbarButtonProps): 
         <p>{label}</p>
       </TooltipContent>
     </Tooltip>
-  )
-}
-
-/** Canvas 分屏面板入口 */
-export function CanvasPane({
-  sessionId,
-  onClose,
-}: {
-  sessionId?: string
-  onClose: () => void
-}): React.ReactElement {
-  return (
-    <CanvasView variant="pane" sessionId={sessionId} onClose={onClose} />
   )
 }

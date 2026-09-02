@@ -12,11 +12,7 @@ import {
   tabsAtom,
   activeTabIdAtom,
   activeTabAtom,
-  canvasPanelOpenAtom,
-  canvasPanelSessionIdAtom,
 } from '@/atoms/tab-atoms'
-import { CanvasPane } from '@/components/canvas/CanvasView'
-import { closeCanvasInSplit } from '@/components/canvas/canvas-opener'
 import { TabErrorBoundary } from './TabErrorBoundary'
 import { toast } from 'sonner'
 import { Loader2 } from 'lucide-react'
@@ -57,7 +53,6 @@ import {
   browserPendingNavigationMapAtom,
   browserStateMapAtom,
 } from '@/atoms/browser-atoms'
-import { previewSplitRatioAtom } from '@/atoms/preview-atoms'
 
 export function MainArea(): React.ReactElement {
   useTrackSessionView()
@@ -271,50 +266,6 @@ export function MainArea(): React.ReactElement {
       })
   }, [agentSessions, executeInherit, pendingInherit, setPendingInherit, streamingStates])
 
-  // Canvas 分屏面板状态；Browser/Preview 已由上游右侧 SidePanel 标签体系承载。
-  const canvasPanelOpen = useAtomValue(canvasPanelOpenAtom)
-  const canvasPanelSessionId = useAtomValue(canvasPanelSessionIdAtom)
-  const showCanvasPanel =
-    activeTab?.type === 'agent' && canvasPanelOpen && activeView === 'conversations'
-  const [splitRatio, setSplitRatio] = useAtom(previewSplitRatioAtom)
-  const canvasDragging = React.useRef(false)
-
-  const handleCanvasDragStart = React.useCallback((e: React.MouseEvent) => {
-    e.preventDefault()
-    canvasDragging.current = true
-    const startX = e.clientX
-    const startRatio = splitRatio
-    const containerEl = (e.currentTarget as HTMLElement).closest('[data-split-container]') as HTMLElement | null
-    const containerWidth = containerEl?.clientWidth ?? 1
-    let rafId = 0
-
-    document.body.style.userSelect = 'none'
-    document.body.style.cursor = 'col-resize'
-    document.querySelectorAll('iframe').forEach((f) => { (f as HTMLElement).style.pointerEvents = 'none' })
-
-    const onMouseMove = (ev: MouseEvent) => {
-      if (!canvasDragging.current) return
-      if (rafId) return
-      rafId = requestAnimationFrame(() => {
-        rafId = 0
-        const delta = ev.clientX - startX
-        const newRatio = Math.max(0.3, Math.min(0.8, startRatio + delta / containerWidth))
-        setSplitRatio(newRatio)
-      })
-    }
-    const onMouseUp = () => {
-      canvasDragging.current = false
-      if (rafId) cancelAnimationFrame(rafId)
-      document.body.style.userSelect = ''
-      document.body.style.cursor = ''
-      document.querySelectorAll('iframe').forEach((f) => { (f as HTMLElement).style.pointerEvents = '' })
-      document.removeEventListener('mousemove', onMouseMove)
-      document.removeEventListener('mouseup', onMouseUp)
-    }
-    document.addEventListener('mousemove', onMouseMove)
-    document.addEventListener('mouseup', onMouseUp)
-  }, [splitRatio, setSplitRatio])
-
   const handleCompareDragStart = React.useCallback((e: React.MouseEvent) => {
     e.preventDefault()
     compareDragging.current = true
@@ -357,14 +308,10 @@ export function MainArea(): React.ReactElement {
     }
   }, [tabs, activeTabId, setActiveTabId])
 
-  // 左侧容器宽度：Canvas 分屏打开时固定占 splitRatio；其他情况直接占满。
-  // 对比态优先接管右 slot：此时不显示 canvas 右面板。
-  const showRightPanel = !showComparePane && showCanvasPanel
+  // 左侧容器宽度：对比态固定占 compareSplitRatio；其他情况直接占满。
   const leftFlexStyle: React.CSSProperties = showComparePane
     ? { flex: `0 0 calc(${compareSplitRatio * 100}% - 6px)` }
-    : showRightPanel
-      ? { flex: `0 0 calc(${splitRatio * 100}% - 6px)` }
-      : { flex: '1 1 auto' }
+    : { flex: '1 1 auto' }
 
   return (
     <Panel variant="grow" className="bg-content-area">
@@ -394,7 +341,7 @@ export function MainArea(): React.ReactElement {
           )}
         </div>
 
-        {/* 右侧：双开对比栏（partner 的 AgentView）。对比态接管右 slot，优先于 canvas。 */}
+        {/* 右侧：双开对比栏（partner 的 AgentView）。Canvas 已迁入右侧工作区标签体系。 */}
         {/* 右栏延迟一帧挂载：左栏先渲染完，避免两个重组件同时初始化导致卡顿。 */}
         {showComparePane && comparePartnerId && (
           <>
@@ -417,30 +364,6 @@ export function MainArea(): React.ReactElement {
                   </div>
                 )}
               </div>
-            </div>
-          </>
-        )}
-
-        {/* 右侧：Canvas 分屏面板（Browser/Preview 已由上游右侧 SidePanel 标签体系承载）。 */}
-        {showRightPanel && (
-          <>
-            <div
-              className="w-[8px] cursor-col-resize bg-border/40 hover:bg-primary/30 active:bg-primary/50 transition-colors flex-shrink-0 self-stretch"
-              onMouseDown={handleCanvasDragStart}
-            />
-            <div className="flex flex-col min-w-[280px] h-full overflow-hidden" style={{ flex: '1 1 auto' }}>
-              {/* key 按会话 remount：切换 session 时重建干净的 nodes/history/refs/view，
-                  避免复用同一实例带旧会话遗留状态（新会话双击建 node 白屏）。
-                  TabErrorBoundary：画布渲染异常时降级为错误卡片，不再整树白屏。 */}
-              <TabErrorBoundary
-                key={canvasPanelSessionId ?? 'canvas-global'}
-                sessionId={canvasPanelSessionId ?? 'canvas-global'}
-              >
-                <CanvasPane
-                  sessionId={canvasPanelSessionId ?? undefined}
-                  onClose={() => closeCanvasInSplit(store)}
-                />
-              </TabErrorBoundary>
             </div>
           </>
         )}

@@ -63,7 +63,7 @@ import {
 } from './atoms/markdown-font-size'
 import { useGlobalAgentListeners } from './hooks/useGlobalAgentListeners'
 import { useGlobalChatListeners } from './hooks/useGlobalChatListeners'
-import { tabsAtom, activeTabIdAtom, getPersistableTabState, canvasContentAtom, canvasLoadedAtom } from './atoms/tab-atoms'
+import { tabsAtom, activeTabIdAtom, getPersistableTabState } from './atoms/tab-atoms'
 import type { TabItem } from './atoms/tab-atoms'
 import { chatToolsAtom } from './atoms/chat-tool-atoms'
 import { feishuBotStatesAtom } from './atoms/feishu-atoms'
@@ -1008,108 +1008,6 @@ function LegacyScratchPadMigrationInitializer(): null {
   return null
 }
 
-/**
- * Canvas 画布持久化组件
- *
- * 从磁盘加载 canvas.canvas（JSON Canvas 格式字符串）到 canvasContentAtom，
- * 监听变化防抖自动保存。固定 Tab 注入由 tab 初始化逻辑一并处理。
- */
-function CanvasPersistence(): null {
-  const store = useStore()
-  const loadedRef = useRef(false)
-  const saveTimerRef = useRef<ReturnType<typeof setTimeout>>()
-
-  // 启动：加载 canvas.canvas 内容（直接存 JSON 字符串，无需转换）
-  useEffect(() => {
-    const init = async (): Promise<void> => {
-      try {
-        const loaded = window.electronAPI.loadCanvas
-          ? await window.electronAPI.loadCanvas()
-          : ''
-        store.set(canvasContentAtom, loaded)
-        store.set(canvasLoadedAtom, true)
-        console.log('[Canvas] 初始化完成，已加载内容:', !!loaded)
-      } catch (err) {
-        console.error('[Canvas] 初始化失败:', err)
-        store.set(canvasLoadedAtom, true)
-      } finally {
-        loadedRef.current = true
-      }
-    }
-    init()
-  }, [store])
-
-  // 自动保存：监听 canvasContentAtom 变化，防抖写入磁盘
-  useEffect(() => {
-    const save = (): void => {
-      const content = store.get(canvasContentAtom)
-      if (window.electronAPI.saveCanvas) {
-        window.electronAPI.saveCanvas(content).then((ok) => {
-          if (!ok) console.error('[Canvas] 保存失败')
-        }).catch(console.error)
-      }
-    }
-
-    const debouncedSave = (): void => {
-      if (!loadedRef.current) return
-      if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
-      saveTimerRef.current = setTimeout(save, 500)
-    }
-
-    const unsub = store.sub(canvasContentAtom, debouncedSave)
-
-    const handleBeforeUnload = (): void => {
-      if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
-      const content = store.get(canvasContentAtom)
-      if (window.electronAPI.saveCanvasSync) {
-        window.electronAPI.saveCanvasSync(content)
-      }
-    }
-    window.addEventListener('beforeunload', handleBeforeUnload)
-
-    // 外部修改检测：canvas 文件被 Proma 之外的程序（如 Obsidian）改动时提示
-    let externalUnsub: (() => void) | undefined
-    if (window.electronAPI.onCanvasExternalChanged) {
-      externalUnsub = window.electronAPI.onCanvasExternalChanged((incoming) => {
-        const current = store.get(canvasContentAtom)
-        if (incoming === current) return
-        toast.warning('Canvas 文件被外部修改', {
-          description: '检测到 Obsidian 等程序改动了此文件。重新加载会丢弃当前未保存的改动。',
-          duration: Infinity,
-          action: {
-            label: '重新加载',
-            onClick: () => {
-              loadedRef.current = false
-              store.set(canvasLoadedAtom, false)
-              store.set(canvasContentAtom, incoming)
-              store.set(canvasLoadedAtom, true)
-              loadedRef.current = true
-            },
-          },
-          cancel: {
-            label: '保留当前',
-            onClick: () => {
-              // 用当前内容覆盖磁盘，压过外部改动
-              if (window.electronAPI.saveCanvas) {
-                window.electronAPI.saveCanvas(store.get(canvasContentAtom)).catch(console.error)
-              }
-            },
-          },
-        })
-      })
-    }
-
-    return () => {
-      unsub()
-      externalUnsub?.()
-      if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
-      window.removeEventListener('beforeunload', handleBeforeUnload)
-    }
-  }, [store])
-
-  return null
-}
-
 // ===== 快速任务窗口：轻量渲染 =====
 if (isQuickTaskWindow) {
   import('./components/quick-task/QuickTaskApp').then(({ QuickTaskApp }) => {
@@ -1180,7 +1078,6 @@ if (isQuickTaskWindow) {
       <TabStatePersistenceInitializer />
       <LegacyScratchPadMigrationInitializer />
       <VoiceDictationApp embedded />
-      <CanvasPersistence />
       <GlobalShortcuts />
       <TabSwitcher />
       <App />

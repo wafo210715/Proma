@@ -1,8 +1,9 @@
 /**
  * useCompareActions — 双开对比的会话创建动作
  *
- * 统一封装「新建空白对比」「新建并继承上下文」两类操作，供 AgentHeader（发起）
- * 与 MainArea（待办 watcher 在源会话跑完后补执行）复用，避免逻辑重复。
+ * 封装「新建并继承上下文」操作，供 AgentHeader（发起）与 MainArea（待办 watcher 在源会话
+ * 跑完后补执行）复用，避免逻辑重复。「新建空白对比」入口已移除：fork 与右侧工作区
+ * 已覆盖该场景，双开对比现在只保留继承上下文与选择已有 session 两条路径。
  *
  * 继承上下文的两条路径：
  * - 目标模型与源会话同渠道 → 用原生 forkAgentSession（SDK 级上下文继承，干净、不花重新注入 token）
@@ -74,7 +75,6 @@ export function resolveCompareTargetRuntime(
 }
 
 export function useCompareActions(): {
-  createBlankCompare: (source: AgentSessionMeta) => Promise<void>
   requestInherit: (source: AgentSessionMeta, targetChannelId: string, targetModelId: string, sourceRunning: boolean) => Promise<void>
   executeInherit: (source: AgentSessionMeta, targetChannelId: string, targetModelId: string) => Promise<boolean>
 } {
@@ -90,23 +90,6 @@ export function useCompareActions(): {
     setComparePairs((prev) => addPair(prev, sourceId, newId))
     setCompareLinked(true)
   }, [setComparePairs, setCompareLinked])
-
-  /** 新建空白对比会话：pin 到源会话 channel/model（独立、不浮在全局 default），配对 */
-  const createBlankCompare = React.useCallback(async (source: AgentSessionMeta): Promise<void> => {
-    try {
-      const meta = await window.electronAPI.createAgentSession(
-        undefined,
-        source.channelId ?? undefined,
-        source.workspaceId ?? undefined,
-        source.modelId ?? undefined,
-      )
-      setAgentSessions((prev) => [meta, ...prev])
-      pairWith(source.id, meta.id)
-    } catch (error) {
-      console.error('[useCompareActions] 新建空白对比会话失败:', error)
-      toast.error('新建对比会话失败', { description: String(error) })
-    }
-  }, [setAgentSessions, pairWith])
 
   /** 立即执行继承：可 fork 时走 SDK fork，其余情况用文本注入 */
   const executeInherit = React.useCallback(async (
@@ -171,5 +154,5 @@ export function useCompareActions(): {
     await executeInherit(source, targetChannelId, targetModelId)
   }, [executeInherit, setPendingInherit])
 
-  return { createBlankCompare, requestInherit, executeInherit }
+  return { requestInherit, executeInherit }
 }

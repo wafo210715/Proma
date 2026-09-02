@@ -14,7 +14,6 @@ import { AgentView } from '@/components/agent'
 import { PreviewTabContent } from '@/components/diff/PreviewTabContent'
 import { MarkdownRichEditor } from '@/components/diff/MarkdownRichEditor'
 import { MarkdownToc, MarkdownTocScrollTail } from '@/components/diff/MarkdownToc'
-import { CanvasView } from '@/components/canvas/CanvasView'
 import { TabErrorBoundary } from './TabErrorBoundary'
 
 export interface TabContentProps {
@@ -31,10 +30,6 @@ export function TabContent({ tabId }: TabContentProps): React.ReactElement {
         标签页不存在
       </div>
     )
-  }
-
-  if (tab.type === 'canvas') {
-    return <CanvasView />
   }
 
   if (tab.type === 'tutorial') {

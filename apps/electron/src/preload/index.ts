@@ -487,22 +487,10 @@ export interface ElectronAPI {
   /** 将图片 data URL 写入系统剪贴板 */
   copyImageToClipboard: (dataUrl: string) => Promise<{ success: boolean; message?: string }>
 
-  // ===== Canvas 画布 =====
-
-  /** 从磁盘加载 canvas.canvas（JSON Canvas 格式字符串） */
-  loadCanvas: () => Promise<string>
-
-  /** 异步保存内容到 canvas.canvas */
-  saveCanvas: (content: string) => Promise<boolean>
-
-  /** 同步保存内容到 canvas.canvas（beforeunload 场景） */
-  saveCanvasSync: (content: string) => boolean
+  // ===== Canvas 画布（会话画布 + 导出；全局画布已随顶部 Canvas Tab 移除） =====
 
   /** 微信式屏幕区域截图：交互框选，返回裸 base64 PNG / 取消 / 错误 */
   captureScreenRegion: () => Promise<{ base64?: string; cancelled?: boolean; error?: string }>
-
-  /** 订阅 canvas 文件被外部修改事件，返回取消订阅函数 */
-  onCanvasExternalChanged: (callback: (content: string) => void) => () => void
 
   /** 导出选中簇为独立 .canvas + .md 文件到 ~/.proma/canvas-exports/ */
   exportCanvasCluster: (payload: { name: string; canvasJson: string; markdown: string }) => Promise<{
@@ -1794,27 +1782,9 @@ const electronAPI: ElectronAPI = {
     return ipcRenderer.invoke(SCRATCH_PAD_IPC_CHANNELS.EXPORT, markdown, dirPath, filename)
   },
 
-  // Canvas 画布持久化
-  loadCanvas: () => {
-    return ipcRenderer.invoke(CANVAS_IPC_CHANNELS.LOAD)
-  },
-
-  saveCanvas: (content: string) => {
-    return ipcRenderer.invoke(CANVAS_IPC_CHANNELS.SAVE, content)
-  },
-
-  saveCanvasSync: (content: string) => {
-    return ipcRenderer.sendSync(CANVAS_IPC_CHANNELS.SAVE_SYNC, content)
-  },
-
+  // Canvas 导出与 Session 画布持久化（全局画布 IPC 已随顶部 Canvas Tab 移除）
   captureScreenRegion: () => {
     return ipcRenderer.invoke(SCREEN_CAPTURE_IPC_CHANNELS.CAPTURE_REGION)
-  },
-
-  onCanvasExternalChanged: (callback: (content: string) => void) => {
-    const listener = (_event: unknown, content: string): void => callback(content)
-    ipcRenderer.on(CANVAS_IPC_CHANNELS.EXTERNAL_CHANGED, listener)
-    return () => ipcRenderer.removeListener(CANVAS_IPC_CHANNELS.EXTERNAL_CHANGED, listener)
   },
 
   exportCanvasCluster: (payload: { name: string; canvasJson: string; markdown: string }) => {

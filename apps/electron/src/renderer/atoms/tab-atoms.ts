@@ -1,7 +1,7 @@
 /**
  * Tab Atoms — 当前工作区入口状态管理
  *
- * 顶部保留 Canvas 固定入口与当前会话；会话恢复与导航交给左侧列表。
+ * 顶部只保留当前会话；会话恢复与导航交给左侧列表。
  * 通过桥接 atom 与现有 currentConversationIdAtom / currentAgentSessionIdAtom 同步，
  * 确保所有现有派生 atoms 无需修改。
  */
@@ -21,14 +21,8 @@ import type { PreviewFile } from './preview-atoms'
 
 // ===== 类型定义 =====
 
-/** 标签页类型（Settings 不作为 Tab，保留独立视图；Scratch Pad 已由上游 Vault 取代） */
-export type TabType = 'chat' | 'agent' | 'canvas' | 'preview' | 'tutorial'
-
-/** Canvas 画布专用的固定 sessionId */
-export const CANVAS_ID = '__canvas__'
-
-/** Canvas 标签默认标题 */
-export const CANVAS_TITLE = 'Canvas'
+/** 标签页类型（Settings 不作为 Tab，保留独立视图；Canvas 已迁入右侧工作区标签体系） */
+export type TabType = 'chat' | 'agent' | 'preview' | 'tutorial'
 
 /** 教程 Tab 固定 ID */
 export const TUTORIAL_TAB_ID = '__tutorial__'
@@ -81,7 +75,7 @@ export interface OpenTabRestore {
 
 // ===== 核心 Atoms =====
 
-/** 顶部入口列表：Canvas 固定入口 + 当前会话 */
+/** 顶部入口列表：当前会话 */
 export const tabsAtom = atom<TabItem[]>([])
 
 /** 当前激活的标签 ID */
@@ -113,15 +107,8 @@ export interface TabMinimapItem {
 }
 export const tabMinimapCacheAtom = atom<Map<string, TabMinimapItem[]>>(new Map())
 
-/** Canvas 画布内容（JSON Canvas 格式字符串） */
-export const canvasContentAtom = atom<string>('')
-/** Canvas 内容是否已从磁盘加载 */
-export const canvasLoadedAtom = atom<boolean>(false)
-/** Canvas 是否固定在 Agent 右侧分屏；通过拖出 Canvas Tab 或 session 按钮打开 */
-export const canvasPanelOpenAtom = atom<boolean>(false)
-/** 当前分屏画布对应的 session ID（null = 全局画布，string = session 专属画布） */
-export const canvasPanelSessionIdAtom = atom<string | null>(null)
-/** Per-session canvas 内容缓存：sessionId → JSON Canvas 字符串 */
+/** Per-session canvas 内容缓存：sessionId → JSON Canvas 字符串；
+ * 画布作为右侧工作区 Tab 渲染，内容由 CanvasView 组件负责加载与持久化。 */
 export const sessionCanvasContentsAtom = atom<Map<string, string>>(new Map())
 /** Per-session canvas 是否已加载：sessionId → boolean */
 export const sessionCanvasLoadedAtom = atom<Map<string, boolean>>(new Map())
@@ -152,7 +139,6 @@ export const tabStreamingMapAtom = atom<Map<string, boolean>>((get) => {
   const agentRunning = get(agentRunningSessionIdsAtom)
   const map = new Map<string, boolean>()
   for (const tab of tabs) {
-    if (tab.type === 'canvas') continue
     if (tab.type === 'chat') {
       map.set(tab.id, chatStreaming.has(tab.sessionId))
     } else if (tab.type === 'agent') {
@@ -170,7 +156,6 @@ export const tabIndicatorMapAtom = atom<Map<string, SessionIndicatorStatus>>((ge
   const unviewedCompletedIds = get(unviewedCompletedSessionIdsAtom)
   const map = new Map<string, SessionIndicatorStatus>()
   for (const tab of tabs) {
-    if (tab.type === 'canvas') continue
     if (tab.type === 'chat') {
       map.set(tab.id, chatStreaming.has(tab.sessionId) ? 'running' : 'idle')
     } else if (tab.type === 'agent') {
@@ -183,21 +168,6 @@ export const tabIndicatorMapAtom = atom<Map<string, SessionIndicatorStatus>>((ge
 })
 
 // ===== 操作函数 =====
-
-function createCanvasTab(): TabItem {
-  return {
-    id: CANVAS_ID,
-    type: 'canvas',
-    sessionId: CANVAS_ID,
-    title: CANVAS_TITLE,
-  }
-}
-
-/** 获取固定入口：Canvas（始终位于顶部首位） */
-function getPinnedTabs(tabs: TabItem[]): TabItem[] {
-  const canvasTab = tabs.find((t) => t.id === CANVAS_ID) ?? createCanvasTab()
-  return [canvasTab]
-}
 
 export function createPreviewTabId(sessionId: string): string {
   return `${PREVIEW_TAB_PREFIX}${sessionId}`
@@ -225,7 +195,7 @@ function isSessionTab(tab: TabItem): boolean {
 }
 
 function getPersistentTabs(tabs: TabItem[]): TabItem[] {
-  return tabs.filter((tab) => tab.id !== CANVAS_ID && tab.id !== TUTORIAL_TAB_ID && !isPreviewTab(tab))
+  return tabs.filter((tab) => tab.id !== TUTORIAL_TAB_ID && !isPreviewTab(tab))
 }
 
 export function getPersistableTabState(
@@ -255,15 +225,6 @@ export function openTab(
   item: { type: TabType; sessionId: string; title: string },
   restore?: OpenTabRestore,
 ): { tabs: TabItem[]; activeTabId: string } {
-  const pinnedTabs = getPinnedTabs(tabs)
-
-  if (item.type === 'canvas') {
-    return {
-      tabs: pinnedTabs,
-      activeTabId: CANVAS_ID,
-    }
-  }
-
   if (item.type === 'tutorial') {
     const tutorialTab: TabItem = tabs.find((t) => t.id === TUTORIAL_TAB_ID) ?? {
       id: TUTORIAL_TAB_ID,
@@ -272,7 +233,7 @@ export function openTab(
       title: TUTORIAL_TAB_TITLE,
     }
     return {
-      tabs: [...pinnedTabs, tutorialTab],
+      tabs: [tutorialTab],
       activeTabId: TUTORIAL_TAB_ID,
     }
   }
@@ -292,7 +253,7 @@ export function openTab(
     }
 
     return {
-      tabs: [...pinnedTabs, ownerAgentTab, previewTab],
+      tabs: [ownerAgentTab, previewTab],
       activeTabId: previewTab.id,
     }
   }
@@ -314,13 +275,13 @@ export function openTab(
       title: restore.previewTitle,
     }
     return {
-      tabs: [...pinnedTabs, sessionTab, previewTab],
+      tabs: [sessionTab, previewTab],
       activeTabId: restore.lastView === 'preview' ? previewTab.id : sessionTab.id,
     }
   }
 
   return {
-    tabs: [...pinnedTabs, sessionTab],
+    tabs: [sessionTab],
     activeTabId: sessionTab.id,
   }
 }
@@ -345,15 +306,12 @@ export function buildOpenTabRestore(
   }
 }
 
-/** 关闭标签页（Canvas 固定入口不可关闭） */
+/** 关闭标签页 */
 export function closeTab(
   tabs: TabItem[],
   activeTabId: string | null,
   tabId: string,
 ): { tabs: TabItem[]; activeTabId: string | null } {
-  // Canvas 固定入口不可关闭
-  if (tabId === CANVAS_ID) return { tabs, activeTabId }
-
   const tabIndex = tabs.findIndex((t) => t.id === tabId)
   if (tabIndex === -1) return { tabs, activeTabId }
   const closingTab = tabs[tabIndex]!
@@ -375,15 +333,13 @@ export function closeTab(
   return { tabs: newTabs, activeTabId: newActiveTabId }
 }
 
-/** 重排标签顺序（Canvas 固定入口保持首位，保留函数用于兼容旧调用） */
+/** 重排标签顺序（保留函数用于兼容旧调用） */
 export function reorderTabs(
   tabs: TabItem[],
   fromIndex: number,
   toIndex: number,
 ): TabItem[] {
   if (fromIndex === toIndex) return tabs
-  // Canvas 固定入口不可移出第 0 位
-  if (tabs[0]?.id === CANVAS_ID && (fromIndex === 0 || toIndex === 0)) return tabs
   const newTabs = [...tabs]
   const [moved] = newTabs.splice(fromIndex, 1)
   newTabs.splice(toIndex, 0, moved!)

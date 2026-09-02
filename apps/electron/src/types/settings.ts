@@ -436,16 +436,8 @@ export const SCRATCH_PAD_IPC_CHANNELS = {
   COPY_IMAGE: 'scratch-pad:copy-image',
 } as const
 
-/** Canvas 画布 IPC 通道 */
+/** Canvas 画布 IPC 通道（全局画布通道已随顶部 Canvas Tab 移除，仅保留会话画布与导出） */
 export const CANVAS_IPC_CHANNELS = {
-  /** 从磁盘加载 canvas.canvas 内容（JSON Canvas 格式） */
-  LOAD: 'canvas:load',
-  /** 保存内容到 canvas.canvas */
-  SAVE: 'canvas:save',
-  /** 同步保存（beforeunload 场景） */
-  SAVE_SYNC: 'canvas:save-sync',
-  /** 主进程 → 渲染进程：canvas 文件被外部修改 */
-  EXTERNAL_CHANGED: 'canvas:external-changed',
   /** 导出选中簇为独立 .canvas + .md 文件 */
   EXPORT: 'canvas:export-cluster',
   /** 从磁盘加载 session 专属画布 */

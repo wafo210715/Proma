@@ -9,7 +9,7 @@
 import * as React from 'react'
 import { createPortal } from 'react-dom'
 import { useAtomValue } from 'jotai'
-import { FileText, Shapes, X, Clock, GitBranch } from 'lucide-react'
+import { FileText, X, Clock, GitBranch } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { TabType, TabMinimapItem } from '@/atoms/tab-atoms'
 import type { SessionIndicatorStatus } from '@/atoms/agent-atoms'
@@ -28,8 +28,6 @@ export interface TabBarItemProps {
   isHovered: boolean
   /** 预览面板是否正在退出动画 */
   isLeaving: boolean
-  /** 该 Tab 正在被拖出 TabBar 转分屏（tear-off 触发瞬间） */
-  isTearingOff?: boolean
   onActivate: () => void
   onClose: () => void
   onMiddleClick: () => void
@@ -57,7 +55,6 @@ export function TabBarItem({
   isStreaming,
   isHovered,
   isLeaving,
-  isTearingOff,
   onActivate,
   onClose,
   onMiddleClick,
@@ -85,8 +82,6 @@ export function TabBarItem({
   }, [])
 
   const handleMouseDown = (e: React.MouseEvent): void => {
-    // Canvas 固定入口不可中键关闭
-    if (type === 'canvas') return
     if (e.button === 1) {
       e.preventDefault()
       onMiddleClick()
@@ -98,41 +93,10 @@ export function TabBarItem({
     onClose()
   }
 
-  const isCanvas = type === 'canvas'
   const showAgentSpinner = type === 'agent' && isStreaming === 'running'
   const previewItems = minimapCache.get(id) ?? []
   // 当前 active Tab 不显示预览面板
   const showPreview = isHovered && !isActive
-
-  // Canvas 是固定入口（紧凑图标 tab，不可关闭）
-  if (isCanvas) {
-    return (
-      <div
-        className="relative flex-shrink-0 titlebar-no-drag"
-        onMouseEnter={onHoverEnter}
-        onMouseLeave={onHoverLeave}
-      >
-        <button
-          ref={buttonRef}
-          type="button"
-          className={cn(
-            'group relative flex items-center justify-center gap-1.5 min-w-[82px] px-3 h-[34px] rounded-none',
-            'text-xs transition-colors select-none cursor-pointer',
-            'border-t border-l border-r border-transparent',
-            isActive
-              ? 'app-tab-active text-foreground border-border/80'
-              : 'app-tab-inactive text-muted-foreground hover:text-foreground',
-          )}
-          onClick={onActivate}
-          onMouseDown={handleMouseDown}
-          onPointerDown={onDragStart}
-        >
-          <Shapes className="size-3.5" />
-          <span className="truncate">Canvas</span>
-        </button>
-      </div>
-    )
-  }
 
   return (
     <div
@@ -151,7 +115,6 @@ export function TabBarItem({
           isActive
             ? 'app-tab-active text-foreground border-border/80'
             : 'app-tab-inactive text-muted-foreground hover:text-foreground',
-          isTearingOff && 'ring-2 ring-primary/70 ring-offset-0 bg-primary/10',
         )}
         onClick={onActivate}
         onMouseDown={handleMouseDown}

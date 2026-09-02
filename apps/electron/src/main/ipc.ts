@@ -6,7 +6,7 @@
 
 import { ipcMain, nativeTheme, shell, dialog, BrowserWindow, app, clipboard, nativeImage } from 'electron'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { existsSync, realpathSync, readFileSync, writeFileSync, mkdirSync, statSync, watch as fsWatch, type FSWatcher } from 'node:fs'
+import { existsSync, realpathSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs'
 import { realpath, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
@@ -304,7 +304,7 @@ import { permissionService } from './lib/agent-permission-service'
 import { resolvePathAgainstAgentCwd } from './lib/agent-file-path'
 import { askUserService } from './lib/agent-ask-user-service'
 import { exitPlanService } from './lib/agent-exit-plan-service'
-import { getAgentSessionWorkspacePath, getAgentWorkspacesDir, getConfigDir, getWorkspaceSkillsDir, getWorkspaceFilesDir, getScratchPadPath, getCanvasPath, getCanvasExportsDir, getSessionCanvasPath, getAgentSessionMessagesPath } from './lib/config-paths'
+import { getAgentSessionWorkspacePath, getAgentWorkspacesDir, getConfigDir, getWorkspaceSkillsDir, getWorkspaceFilesDir, getScratchPadPath, getCanvasExportsDir, getSessionCanvasPath, getAgentSessionMessagesPath } from './lib/config-paths'
 import { readSessionMessages } from '@proma/session-core/node'
 import { groupIntoTurns, renderFullTranscriptMarkdown } from '@proma/session-core'
 import { getCachedDefaultAppInfo, saveCachedDefaultAppInfo } from './lib/default-app-cache'
@@ -368,9 +368,6 @@ import { confirmWorkspaceMemoryWindowClose, markWorkspaceMemoryWindowReady } fro
 import { deleteMcpCredential, startMcpOAuth, saveMcpApiKey } from './lib/mcp-oauth-service'
 
 /* ── Canvas 外部修改检测的模块级状态 ── */
-let canvasWatcher: FSWatcher | null = null
-let lastCanvasWriteAt = 0
-let canvasWatchDebounce: ReturnType<typeof setTimeout> | null = null
 
 /** Renderer-scoped subscriptions; disposed on explicit tab cleanup or renderer destruction. */
 const workspaceMemoryWatchSubscriptions = new Map<number, Map<string, () => void>>()
@@ -2285,87 +2282,9 @@ export function registerIpcHandlers(): void {
     }
   )
 
-  // ===== Canvas 画布持久化 =====
-
-  // ===== Canvas 外部修改检测 =====
-  // 用 fs.watch 监听 canvas 文件；若变更不是来自我们自己的保存（时间窗口区分），
-  // 读取新内容广播给渲染进程，由前端提示「重新加载 / 保留当前」。
-  function ensureCanvasWatcher(): void {
-    if (canvasWatcher) return
-    const path = getCanvasPath()
-    if (!existsSync(path)) return
-    try {
-      canvasWatcher = fsWatch(path, () => {
-        // 自身保存后的 2s 内的变更事件忽略（写文件也会触发 watch）
-        if (Date.now() - lastCanvasWriteAt < 2000) return
-        if (canvasWatchDebounce) clearTimeout(canvasWatchDebounce)
-        canvasWatchDebounce = setTimeout(() => {
-          try {
-            if (!existsSync(path)) return
-            const content = readFileSync(path, 'utf-8')
-            for (const win of BrowserWindow.getAllWindows()) {
-              win.webContents.send(CANVAS_IPC_CHANNELS.EXTERNAL_CHANGED, content)
-            }
-          } catch (err) {
-            console.error('[Canvas] 读取外部变更失败:', err)
-          }
-        }, 300)
-      })
-    } catch (err) {
-      console.error('[Canvas] 监听文件失败:', err)
-    }
-  }
-
-  // 从磁盘加载 canvas.canvas（JSON Canvas 格式）
-  ipcMain.handle(
-    CANVAS_IPC_CHANNELS.LOAD,
-    async (): Promise<string> => {
-      const path = getCanvasPath()
-      try {
-        if (!existsSync(path)) return ''
-        return readFileSync(path, 'utf-8')
-      } catch (err) {
-        console.error('[Canvas] 加载失败:', err)
-        return ''
-      }
-    }
-  )
-
-  // 异步保存 canvas.canvas
-  ipcMain.handle(
-    CANVAS_IPC_CHANNELS.SAVE,
-    async (_, content: string): Promise<boolean> => {
-      const path = getCanvasPath()
-      try {
-        lastCanvasWriteAt = Date.now()
-        await writeFile(path, content, 'utf-8')
-        lastCanvasWriteAt = Date.now()
-        ensureCanvasWatcher()
-        return true
-      } catch (err) {
-        console.error('[Canvas] 保存失败:', err)
-        return false
-      }
-    }
-  )
-
-  // 同步保存 canvas.canvas（beforeunload 场景）
-  ipcMain.on(
-    CANVAS_IPC_CHANNELS.SAVE_SYNC,
-    (event, content: string) => {
-      try {
-        lastCanvasWriteAt = Date.now()
-        writeFileSync(getCanvasPath(), content, 'utf-8')
-        lastCanvasWriteAt = Date.now()
-        event.returnValue = true
-      } catch (err) {
-        console.error('[Canvas] 同步保存失败:', err)
-        event.returnValue = false
-      }
-    }
-  )
-
-
+  // ===== Canvas 导出与 Session 画布持久化 =====
+  // 全局画布（canvas.canvas）及其外部修改检测已随顶部 Canvas Tab 移除；
+  // 画布能力整体迁入右侧工作区的会话画布 Tab，磁盘上的旧全局画布文件保留不清理。
 
   // 导出选中簇：写 {name}.canvas + {name}.md 到 ~/.proma/canvas-exports/，重名自动加序号
   ipcMain.handle(
