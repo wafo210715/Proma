@@ -11,7 +11,7 @@
 import * as React from 'react'
 import { useAtom, useSetAtom, useAtomValue, useStore } from 'jotai'
 import { toast } from 'sonner'
-import { Pin, PinOff, Star, Settings, Plus, CirclePlus, Trash2, Pencil, PanelLeft, PanelLeftOpen, ArrowRightLeft, Search, Archive, ArchiveRestore, ArrowLeft, Bot, MessageSquare, MoreHorizontal, FolderOpen, FolderInput, FolderPlus, GripVertical, Clock, CalendarDays, ChevronRight, ChevronDown, ChevronUp, Blocks, Brain, ListTodo, GitBranch, Download, Loader2, RotateCw, Info, Columns2 } from 'lucide-react'
+import { Pin, PinOff, Star, Settings, Plus, CirclePlus, Trash2, Pencil, PanelLeft, PanelLeftOpen, ArrowRightLeft, Search, Archive, ArchiveRestore, ArrowLeft, Bot, MessageSquare, MoreHorizontal, FolderOpen, FolderInput, FolderPlus, GripVertical, Clock, CalendarDays, ChevronRight, ChevronDown, ChevronUp, Blocks, Brain, ListTodo, GitBranch, Download, Loader2, RotateCw, Info, Columns2, MessagesSquare } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { ModeSwitcher } from './ModeSwitcher'
@@ -50,6 +50,9 @@ import {
   agentWorkspacesAtom,
   workspaceCapabilitiesVersionAtom,
   agentDiffPanelTabAtom,
+  agentSideSessionMapAtom,
+  getSideSessionTab,
+  currentSessionSidePanelOpenAtom,
   agentDiffRefreshVersionAtom,
   agentDiffUnseenChangesAtom,
   agentDiffUnseenFilesAtom,
@@ -4321,6 +4324,9 @@ const AgentSessionItem = React.memo(function AgentSessionItem({
   const currentAgentSessionId = useAtomValue(currentAgentSessionIdAtom)
   const setComparePairs = useSetAtom(comparePairsAtom)
   const setCompareLinked = useSetAtom(compareLinkedAtom)
+  const setSideSessionMap = useSetAtom(agentSideSessionMapAtom)
+  const setSidePanelOpen = useSetAtom(currentSessionSidePanelOpenAtom)
+  const setDiffPanelTabMap = useSetAtom(agentDiffPanelTabAtom)
   const comparePairs = useAtomValue(comparePairsAtom)
   const comparePartnerId = getComparePartner(comparePairs, session.id)
   const inComparePair = comparePartnerId !== null
@@ -4341,9 +4347,20 @@ const AgentSessionItem = React.memo(function AgentSessionItem({
       onSelect(session.id, session.title)
       return
     }
-    setComparePairs((prev) => addPair(prev, currentAgentSessionId, session.id))
-    setCompareLinked(false)
-  }, [currentAgentSessionId, session.id, session.title, onSelect, setComparePairs, setCompareLinked])
+    setSideSessionMap((prev) => {
+      const openIds = prev.get(currentAgentSessionId) ?? []
+      if (openIds.includes(session.id)) return prev
+      const next = new Map(prev)
+      next.set(currentAgentSessionId, [...openIds, session.id])
+      return next
+    })
+    setSidePanelOpen(true)
+    setDiffPanelTabMap((prev) => {
+      const next = new Map(prev)
+      next.set(currentAgentSessionId, getSideSessionTab(session.id))
+      return next
+    })
+  }, [currentAgentSessionId, session.id, session.title, onSelect, setDiffPanelTabMap, setSidePanelOpen, setSideSessionMap])
 
   const [exporting, setExporting] = React.useState(false)
   const handleExport = React.useCallback(async (): Promise<void> => {
@@ -4486,7 +4503,7 @@ const AgentSessionItem = React.memo(function AgentSessionItem({
         重命名
       </MenuItem>
       <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => handleEnterSplit()}>
-        <Columns2 size={14} />
+        <MessagesSquare size={14} />
         进入分屏
       </MenuItem>
       <MenuItem className="text-xs py-1 [&>svg]:size-3.5" disabled={exporting} onSelect={() => void handleExport()}>
