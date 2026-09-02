@@ -291,7 +291,13 @@ export function buildQuotedSelectionBlock(quotedSelection: QuotedSelection): str
   }
 
   const safePath = escapeXmlAttribute(quotedSelection.filePath)
-  return `<quoted_file path="${safePath}">\n${safeText}\n</quoted_file>\n\n`
+  // 批注等带行号的引用把位置交给 Agent；解析端按 path 匹配，额外属性不影响既有引用识别。
+  const lines = isPositiveInteger(quotedSelection.startLine)
+    && isPositiveInteger(quotedSelection.endLine)
+    && quotedSelection.endLine >= quotedSelection.startLine
+    ? ` lines="${quotedSelection.startLine}-${quotedSelection.endLine}"`
+    : ''
+  return `<quoted_file path="${safePath}"${lines}>\n${safeText}\n</quoted_file>\n\n`
 }
 
 function normalizeContextSourceType(_value: string | undefined): QuotedSelectionSourceType {

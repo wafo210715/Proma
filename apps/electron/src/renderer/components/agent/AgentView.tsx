@@ -730,7 +730,7 @@ export function AgentView({ sessionId, embedded = false }: AgentViewProps): Reac
     const handleInsertQuote = (event: Event): void => {
       const detail = (event as CustomEvent<InsertAgentInputQuoteDetail>).detail
       if (!detail || detail.sessionId !== sessionId) return
-      detail.inserted = richTextInputRef.current?.insertQuotedSelectionMention(detail.quote) ?? false
+      detail.inserted = richTextInputRef.current?.insertQuotedSelectionMention(detail.quote, detail.options) ?? false
     }
     window.addEventListener(INSERT_AGENT_INPUT_QUOTE_EVENT, handleInsertQuote)
     return () => window.removeEventListener(INSERT_AGENT_INPUT_QUOTE_EVENT, handleInsertQuote)

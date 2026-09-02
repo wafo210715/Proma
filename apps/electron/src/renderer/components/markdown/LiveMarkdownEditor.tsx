@@ -27,6 +27,9 @@ export interface LiveMarkdownTextSelection {
   text: string
   x: number
   y: number
+  /** 选区在 Markdown 源码中的起止偏移，批注锚定直接使用，无需 DOM Range 反解。 */
+  from: number
+  to: number
 }
 
 interface LiveMarkdownEditorProps {
@@ -339,6 +342,8 @@ export const LiveMarkdownEditor = React.forwardRef<LiveMarkdownEditorHandle, Liv
               text,
               x: (coords.left + coords.right) / 2,
               y: coords.top - 12,
+              from: range.from,
+              to: range.to,
             })
           }
           const scheduleSelectionReport = (): void => {

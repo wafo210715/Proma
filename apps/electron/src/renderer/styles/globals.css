@@ -2549,6 +2549,53 @@
   font-size: 1.21em;
   line-height: 1.2;
 }
+/* Markdown 批注：被批注文本淡淡高亮，末尾跟一个序号 Tag。Tag 是行内 widget，
+ * 随正文折行、随窗口宽度重排，不遮挡文字；已发送的批注降低存在感。 */
+.live-markdown-editor .live-markdown-annotation-range {
+  background: hsl(var(--primary) / 0.08);
+  border-bottom: 1.5px solid hsl(var(--primary) / 0.45);
+  border-radius: 2px;
+  transition: background-color 150ms ease-out;
+}
+.live-markdown-editor .live-markdown-annotation-range[data-annotation-status='sent'] {
+  background: hsl(var(--muted-foreground) / 0.08);
+  border-bottom-color: hsl(var(--muted-foreground) / 0.35);
+}
+.live-markdown-editor .live-markdown-annotation-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: text-top;
+  min-width: 1.05rem;
+  height: 1.05rem;
+  margin: 0 0.15rem 0 0.2rem;
+  padding: 0 0.3rem;
+  border: 0;
+  border-radius: 9999px;
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+  font-family: inherit;
+  font-size: 0.65rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.15);
+  transition: transform 120ms ease-out, opacity 120ms ease-out;
+}
+.live-markdown-editor .live-markdown-annotation-tag:hover {
+  transform: translateY(-1px) scale(1.06);
+}
+.live-markdown-editor .live-markdown-annotation-tag:focus-visible {
+  outline: 2px solid hsl(var(--ring) / 0.5);
+  outline-offset: 1px;
+}
+.live-markdown-editor .live-markdown-annotation-tag[data-annotation-status='sent'] {
+  background: hsl(var(--muted-foreground) / 0.55);
+  opacity: 0.75;
+}
 /* ink-mde has `.cm-line span { display: inline }`, whose specificity overrides
  * KaTeX's structural span displays. Restore the KaTeX layout primitives inside
  * widgets: vlist drives superscripts, fractions, roots, matrices and integrals. */

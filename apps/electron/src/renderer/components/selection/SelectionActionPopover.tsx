@@ -1,11 +1,13 @@
 import * as React from 'react'
 import { createPortal } from 'react-dom'
-import { Bot, MessageSquarePlus } from 'lucide-react'
+import { Bot, MessageSquarePlus, MessageSquareText } from 'lucide-react'
 
 interface SelectionActionPopoverProps {
   x: number
   y: number
   onAddToAgent: () => void
+  /** Markdown 预览：把选区留作行间批注，稍后批量发送。 */
+  onAnnotate?: () => void
   /** Pi `/tree`：从当前 Agent 历史节点创建右侧探索分支。 */
   onOpenExplorationBranch?: () => void | Promise<void>
   /** 兼容尚未迁移的临时 Agent 入口。 */
@@ -18,6 +20,7 @@ export function SelectionActionPopover({
   x,
   y,
   onAddToAgent,
+  onAnnotate,
   onOpenExplorationBranch,
   onOpenTemporaryAgent,
   onOpenChat,
@@ -25,10 +28,10 @@ export function SelectionActionPopover({
   const openSideAssistant = onOpenExplorationBranch ?? onOpenTemporaryAgent ?? onOpenChat
   // 顶部选区若仍向上展开，浮窗会被窗口边缘裁掉；此时改为在选区下方展示。
   const openBelow = y < 72
-  // 浮窗有两个不可换行的动作。靠近视口边缘时改为向内对齐，避免 flex item 收缩后中文逐字竖排。
+  // 浮窗有多个不可换行的动作。靠近视口边缘时改为向内对齐，避免 flex item 收缩后中文逐字竖排。
   const viewportWidth = window.innerWidth
   const edgePadding = 12
-  const estimatedPopoverWidth = 292
+  const estimatedPopoverWidth = onAnnotate ? 400 : 292
   const alignRight = x > viewportWidth - estimatedPopoverWidth - edgePadding
   const alignLeft = !alignRight && x < estimatedPopoverWidth / 2 + edgePadding
   const horizontalTransform = alignRight ? '-translate-x-full' : alignLeft ? 'translate-x-0' : '-translate-x-1/2'
@@ -41,6 +44,16 @@ export function SelectionActionPopover({
       onMouseDown={(event) => event.preventDefault()}
     >
       <div className="flex flex-nowrap items-center gap-1 whitespace-nowrap">
+        {onAnnotate && (
+          <button
+            type="button"
+            className="inline-flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 text-[13px] font-medium transition-colors hover:bg-muted"
+            onClick={onAnnotate}
+          >
+            <MessageSquareText className="size-4" />
+            添加批注
+          </button>
+        )}
         <button
           type="button"
           className="inline-flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 text-[13px] font-medium transition-colors hover:bg-muted"

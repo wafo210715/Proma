@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { useAtom, useAtomValue, useSetAtom } from 'jotai'
-import { BookOpen, ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown, CircleHelp, Folder, FolderOpen, Loader2, Plus, Trash2 } from 'lucide-react'
+import { BookOpen, ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown, CircleHelp, Folder, FolderOpen, Loader2, MessageSquareText, Plus, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import type { VaultCandidate, VaultFileEntry, VaultFocus, VaultReadResult, VaultSummary } from '@proma/shared'
 import { Button } from '@/components/ui/button'
@@ -11,6 +11,9 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } 
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { VaultLiveMarkdownEditor } from './VaultLiveMarkdownEditor'
+import { useMarkdownAnnotationPanelLayout, useMarkdownAnnotations } from '@/components/markdown/useMarkdownAnnotations'
+import { MarkdownAnnotationComposer } from '@/components/markdown/MarkdownAnnotationComposer'
+import { MarkdownAnnotationPanel } from '@/components/markdown/MarkdownAnnotationPanel'
 import { useVaultScrollMemory } from './useVaultScrollMemory'
 import { getVaultScrollKey } from './vault-scroll-memory'
 import type { LiveMarkdownEditorHandle, LiveMarkdownTextSelection } from '@/components/markdown/LiveMarkdownEditor'
@@ -307,8 +310,42 @@ function VaultMarkdownEditor({
     getView: getEditorView,
     storageKey: getVaultScrollKey(vaultId, readResult.relativePath, sessionId),
   })
+  // 批注在编辑器重建后需要重新注水；用就绪计数作为触发信号。
+  const [editorReadyVersion, setEditorReadyVersion] = React.useState(0)
+  const handleEditorReadyWithAnnotations = React.useCallback(() => {
+    handleEditorReady()
+    setEditorReadyVersion((version) => version + 1)
+  }, [handleEditorReady])
+  const annotationTarget = React.useMemo(
+    () => ({ kind: 'vault' as const, relativePath: readResult.relativePath }),
+    [readResult.relativePath],
+  )
+  const scrollEditorToPosition = React.useCallback((position: number) => {
+    editorHandleRef.current?.scrollToPosition(position)
+  }, [])
+  const annotationController = useMarkdownAnnotations({
+    target: annotationTarget,
+    quoteFilePath: readResult.relativePath,
+    quoteSourceLabel: `Obsidian · ${readResult.relativePath}`,
+    sessionId,
+    getView: getEditorView,
+    editorReadyKey: editorReadyVersion,
+    scrollToPosition: scrollEditorToPosition,
+  })
+  const annotationExtensions = React.useMemo(() => [annotationController.extension], [annotationController.extension])
+  const annotationLayoutRef = React.useRef<HTMLDivElement>(null)
+  const annotationPanelLayout = useMarkdownAnnotationPanelLayout(annotationLayoutRef)
+  const handleDeleteComposerAnnotation = React.useCallback(() => {
+    const annotationId = annotationController.composer?.annotationId
+    if (annotationId) annotationController.removeAnnotation(annotationId)
+  }, [annotationController])
 
   const clearSelection = React.useCallback(() => setSelection(null), [])
+  const handleAnnotateSelection = React.useCallback(() => {
+    if (!selection) return
+    annotationController.openComposerForRange({ from: selection.from, to: selection.to }, selection.x, selection.y)
+    clearSelection()
+  }, [annotationController, clearSelection, selection])
   const handleTextSelectionChange = React.useCallback((nextSelection: LiveMarkdownTextSelection | null) => {
     if (!nextSelection) {
       clearSelection()
@@ -505,17 +542,48 @@ function VaultMarkdownEditor({
             </TooltipTrigger>
             <TooltipContent>{VAULT_NAME} 使用帮助（自动保存；Cmd/Ctrl + S 可立即保存）</TooltipContent>
           </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label={annotationController.panelOpen ? '隐藏批注面板' : '显示批注面板'}
+                onClick={() => annotationController.setPanelOpen((open) => !open)}
+                className={cn(
+                  'relative flex size-8 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-muted hover:text-foreground',
+                  annotationController.panelOpen ? 'text-foreground' : 'text-muted-foreground',
+                )}
+              >
+                <MessageSquareText size={16} />
+                {annotationController.annotations.length > 0 && (
+                  <span className="absolute right-0.5 top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-0.5 text-[9px] font-semibold tabular-nums text-primary-foreground">
+                    {annotationController.annotations.length}
+                  </span>
+                )}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>{annotationController.panelOpen ? '隐藏批注面板' : '显示批注面板'}</TooltipContent>
+          </Tooltip>
         </div>
-        <div className="min-h-0 flex-1">
-          <VaultLiveMarkdownEditor
-            ref={editorHandleRef}
-            relativePath={readResult.relativePath}
-            value={draft}
-            onChange={updateDraft}
-            onSave={() => { void flushPendingSave() }}
-            onReady={handleEditorReady}
-            onTextSelectionChange={handleTextSelectionChange}
-          />
+        <div ref={annotationLayoutRef} className="relative flex min-h-0 flex-1">
+          <div className="min-h-0 min-w-0 flex-1">
+            <VaultLiveMarkdownEditor
+              ref={editorHandleRef}
+              relativePath={readResult.relativePath}
+              value={draft}
+              onChange={updateDraft}
+              onSave={() => { void flushPendingSave() }}
+              onReady={handleEditorReadyWithAnnotations}
+              onTextSelectionChange={handleTextSelectionChange}
+              extensions={annotationExtensions}
+            />
+          </div>
+          {annotationController.panelOpen && (
+            <MarkdownAnnotationPanel
+              controller={annotationController}
+              layout={annotationPanelLayout}
+              className={annotationPanelLayout === 'overlay' ? 'rounded-l-lg border border-border/60' : 'ml-4 rounded-lg border border-border/60'}
+            />
+          )}
         </div>
       </div>
       {selection && (
@@ -523,7 +591,16 @@ function VaultMarkdownEditor({
           x={selection.x}
           y={selection.y}
           onAddToAgent={addSelectionToAgent}
+          onAnnotate={handleAnnotateSelection}
           onOpenChat={openSelectionChat}
+        />
+      )}
+      {annotationController.composer && (
+        <MarkdownAnnotationComposer
+          state={annotationController.composer}
+          onSubmit={annotationController.submitComposer}
+          onCancel={annotationController.closeComposer}
+          onDelete={annotationController.composer.annotationId ? handleDeleteComposerAnnotation : undefined}
         />
       )}
     </div>

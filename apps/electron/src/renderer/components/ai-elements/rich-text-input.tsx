@@ -20,6 +20,8 @@ import { DOMParser as ProseMirrorDOMParser } from '@tiptap/pm/model'
 import { TextSelection } from '@tiptap/pm/state'
 import type { Transaction } from '@tiptap/pm/state'
 import StarterKit from '@tiptap/starter-kit'
+import type { JSONContent } from '@tiptap/core'
+import type { InsertAgentInputQuoteOptions } from '@/lib/agent-input-quote'
 import Placeholder from '@tiptap/extension-placeholder'
 import Underline from '@tiptap/extension-underline'
 import Link from '@tiptap/extension-link'
@@ -200,8 +202,8 @@ export interface RichTextInputHandle {
   insertSessionMention: (item: SessionReferenceDragItem) => boolean
   /** 在光标处插入可定位的 Agent 历史引用 chip。 */
   insertAgentHistoryQuoteMention: (quote: QuotedSelection) => boolean
-  /** 在光标处插入文件或 Vault 的选区引用 chip；可重复插入、多条并存。 */
-  insertQuotedSelectionMention: (quote: QuotedSelection) => boolean
+  /** 在光标处插入文件或 Vault 的选区引用 chip；可重复插入、多条并存，可附带说明文字与换行。 */
+  insertQuotedSelectionMention: (quote: QuotedSelection, options?: InsertAgentInputQuoteOptions) => boolean
 }
 
 /**
@@ -1122,7 +1124,7 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
         .run()
       return true
     },
-    insertQuotedSelectionMention(quote: QuotedSelection): boolean {
+    insertQuotedSelectionMention(quote: QuotedSelection, options?: InsertAgentInputQuoteOptions): boolean {
       if (!editor) return false
       const marker = serializeQuotedSelectionMention(quote)
       if (!marker) return false
@@ -1132,8 +1134,10 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
       const id = quote.sourceType === 'agent-history'
         ? `${quote.messageId ?? ''}:${quote.selectionStart ?? ''}:${quote.selectionEnd ?? ''}`
         : `${quote.filePath}:${quote.capturedAt}`
-      editor.chain().focus()
-        .insertContent({
+      // 说明文字以 JSON 节点插入，绕过 HTML 解析，保证前导空格与原文一致。
+      const trailing = options?.trailingText ? ` ${options.trailingText}` : ' '
+      const content: JSONContent[] = [
+        {
           type: 'mention',
           attrs: {
             id,
@@ -1141,9 +1145,11 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
             mentionSuggestionChar: '&',
             agentHistoryQuote: payload,
           },
-        })
-        .insertContent(' ')
-        .run()
+        },
+        { type: 'text', text: trailing },
+      ]
+      if (options?.lineBreak) content.push({ type: 'hardBreak' })
+      editor.chain().focus().insertContent(content).run()
       return true
     },
   }), [editor, flushPendingDraftSync])

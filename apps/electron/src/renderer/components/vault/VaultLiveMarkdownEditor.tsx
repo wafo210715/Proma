@@ -1,4 +1,5 @@
 import * as React from 'react'
+import type { Extension } from '@codemirror/state'
 import { LiveMarkdownEditor, type LiveMarkdownEditorHandle, type LiveMarkdownTextSelection, type LiveMarkdownPropertyEntry } from '@/components/markdown/LiveMarkdownEditor'
 import { serializeFlatLeadingFrontmatter } from '@/components/markdown/live-markdown-frontmatter'
 
@@ -21,6 +22,8 @@ interface VaultLiveMarkdownEditorProps {
   onTextSelectionChange?: (selection: LiveMarkdownTextSelection | null) => void
   /** CodeMirror 异步挂载完成后通知外层，用于恢复阅读位置。 */
   onReady?: () => void
+  /** 透传给 CodeMirror 的额外扩展（如批注）；与普通 .md 预览共用同一份实现。 */
+  extensions?: readonly Extension[]
   relativePath: string
 }
 

@@ -6,7 +6,7 @@
  */
 
 import * as React from 'react'
-import { ChevronRight, Code2, Copy, Check, Eye, FolderOpen, List, Pencil, RotateCw, Save, WrapText, X } from 'lucide-react'
+import { ChevronRight, Code2, Copy, Check, Eye, FolderOpen, List, MessageSquareText, Pencil, RotateCw, Save, WrapText, X } from 'lucide-react'
 import { atom, useAtom, useAtomValue, useSetAtom } from 'jotai'
 import DOMPurify from 'dompurify'
 import { File as PierreFile } from '@pierre/diffs/react'
@@ -41,6 +41,9 @@ import { initShortcutRegistry } from '@/lib/shortcut-registry'
 import { DiffView } from './DiffView'
 import { LiveMarkdownEditor, type LiveMarkdownEditorHandle, type LiveMarkdownTextSelection } from '@/components/markdown/LiveMarkdownEditor'
 import { createLiveMarkdownImageResolver } from '@/components/markdown/live-markdown-media'
+import { useMarkdownAnnotationPanelLayout, useMarkdownAnnotations } from '@/components/markdown/useMarkdownAnnotations'
+import { MarkdownAnnotationComposer } from '@/components/markdown/MarkdownAnnotationComposer'
+import { MarkdownAnnotationPanel } from '@/components/markdown/MarkdownAnnotationPanel'
 import { getPreviewCandidateBasePaths, isAbsoluteFilePath } from './preview-open-path'
 import { DefaultAppOpenButton } from './DefaultAppOpenButton'
 import { UnsupportedFilePreview } from './UnsupportedFilePreview'
@@ -112,6 +115,8 @@ interface PreviewTextSelection {
   x: number
   y: number
   filePath: string
+  /** CodeMirror 源码偏移；仅 Markdown 编辑器选区提供，用于行间批注锚定。 */
+  range?: { from: number; to: number }
 }
 
 /** 超过此字符数的文本文件将跳过 PierreFile 高亮，直接以纯文本展示，避免大文件卡顿 */
@@ -438,7 +443,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
   }, [])
 
   /** 将 DOM 或 CodeMirror 的选区归一为同一套引用动作。 */
-  const capturePreviewSelection = React.useCallback((text: string, x: number, y: number) => {
+  const capturePreviewSelection = React.useCallback((text: string, x: number, y: number, range?: { from: number; to: number }) => {
     const truncated = text.length > MAX_QUOTED_CHARS
     const quotedText = truncated ? text.slice(0, MAX_QUOTED_CHARS) : text
     setPreviewSelection({
@@ -446,6 +451,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
       x,
       y: Math.max(12, y),
       filePath: filePathRef.current,
+      ...(range && { range }),
     })
 
     // 超过上限时按千位分档 toast；跨档时撤掉上一档，回到上限内则全部撤掉
@@ -493,7 +499,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
       clearPreviewSelection()
       return
     }
-    capturePreviewSelection(selection.text, selection.x, selection.y)
+    capturePreviewSelection(selection.text, selection.x, selection.y, { from: selection.from, to: selection.to })
   }, [capturePreviewSelection, clearPreviewSelection])
 
   const scheduleSelectionCapture = React.useCallback((): void => {
@@ -1445,6 +1451,47 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
     })
   }, [filePath, previewContentRefreshKey, previewOnly, sessionId, setPreviewContentRefreshVersionMap, setRefreshVersionMap])
 
+  // Markdown 行间批注：sidecar 以绝对路径为 key，历史工具调用的相对路径先按会话目录补全。
+  const annotationTarget = React.useMemo(() => {
+    if (!isMarkdown) return null
+    const absolutePath = isAbsoluteFilePath(filePath) ? filePath : getPreviewTargetPath(filePath, dirPath)
+    return isAbsoluteFilePath(absolutePath) ? { kind: 'file' as const, filePath: absolutePath } : null
+  }, [dirPath, filePath, isMarkdown])
+  const getMarkdownEditorView = React.useCallback(() => markdownEditorRef.current?.getView() ?? null, [])
+  const scrollMarkdownEditorToPosition = React.useCallback((position: number) => {
+    cancelPendingPreviewScrollRestore()
+    markdownEditorRef.current?.scrollToPosition(position)
+  }, [cancelPendingPreviewScrollRestore])
+  const annotationController = useMarkdownAnnotations({
+    target: annotationTarget,
+    quoteFilePath: filePath,
+    quoteSourceLabel: filePath,
+    sessionId,
+    getView: getMarkdownEditorView,
+    editorReadyKey: liveMarkdownReadyKey,
+    scrollToPosition: scrollMarkdownEditorToPosition,
+  })
+  const markdownAnnotationExtensions = React.useMemo(() => [annotationController.extension], [annotationController.extension])
+  // 目录与批注面板都是侧栏；右侧工作区宽度有限，二者互斥以免把正文挤没。
+  const { panelOpen: annotationPanelOpen, setPanelOpen: setAnnotationPanelOpen } = annotationController
+  const annotationLayoutRef = React.useRef<HTMLDivElement>(null)
+  const annotationPanelLayout = useMarkdownAnnotationPanelLayout(annotationLayoutRef)
+  React.useEffect(() => {
+    if (annotationPanelOpen) setTocOpen(false)
+  }, [annotationPanelOpen, setTocOpen])
+  React.useEffect(() => {
+    if (tocOpen) setAnnotationPanelOpen(false)
+  }, [setAnnotationPanelOpen, tocOpen])
+  const handleAnnotateSelection = React.useCallback(() => {
+    if (!previewSelection?.range) return
+    annotationController.openComposerForRange(previewSelection.range, previewSelection.x, previewSelection.y)
+    clearPreviewSelection()
+  }, [annotationController, clearPreviewSelection, previewSelection])
+  const handleDeleteComposerAnnotation = React.useCallback(() => {
+    const annotationId = annotationController.composer?.annotationId
+    if (annotationId) annotationController.removeAnnotation(annotationId)
+  }, [annotationController])
+
   const handleAddSelectionToAgent = React.useCallback(() => {
     if (!previewSelection) return
     const quote = {
@@ -1813,10 +1860,34 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
           </Tooltip>
         )}
 
+        {isMarkdown && annotationController.enabled && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={() => annotationController.setPanelOpen((open) => !open)}
+                className={cn(
+                  'relative p-1 rounded hover:bg-foreground/[0.06] shrink-0',
+                  annotationController.panelOpen ? 'text-foreground/70' : 'text-foreground/40 hover:text-foreground/60',
+                )}
+                aria-label={annotationController.panelOpen ? '隐藏批注面板' : '显示批注面板'}
+              >
+                <MessageSquareText className="size-3.5" />
+                {annotationController.annotations.length > 0 && (
+                  <span className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-0.5 text-[9px] font-semibold tabular-nums text-primary-foreground">
+                    {annotationController.annotations.length}
+                  </span>
+                )}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">{annotationController.panelOpen ? '隐藏批注面板' : '显示批注面板'}</TooltipContent>
+          </Tooltip>
+        )}
+
         {toolbarActions}
       </div>
 
-      <div className="relative flex-1 min-h-0 flex">
+      <div ref={annotationLayoutRef} className="relative flex-1 min-h-0 flex">
         <PreviewFindBar
           open={findOpen}
           rootRef={scrollContainerRef}
@@ -1986,6 +2057,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
                 onTextSelectionChange={handleLiveMarkdownSelectionChange}
                 readOnly={Boolean(readOnly)}
                 resolveImageSrc={resolveProjectMarkdownImageSrc}
+                extensions={markdownAnnotationExtensions}
                 className={cn(
                   'live-markdown-external-scroll',
                   shouldMaskMarkdownForScrollRestore && 'invisible',
@@ -2035,12 +2107,24 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
           )}
           {isMarkdown && !loading && <MarkdownTocScrollTail containerRef={scrollContainerRef} enabled />}
         </div>
+        {isMarkdown && annotationController.enabled && annotationController.panelOpen && (
+          <MarkdownAnnotationPanel controller={annotationController} layout={annotationPanelLayout} />
+        )}
         {previewSelection && (
           <SelectionActionPopover
             x={previewSelection.x}
             y={previewSelection.y}
             onAddToAgent={handleAddSelectionToAgent}
+            onAnnotate={isMarkdown && annotationController.enabled && previewSelection.range ? handleAnnotateSelection : undefined}
             onOpenChat={handleOpenSelectionChat}
+          />
+        )}
+        {annotationController.composer && (
+          <MarkdownAnnotationComposer
+            state={annotationController.composer}
+            onSubmit={annotationController.submitComposer}
+            onCancel={annotationController.closeComposer}
+            onDelete={annotationController.composer.annotationId ? handleDeleteComposerAnnotation : undefined}
           />
         )}
       </div>

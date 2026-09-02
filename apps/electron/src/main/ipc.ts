@@ -10,7 +10,7 @@ import { existsSync, realpathSync, readFileSync, writeFileSync, mkdirSync, statS
 import { realpath, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
-import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, AGENT_ISLAND_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, VAULT_IPC_CHANNELS, PLANNING_CONFLICT_ERROR, MAX_ATTACHMENT_SIZE, isPromaPermissionMode, normalizePathForCompare, TERMINAL_IPC_CHANNELS } from '@proma/shared'
+import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, AGENT_ISLAND_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, VAULT_IPC_CHANNELS, PLANNING_CONFLICT_ERROR, MAX_ATTACHMENT_SIZE, isPromaPermissionMode, normalizePathForCompare, TERMINAL_IPC_CHANNELS, MARKDOWN_ANNOTATION_IPC_CHANNELS } from '@proma/shared'
 import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SCRATCH_PAD_IPC_CHANNELS, CANVAS_IPC_CHANNELS, SCREEN_CAPTURE_IPC_CHANNELS, QUICK_TASK_IPC_CHANNELS, VOICE_DICTATION_IPC_CHANNELS, APP_ICON_IPC_CHANNELS, DOCK_BADGE_IPC_CHANNELS, STORAGE_IPC_CHANNELS, WINDOWS_AGENT_ISLAND_IPC_CHANNELS, TRAY_IPC_CHANNELS } from '../types'
 import type {
   QuickTaskSubmitInput,
@@ -172,10 +172,12 @@ import {
   discoverVaultCandidates,
   selectDefaultVault,
   getConfiguredVaultFileSystem,
+  getVaultConfig,
   getVaultSummary,
   setVaultUserContext,
   clearVaultUserContext,
 } from './lib/vault-service'
+import { loadMarkdownAnnotations, resolveMarkdownAnnotationFilePath, saveMarkdownAnnotations } from './lib/markdown-annotation-store'
 import { registerUpdaterIpc } from './lib/updater/updater-ipc'
 import {
   listChannels,
@@ -6217,6 +6219,19 @@ export function registerIpcHandlers(): void {
     })
   })
 
+  // ===== Markdown 预览批注（sidecar，不写入正文）=====
+
+  ipcMain.handle(MARKDOWN_ANNOTATION_IPC_CHANNELS.LOAD, async (_, target: unknown) => {
+    const filePath = resolveMarkdownAnnotationFilePath(target, getVaultConfig()?.rootPath ?? null)
+    return loadMarkdownAnnotations(filePath)
+  })
+
+  ipcMain.handle(MARKDOWN_ANNOTATION_IPC_CHANNELS.SAVE, async (_, input: unknown) => {
+    if (!input || typeof input !== 'object') throw new Error('批注保存参数非法')
+    const value = input as Record<string, unknown>
+    const filePath = resolveMarkdownAnnotationFilePath(value.target, getVaultConfig()?.rootPath ?? null)
+    return saveMarkdownAnnotations(filePath, value.annotations)
+  })
 
   ipcMain.handle(VAULT_IPC_CHANNELS.CREATE_UNTITLED_FILE, async () => createUntitledVaultFile())
 
