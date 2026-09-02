@@ -38,8 +38,11 @@ import {
 import type { QuotedSelection } from '@/atoms/preview-atoms'
 import {
   buildAgentHistoryQuoteLabel,
+  buildQuotedSelectionLabel,
   parseAgentHistoryQuoteMention,
+  parseQuotedSelectionMention,
   serializeAgentHistoryQuoteMention,
+  serializeQuotedSelectionMention,
 } from '@/lib/quoted-selection'
 import { useOpenPreview } from '@/components/diff/preview-opener'
 import { isImageFilePath } from './file-path-chip'
@@ -48,6 +51,10 @@ import { resolveMentionSuggestionChar } from './mention-utils'
 import { richTextRenderingEnabledAtom } from '@/atoms/ui-preferences'
 import { createFileMentionSuggestion } from '@/components/file-browser/file-mention-suggestion'
 import { getFilePanelDragData, type FilePanelDragItem } from '@/lib/file-panel-drag'
+import {
+  getSessionReferenceDragData,
+  type SessionReferenceDragItem,
+} from '@/lib/session-reference-drag'
 import {
   createMcpMentionSuggestion,
   createPlanningMentionSuggestion,
@@ -189,8 +196,12 @@ export interface RichTextInputHandle {
   getMarkdown: () => string
   /** 在光标处插入文件引用（右侧文件面板拖入时调用） */
   insertFileMentions: (items: FilePanelDragItem[]) => void
+  /** 在光标处插入会话引用（左侧会话行拖入时调用）。 */
+  insertSessionMention: (item: SessionReferenceDragItem) => boolean
   /** 在光标处插入可定位的 Agent 历史引用 chip。 */
   insertAgentHistoryQuoteMention: (quote: QuotedSelection) => boolean
+  /** 在光标处插入文件或 Vault 的选区引用 chip；可重复插入、多条并存。 */
+  insertQuotedSelectionMention: (quote: QuotedSelection) => boolean
 }
 
 /**
@@ -621,6 +632,8 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
             const quotePayload = typeof node.attrs.agentHistoryQuote === 'string' && node.attrs.agentHistoryQuote.length > 0
               ? node.attrs.agentHistoryQuote
               : null
+            const quotedSelection = quotePayload ? parseQuotedSelectionMention(`&quote:${quotePayload}`) : null
+            const isNavigableHistoryQuote = quotedSelection?.sourceType === 'agent-history'
             let chipClass = isDirectory ? 'directory-mention-chip' : 'mention-chip'
             if (quotePayload) chipClass = 'agent-history-quote-chip'
             else if (referenceType === 'todo') chipClass = 'todo-mention-chip'
@@ -638,9 +651,9 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
                 ...(referenceType === 'todo' || referenceType === 'calendar_event'
                   ? { 'data-mention-reference-type': referenceType }
                   : {}),
-                ...(quotePayload
+                ...(quotePayload ? { 'data-mention-quote': quotePayload } : {}),
+                ...(isNavigableHistoryQuote
                   ? {
-                      'data-mention-quote': quotePayload,
                       title: '跳转到引用位置并高亮',
                       role: 'button',
                       tabindex: '0',
@@ -670,10 +683,16 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
     content: value || '',
     editable: !disabled,
     editorProps: {
-      // 右侧文件面板拖拽载荷（自定义 MIME）交给外层容器 onDrop 处理，
-      // 阻止 ProseMirror 把 text/plain 路径文本当作普通文本插入。
+      // 文件面板和左侧会话行的自定义 MIME 载荷交给外层容器 onDrop 处理，
+      // 阻止 ProseMirror 把 text/plain 兜底载荷当作普通文本插入。
       handleDrop: (_view, event) => {
-        if (event.dataTransfer && getFilePanelDragData(event.dataTransfer)) {
+        if (
+          event.dataTransfer
+          && (
+            getFilePanelDragData(event.dataTransfer)
+            || getSessionReferenceDragData(event.dataTransfer)
+          )
+        ) {
           event.preventDefault()
           return true
         }
@@ -1066,6 +1085,21 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
       }
       chain.run()
     },
+    insertSessionMention(item: SessionReferenceDragItem): boolean {
+      if (!editor || !editor.isEditable) return false
+      editor.chain().focus()
+        .insertContent({
+          type: 'mention',
+          attrs: {
+            id: item.sessionId,
+            label: item.title,
+            mentionSuggestionChar: '&',
+          },
+        })
+        .insertContent(' ')
+        .run()
+      return true
+    },
     insertAgentHistoryQuoteMention(quote: QuotedSelection): boolean {
       if (!editor) return false
       const marker = serializeAgentHistoryQuoteMention(quote)
@@ -1074,6 +1108,30 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
       const payload = marker.slice('&quote:'.length)
       const label = buildAgentHistoryQuoteLabel(quote)
       const id = `${quote.messageId ?? ''}:${quote.selectionStart ?? ''}:${quote.selectionEnd ?? ''}`
+      editor.chain().focus()
+        .insertContent({
+          type: 'mention',
+          attrs: {
+            id,
+            label,
+            mentionSuggestionChar: '&',
+            agentHistoryQuote: payload,
+          },
+        })
+        .insertContent(' ')
+        .run()
+      return true
+    },
+    insertQuotedSelectionMention(quote: QuotedSelection): boolean {
+      if (!editor) return false
+      const marker = serializeQuotedSelectionMention(quote)
+      if (!marker) return false
+
+      const payload = marker.slice('&quote:'.length)
+      const label = buildQuotedSelectionLabel(quote)
+      const id = quote.sourceType === 'agent-history'
+        ? `${quote.messageId ?? ''}:${quote.selectionStart ?? ''}:${quote.selectionEnd ?? ''}`
+        : `${quote.filePath}:${quote.capturedAt}`
       editor.chain().focus()
         .insertContent({
           type: 'mention',

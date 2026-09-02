@@ -129,7 +129,17 @@ import type { AgentDeferredQueueMessageInput, AgentSendInput, AgentPendingFile, 
 import { inferContextWindow, inferReasoningTransport, isCodexFastModeSupportedModel, MAX_ATTACHMENT_SIZE, normalizeReasoningCapabilityLevel, normalizeReasoningLevel, resolveReasoningCapability, resolveReasoningProfile } from '@proma/shared'
 import { fileToBase64, formatFileNames, getFileParentPath } from '@/lib/file-utils'
 import { getFilePanelDragData, INSERT_FILE_MENTION_EVENT, type FilePanelDragItem } from '@/lib/file-panel-drag'
+import {
+  canReferenceDraggedSession,
+  clearSessionReferenceDragState,
+  getActiveSessionReferenceDragId,
+  getSessionReferenceDragData,
+  INSERT_SESSION_REFERENCE_MENTION_EVENT,
+  isSessionReferenceDrag,
+  type InsertSessionReferenceMentionDetail,
+} from '@/lib/session-reference-drag'
 import { buildQuotedSelectionBlock, expandAgentHistoryQuoteMentions } from '@/lib/quoted-selection'
+import { INSERT_AGENT_INPUT_QUOTE_EVENT, type InsertAgentInputQuoteDetail } from '@/lib/agent-input-quote'
 import { createClipboardPendingFile, createClipboardTextDraft, makeUniqueAttachmentName } from '@/lib/clipboard-text-attachment'
 import { copyTextToClipboard } from '@/lib/clipboard'
 import {
@@ -726,6 +736,25 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true, embedded 
   const handleAddHistoryQuote = React.useCallback((quote: QuotedSelection): boolean => {
     return richTextInputRef.current?.insertAgentHistoryQuoteMention(quote) ?? false
   }, [])
+  React.useEffect(() => {
+    const handleInsertQuote = (event: Event): void => {
+      const detail = (event as CustomEvent<InsertAgentInputQuoteDetail>).detail
+      if (!detail || detail.sessionId !== sessionId) return
+      detail.inserted = richTextInputRef.current?.insertQuotedSelectionMention(detail.quote) ?? false
+    }
+    window.addEventListener(INSERT_AGENT_INPUT_QUOTE_EVENT, handleInsertQuote)
+    return () => window.removeEventListener(INSERT_AGENT_INPUT_QUOTE_EVENT, handleInsertQuote)
+  }, [sessionId])
+  React.useEffect(() => {
+    const handleInsertSessionReference = (event: Event): void => {
+      const detail = (event as CustomEvent<InsertSessionReferenceMentionDetail>).detail
+      if (!detail || detail.targetSessionId !== sessionId) return
+      if (!canReferenceDraggedSession(detail.item, sessionId)) return
+      detail.inserted = richTextInputRef.current?.insertSessionMention(detail.item) ?? false
+    }
+    window.addEventListener(INSERT_SESSION_REFERENCE_MENTION_EVENT, handleInsertSessionReference)
+    return () => window.removeEventListener(INSERT_SESSION_REFERENCE_MENTION_EVENT, handleInsertSessionReference)
+  }, [sessionId])
   const handleAgentHistoryQuoteClick = React.useCallback((quote: QuotedSelection): void => {
     if (
       quote.sourceType !== 'agent-history'
@@ -820,6 +849,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true, embedded 
     () => globalChannels.some((channel) => channel.enabled && channel.models.some((model) => model.enabled)),
     [globalChannels],
   )
+  const isComposerDisabled = isLegacyTranscript || !agentChannelId || !hasAvailableModel
   React.useEffect(() => {
     if (!agentChannelId || agentModelId) return
 
@@ -1059,7 +1089,14 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true, embedded 
       return
     }
 
-    // 活跃通道已结束或不存在时，主进程已接管消息；恢复/保留队列投影，等待 started 事件消费。
+    if (result.disposition === 'started') {
+      // 主进程在 IPC 返回前已发出 started 事件时，监听器可能已移除投影；
+      // 这里再幂等移除，避免反向时序下把已发送消息重新留在队列。
+      setQueuedMessages((prev) => removeQueuedMessage(prev, message.id))
+      return
+    }
+
+    // 主进程已接管消息但仍在等待；恢复/保留队列投影，等待 started 事件消费。
     setQueuedMessages((prev) => prev.some((item) => item.id === message.id) ? prev : [...prev, message])
   }, [
     agentChannelId,
@@ -1737,8 +1774,19 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true, embedded 
   const handleDragOver = React.useCallback((e: React.DragEvent): void => {
     e.preventDefault()
     e.stopPropagation()
+    const sessionReferenceDrag = isSessionReferenceDrag(e.dataTransfer)
+    const draggedSessionId = getActiveSessionReferenceDragId(e.dataTransfer)
+    if (
+      sessionReferenceDrag
+      && (draggedSessionId === sessionId || isComposerDisabled)
+    ) {
+      e.dataTransfer.dropEffect = 'none'
+      setIsDragOver(false)
+      return
+    }
+    e.dataTransfer.dropEffect = 'copy'
     setIsDragOver(true)
-  }, [])
+  }, [isComposerDisabled, sessionId])
 
   const handleDragLeave = React.useCallback((e: React.DragEvent): void => {
     e.preventDefault()
@@ -1750,6 +1798,19 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true, embedded 
     e.preventDefault()
     e.stopPropagation()
     setIsDragOver(false)
+    clearSessionReferenceDragState()
+
+    // 左侧 Agent 会话行拖入：复用键盘 & 菜单生成的 session mention chip。
+    const draggedSession = getSessionReferenceDragData(e.dataTransfer)
+    if (draggedSession) {
+      if (isComposerDisabled) return
+      if (!canReferenceDraggedSession(draggedSession, sessionId)) {
+        toast.warning('不能引用当前会话')
+        return
+      }
+      richTextInputRef.current?.insertSessionMention(draggedSession)
+      return
+    }
 
     // 优先识别右侧文件面板的自定义拖拽载荷（会话文件 / 项目文件引用）
     // 文件直接插入引用；文件夹先附加到会话（Agent 可访问），附加成功后才插入引用，
@@ -1882,7 +1943,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true, embedded 
       // 无路径信息：回退，所有项按普通文件处理
       addFilesAsAttachments(droppedFiles)
     }
-  }, [sessionId, addFilesAsAttachments, addPanelDirectory, setAttachedDirsMap, workspaces, currentWorkspaceId])
+  }, [sessionId, addFilesAsAttachments, addPanelDirectory, setAttachedDirsMap, workspaces, currentWorkspaceId, isComposerDisabled])
 
   /** ModelSelector 选择回调 */
   const handleModelSelect = React.useCallback((option: ModelOption): void => {
@@ -2073,19 +2134,26 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true, embedded 
         mentionedCalendarEventIds: payload.mentions.mentionedCalendarEventIds,
       }
       setQueuedMessages((prev) => [...prev, message])
-      void window.electronAPI.submitOrEnqueueAgentMessage(queuedInput).catch((error) => {
-        console.error('[AgentView] 主进程消息提交失败:', error)
-        setQueuedMessages((prev) => removeQueuedMessage(prev, message.id))
-        restoreQueuedAttachmentsToPending(message.attachments)
-        if (quotedSelection) {
-          setQuotedSelectionMap((prev) => {
-            const map = new Map(prev)
-            map.set(sessionId, quotedSelection)
-            return map
-          })
-        }
-        toast.error('消息加入队列失败', { description: String(error) })
-      })
+      void window.electronAPI.submitOrEnqueueAgentMessage(queuedInput)
+        .then((result) => {
+          if (result.disposition === 'started') {
+            // 主进程可在 IPC 返回前已发送 started；无论两者先后都幂等清除本地投影。
+            setQueuedMessages((prev) => removeQueuedMessage(prev, message.id))
+          }
+        })
+        .catch((error) => {
+          console.error('[AgentView] 主进程消息提交失败:', error)
+          setQueuedMessages((prev) => removeQueuedMessage(prev, message.id))
+          restoreQueuedAttachmentsToPending(message.attachments)
+          if (quotedSelection) {
+            setQuotedSelectionMap((prev) => {
+              const map = new Map(prev)
+              map.set(sessionId, quotedSelection)
+              return map
+            })
+          }
+          toast.error('消息加入队列失败', { description: String(error) })
+        })
       // 入队后消息会出现在队列 UI 中，用户可见；不再弹 toast 打扰。
       if (overrideText === undefined || fromEditor) {
         setInputContent('')
@@ -2198,13 +2266,17 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true, embedded 
       return next
     })
 
-    // 取消 draft 标记，让会话出现在侧边栏
+    // 取消 draft 标记，让会话出现在侧边栏。主进程会在实际启动时持久化清除
+    // isDraft；这里先乐观更新，避免 IPC 往返期间仍被侧栏过滤。
     setDraftSessionIds((prev: Set<string>) => {
       if (!prev.has(sessionId)) return prev
       const next = new Set(prev)
       next.delete(sessionId)
       return next
     })
+    setAgentSessions((prev) => prev.map((session) => (
+      session.id === sessionId && session.isDraft ? { ...session, isDraft: false } : session
+    )))
 
     // 初始化流式状态（startedAt 由渲染进程生成，传递给主进程原样回传，确保竞态保护使用同一个值）
     const streamStartedAt = Date.now()
@@ -2266,7 +2338,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true, embedded 
         return map
       })
     })
-  }, [createBaseAdditionalDirectories, preparePendingFilesForSend, restoreQueuedAttachmentsToPending, sessionId, agentChannelId, agentModelId, agentChannelProvider, currentWorkspaceId, streaming, backgroundWaiting, suggestion, hasAvailableModel, store, consumeQuotedSelection, setStreamingStates, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, permissionMode, messagesLoaded, setQueuedMessages, setQuotedSelectionMap, sendPlainTextAgentMessage, isLegacyTranscript, isStopping, broadcastComparePrompt])
+  }, [createBaseAdditionalDirectories, preparePendingFilesForSend, restoreQueuedAttachmentsToPending, sessionId, agentChannelId, agentModelId, agentChannelProvider, currentWorkspaceId, streaming, backgroundWaiting, suggestion, hasAvailableModel, store, consumeQuotedSelection, setStreamingStates, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, setDraftSessionIds, setAgentSessions, permissionMode, messagesLoaded, setQueuedMessages, setQuotedSelectionMap, sendPlainTextAgentMessage, isLegacyTranscript, isStopping, broadcastComparePrompt])
 
   // 双开对比·联动接收：监听广播信号，目标为本 session 且 nonce 未消费时，
   // 走自己的 handleSend（fromBroadcast=true 避免回环）独立发送同一段文本。
@@ -3053,7 +3125,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true, embedded 
             className={cn(
               'rounded-[17px] border-[0.5px] border-border bg-background/70 backdrop-blur-sm transition-all duration-200',
               (isPlanMode || isPermissionPlanMode) && !isDragOver && 'plan-mode-border',
-              isDragOver && 'border-[2px] border-dashed border-[#2ecc71] bg-[#2ecc71]/[0.03]'
+              isDragOver && 'border-[2px] border-dashed border-primary bg-primary/[0.03]'
             )}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
@@ -3166,7 +3238,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true, embedded 
                     ? '请先选择模型'
                     : '暂无可用模型，请先在设置中启用渠道'
               }
-              disabled={isLegacyTranscript || !agentChannelId || !hasAvailableModel}
+              disabled={isComposerDisabled}
               autoFocusTrigger={sessionId}
               collapsible
               enableMentions

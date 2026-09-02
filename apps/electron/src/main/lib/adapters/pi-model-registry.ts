@@ -129,13 +129,23 @@ function compilePiReasoningCapabilities(
  * only this protocol-safe catalog flag: current Claude models require adaptive
  * thinking, while copying the complete catalog compat object could leak unrelated
  * tool/sampling behaviour across provider protocols.
+ *
+ * Fable 5.1 is newer than the bundled Pi catalog entry (`claude-fable-5`), so its
+ * exact ID lookup can legitimately miss. Its official Anthropic Messages endpoint
+ * nevertheless rejects legacy `thinking: { type: 'enabled' }`; recognize the whole
+ * Fable 5 family here to keep the request on Pi's adaptive + effort path.
  */
 export function shouldForcePiAdaptiveThinking(
   api: Api,
   catalogModel: { api: Api, compat?: unknown } | undefined,
+  modelId?: string,
 ): boolean {
-  if (api !== 'anthropic-messages' || catalogModel?.api !== 'anthropic-messages') return false
-  return (catalogModel.compat as { forceAdaptiveThinking?: unknown } | undefined)?.forceAdaptiveThinking === true
+  if (api !== 'anthropic-messages') return false
+  if ((catalogModel?.compat as { forceAdaptiveThinking?: unknown } | undefined)?.forceAdaptiveThinking === true) {
+    return true
+  }
+  const claudeFamilyKey = modelId ? getClaudeFamilyKey(modelId, true) : undefined
+  return claudeFamilyKey === 'fable-5' || claudeFamilyKey?.startsWith('fable-5-') === true
 }
 
 const CODEX_56_THINKING_LEVEL_MAP = compilePiReasoningCapabilities('openai-responses', 'gpt-5.6')?.thinkingLevelMap
@@ -256,12 +266,11 @@ function createXaiRuntimeCredentialStore(
 }
 
 /**
- * Pi 0.84.2 的内置 catalog 尚未声明以下 DeepSeek V4 Flash 变体的原生视觉。
- * 在上游目录同步前，本地覆盖只扩展 input，不改变实际模型 ID、协议或推理参数。
+ * Pi 0.84.4 已在 catalog 中原生声明 experimental vision 变体。
+ * 常规 Flash 的视觉能力仍由 Proma 已验证的渠道契约兜底，不改变实际模型 ID、协议或推理参数。
  */
 const DEEPSEEK_V4_FLASH_VISION_MODEL_IDS = new Set([
   'deepseek-v4-flash',
-  'deepseek-v4-flash-vision-exp',
 ])
 
 /** 判断模型是否已确认支持原生图片输入。 */
@@ -597,7 +606,7 @@ async function resolvePiModelDefaults(input: PiAgentQueryOptions): Promise<PiMod
     && (glmModelId === 'glm-5.3' || glmModelId === 'glm-5.3-flash')
   const catalogContextWindow = catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
   const inferredContextWindow = inferContextWindow(input.model) ?? DEFAULT_CONTEXT_WINDOW
-  const shouldForceAdaptiveThinking = shouldForcePiAdaptiveThinking(api, catalogModel)
+  const shouldForceAdaptiveThinking = shouldForcePiAdaptiveThinking(api, catalogModel, input.model)
   return {
     api,
     reasoning: catalogModel?.reasoning ?? true,
@@ -617,15 +626,24 @@ async function resolvePiModelDefaults(input: PiAgentQueryOptions): Promise<PiMod
   }
 }
 
-function normalizePiBaseUrl(baseUrl: string | undefined, provider: ProviderType, api = normalizePiApi(provider)): string | undefined {
+export function normalizePiBaseUrl(baseUrl: string | undefined, provider: ProviderType, api = normalizePiApi(provider)): string | undefined {
   if (!baseUrl) return undefined
+  const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, '')
   if (api === 'anthropic-messages') {
-    return normalizeAnthropicBaseUrlForSdk(resolveAnthropicMessagesUrl(baseUrl, provider))
+    return normalizeAnthropicBaseUrlForSdk(resolveAnthropicMessagesUrl(normalizedBaseUrl, provider))
   }
   if (api === 'openai-responses' || provider === 'custom') {
-    return normalizeOpenAIBaseUrlForSdk(baseUrl)
+    return normalizeOpenAIBaseUrlForSdk(normalizedBaseUrl)
   }
-  return baseUrl.trim().replace(/\/$/, '')
+  // Pi 的 Google adapter 把 `model.baseUrl` 视为已包含 API 版本的完整根路径，
+  // 并明确禁用 Google SDK 自行追加 apiVersion。渠道配置仍以协议根
+  // `https://generativelanguage.googleapis.com` 保存；若这里直接传入，Agent 会请求
+  // `/models/...` 而不是 `/v1beta/models/...`，导致 404。Chat adapter 自己拼 v1beta，
+  // 因此只在 Pi runtime 注册时补齐，且保留用户已填写的 v1/v1beta（含代理路径）。
+  if (api === 'google-generative-ai' && !/\/v1(?:beta)?$/i.test(normalizedBaseUrl)) {
+    return `${normalizedBaseUrl}/v1beta`
+  }
+  return normalizedBaseUrl
 }
 
 export function requiresPromaUserAgent(provider: ProviderType): boolean {
