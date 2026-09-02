@@ -11,14 +11,13 @@
 import * as React from 'react'
 import { useAtom, useSetAtom, useAtomValue, useStore } from 'jotai'
 import { toast } from 'sonner'
-import { Pin, PinOff, Star, Settings, Plus, CirclePlus, Trash2, Pencil, PanelLeft, PanelLeftOpen, ArrowRightLeft, Search, Archive, ArchiveRestore, ArrowLeft, Bot, MessageSquare, MoreHorizontal, FolderOpen, FolderInput, FolderPlus, GripVertical, Clock, CalendarDays, ChevronRight, ChevronDown, ChevronUp, Blocks, Brain, ListTodo, GitBranch, Download, Loader2, RotateCw, Info, Columns2, MessagesSquare } from 'lucide-react'
+import { Pin, PinOff, Star, Settings, Plus, CirclePlus, Trash2, Pencil, PanelLeft, PanelLeftOpen, ArrowRightLeft, Search, Archive, ArchiveRestore, ArrowLeft, Bot, MessageSquare, MoreHorizontal, FolderOpen, FolderInput, FolderPlus, GripVertical, Clock, CalendarDays, ChevronRight, ChevronDown, ChevronUp, Blocks, Brain, ListTodo, GitBranch, Download, Loader2, RotateCw, Info, MessagesSquare } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { ModeSwitcher } from './ModeSwitcher'
 import { SearchDialog } from './SearchDialog'
 import { UserAvatar } from '@/components/chat/UserAvatar'
 import { activeViewAtom, agentSkillsTabAtom } from '@/atoms/active-view'
-import { comparePairsAtom, compareLinkedAtom, addPair, getComparePartner, getCompareColor } from '@/atoms/compare-atoms'
 import { automationFormAtom, automationsAtom } from '@/atoms/automation-atoms'
 import { planningTabAtom } from '@/atoms/planning-atoms'
 import { appModeAtom, type AppMode } from '@/atoms/app-mode'
@@ -4320,27 +4319,12 @@ const AgentSessionItem = React.memo(function AgentSessionItem({
   // 菜单打开时关闭迷你地图预览，避免预览面板盖住菜单项导致点不动
   const preview = useSessionMiniMapHover(600, disableMiniMap || menuOpen)
 
-  // 进入分屏（不绑定）：把当前活跃会话与本会话并排，联动关闭
+  // 进入分屏：把本会话作为 Chrome 式 Tab 打开到当前会话的右侧工作区。
+  // 双开对比体系已移除，与探索分支/委派 Tab 共用同一套右侧工作区标签机制。
   const currentAgentSessionId = useAtomValue(currentAgentSessionIdAtom)
-  const setComparePairs = useSetAtom(comparePairsAtom)
-  const setCompareLinked = useSetAtom(compareLinkedAtom)
   const setSideSessionMap = useSetAtom(agentSideSessionMapAtom)
   const setSidePanelOpen = useSetAtom(currentSessionSidePanelOpenAtom)
   const setDiffPanelTabMap = useSetAtom(agentDiffPanelTabAtom)
-  const comparePairs = useAtomValue(comparePairsAtom)
-  const comparePartnerId = getComparePartner(comparePairs, session.id)
-  const inComparePair = comparePartnerId !== null
-  const compareColor = getCompareColor(comparePairs, session.id)
-  // tailwind safelist：动态类名必须出现在源码里才会被 JIT 编译
-  const COMPARE_ICON_CLASS: Record<string, string> = {
-    'violet-500': 'text-violet-500/70',
-    'sky-500': 'text-sky-500/70',
-    'amber-500': 'text-amber-500/70',
-    'emerald-500': 'text-emerald-500/70',
-    'rose-500': 'text-rose-500/70',
-    'indigo-500': 'text-indigo-500/70',
-  }
-  const compareIconClass = compareColor ? (COMPARE_ICON_CLASS[compareColor.tw] ?? 'text-violet-500/70') : ''
   const handleEnterSplit = React.useCallback((): void => {
     if (!currentAgentSessionId || currentAgentSessionId === session.id) {
       // 没有已打开的会话，或右键的就是当前会话：直接打开它，不分屏
@@ -4668,9 +4652,6 @@ const AgentSessionItem = React.memo(function AgentSessionItem({
                   <span className="flex-shrink-0 text-[11px] leading-4 text-foreground/45">
                     {delegationSummary.settled}/{delegationSummary.total}
                   </span>
-                )}
-                {inComparePair && (
-                  <Columns2 size={11} className={cn('flex-shrink-0', compareIconClass)} />
                 )}
               </div>
             )}

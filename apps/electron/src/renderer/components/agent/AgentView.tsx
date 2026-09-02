@@ -18,7 +18,6 @@ import { unstable_batchedUpdates } from 'react-dom'
 import { useAtom, useAtomValue, useSetAtom, useStore } from 'jotai'
 import { toast } from 'sonner'
 import { CornerDownLeft, Square, Settings, X, Copy, Check, Brain, Sparkles, ListTodo, Paperclip, Crop } from 'lucide-react'
-import { comparePairsAtom, compareFocusedSessionIdAtom, compareLinkedAtom, compareBroadcastAtom, getComparePartner } from '@/atoms/compare-atoms'
 import { AgentMessages, type AgentHistoryQuoteNavigationRequest } from './AgentMessages'
 import { AgentHeader } from './AgentHeader'
 import { AgentMessageQueue } from './AgentMessageQueue'
@@ -446,13 +445,11 @@ function AgentThinkingPopover({ agentThinking, onToggle, codexConfig }: AgentThi
 
 interface AgentViewProps {
   sessionId: string
-  /** compare 双开右栏：不共享全局模型选择器的打开状态，避免两侧互相抢焦点。 */
-  sharedModelSelectorOpen?: boolean
   /** 右侧临时 Agent Tab：保留完整对话与输入能力，但不重复渲染全局会话标题栏。 */
   embedded?: boolean
 }
 
-export function AgentView({ sessionId, sharedModelSelectorOpen = true, embedded = false }: AgentViewProps): React.ReactElement {
+export function AgentView({ sessionId, embedded = false }: AgentViewProps): React.ReactElement {
   const store = useStore()
   const stopShortcutTarget = React.useMemo(() => ({ kind: 'agent' as const, sessionId }), [sessionId])
   const markStopShortcutTarget = React.useCallback(() => {
@@ -530,13 +527,6 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true, embedded 
   }, [sessionMeta?.workspaceId, globalWorkspaceId])
   const [pendingPrompt, setPendingPrompt] = useAtom(agentPendingPromptAtom)
   const [pendingFiles, setPendingFiles] = useAtom(agentPendingFilesAtomFamily(sessionId))
-  // 双开对比：本 session 的配对 partner + 联动开关 + 广播信号
-  const comparePairs = useAtomValue(comparePairsAtom)
-  const compareLinked = useAtomValue(compareLinkedAtom)
-  const comparePartnerId = getComparePartner(comparePairs, sessionId)
-  const setCompareFocusedSessionId = useSetAtom(compareFocusedSessionIdAtom)
-  const [compareBroadcast, setCompareBroadcast] = useAtom(compareBroadcastAtom)
-  const lastBroadcastNonceRef = React.useRef<string | null>(null)
   const [queuedMessages, setQueuedMessages] = useAtom(agentMessageQueueAtomFamily(sessionId))
   const workspaces = useAtomValue(agentWorkspacesAtom)
   const setWorkspaces = useSetAtom(agentWorkspacesAtom)
@@ -2062,18 +2052,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true, embedded 
   const externalSelectedModel = computedSelectedModel ?? stableSelectedModelRef.current
 
   /** 发送消息 */
-  // 双开对比·联动广播：焦点侧发送时把同一段文本广播给 partner（附件镜像暂不联动）。
-  const broadcastComparePrompt = React.useCallback((text: string, fromBroadcast?: boolean): void => {
-    if (fromBroadcast || !compareLinked || !comparePartnerId) return
-    if (!text) return
-    setCompareBroadcast({
-      targetSessionId: comparePartnerId,
-      text,
-      nonce: crypto.randomUUID(),
-    })
-  }, [compareLinked, comparePartnerId, setCompareBroadcast])
-
-  const handleSend = React.useCallback(async (overrideText?: string, fromEditor = false, opts?: { fromBroadcast?: boolean }): Promise<void> => {
+  const handleSend = React.useCallback(async (overrideText?: string, fromEditor = false): Promise<void> => {
     const currentDraft = store.get(agentSessionDraftsAtom).get(sessionId) ?? ''
     const text = (overrideText ?? currentDraft).trim()
     // 如果输入为空但有建议，使用建议内容
@@ -2095,7 +2074,6 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true, embedded 
       return
     }
     const additionalDirectoriesForRun = createBaseAdditionalDirectories()
-    broadcastComparePrompt(effectiveText, opts?.fromBroadcast)
 
     if (streaming) {
       // Agent 正在输出时，用户消息默认进入 Proma 托管队列，不打断当前 turn。
@@ -2338,23 +2316,9 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true, embedded 
         return map
       })
     })
-  }, [createBaseAdditionalDirectories, preparePendingFilesForSend, restoreQueuedAttachmentsToPending, sessionId, agentChannelId, agentModelId, agentChannelProvider, currentWorkspaceId, streaming, backgroundWaiting, suggestion, hasAvailableModel, store, consumeQuotedSelection, setStreamingStates, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, setDraftSessionIds, setAgentSessions, permissionMode, messagesLoaded, setQueuedMessages, setQuotedSelectionMap, sendPlainTextAgentMessage, isLegacyTranscript, isStopping, broadcastComparePrompt])
+  }, [createBaseAdditionalDirectories, preparePendingFilesForSend, restoreQueuedAttachmentsToPending, sessionId, agentChannelId, agentModelId, agentChannelProvider, currentWorkspaceId, streaming, backgroundWaiting, suggestion, hasAvailableModel, store, consumeQuotedSelection, setStreamingStates, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, setDraftSessionIds, setAgentSessions, permissionMode, messagesLoaded, setQueuedMessages, setQuotedSelectionMap, sendPlainTextAgentMessage, isLegacyTranscript, isStopping])
 
   // 双开对比·联动接收：监听广播信号，目标为本 session 且 nonce 未消费时，
-  // 走自己的 handleSend（fromBroadcast=true 避免回环）独立发送同一段文本。
-  React.useEffect(() => {
-    if (!compareBroadcast) return
-    if (compareBroadcast.targetSessionId !== sessionId) return
-    if (compareBroadcast.nonce === lastBroadcastNonceRef.current) return
-    // 目标会话尚未可接收时保留广播；状态变化后 effect 会再次尝试。
-    if (!messagesLoaded || !agentChannelId || !hasAvailableModel) return
-    if (!streaming && messagesRefreshingRef.current) return
-    lastBroadcastNonceRef.current = compareBroadcast.nonce
-    const event = compareBroadcast
-    // 消费后立即清空，避免 AgentView 解绑重挂时重放旧 prompt。
-    setCompareBroadcast((current) => current === event ? null : current)
-    void handleSend(event.text, false, { fromBroadcast: true })
-  }, [agentChannelId, compareBroadcast, handleSend, hasAvailableModel, messagesLoaded, sessionId, setCompareBroadcast, streaming])
 
   /** 停止生成。异常流未发出终态时，允许再次下发幂等的 abort 请求。 */
   const handleStop = React.useCallback((): void => {
@@ -3042,8 +3006,7 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true, embedded 
           showChannelInTrigger
           // 全局打开状态只供主会话的“选择模型”引导使用；右侧嵌入会话必须保持独立，
           // 否则任一触发器打开时会同时挂载两侧的 Popover，遮挡并阻断模型切换。
-          // compare 双开右栏同样不共享打开状态。
-          useSharedOpenState={sharedModelSelectorOpen && !embedded}
+          useSharedOpenState={!embedded}
         />
       </div>
       {sendControl}
@@ -3070,12 +3033,9 @@ export function AgentView({ sessionId, sharedModelSelectorOpen = true, embedded 
         className="flex h-full min-h-0 flex-1 min-w-0 flex-col overflow-hidden"
         onFocusCapture={() => {
           markStopShortcutTarget()
-          // compare 双开：记录焦点侧，输入广播时知道以哪侧为准
-          if (comparePartnerId) setCompareFocusedSessionId(sessionId)
         }}
         onPointerDownCapture={() => {
           markStopShortcutTarget()
-          if (comparePartnerId) setCompareFocusedSessionId(sessionId)
         }}
       >
         {/* 临时 Agent 已由右侧 Tab 表明归属，避免在窄面板重复渲染全局标题栏。 */}

@@ -20,7 +20,6 @@ import {
   getPreviewSidePanelTab,
 } from '@/atoms/agent-atoms'
 import type { AgentSidePanelTab } from '@/atoms/agent-atoms'
-import { compareFocusedSessionIdAtom, comparePairsAtom, findPairContaining } from '@/atoms/compare-atoms'
 import { SidePanel } from '@/components/agent/SidePanel'
 import { browserFocusRequestMapAtom, browserPanelOpenMapAtom, browserStateMapAtom } from '@/atoms/browser-atoms'
 import { getPreviewFileId, previewFileMapAtom } from '@/atoms/preview-atoms'
@@ -28,15 +27,7 @@ import { getPreviewFileId, previewFileMapAtom } from '@/atoms/preview-atoms'
 export function RightSidePanel({ width }: { width?: number }): React.ReactElement | null {
   const appMode = useAtomValue(appModeAtom)
   const primarySessionId = useAtomValue(currentAgentSessionIdAtom)
-  const comparePairs = useAtomValue(comparePairsAtom)
-  const compareFocusedSessionId = useAtomValue(compareFocusedSessionIdAtom)
-  // 当前活跃 session 属于某配对时，焦点 session 可以在配对两侧间切换
-  const compareMatch = primarySessionId ? findPairContaining(comparePairs, primarySessionId) : null
-  const currentSessionId = compareMatch
-    && compareFocusedSessionId
-    && (compareFocusedSessionId === compareMatch.pair.left || compareFocusedSessionId === compareMatch.pair.right)
-    ? compareFocusedSessionId
-    : primarySessionId
+  const currentSessionId = primarySessionId
   const sessionPathMap = useAtomValue(agentSessionPathMapAtom)
   const diffPanelTabMap = useAtomValue(agentDiffPanelTabAtom)
   const setDiffPanelTabMap = useSetAtom(agentDiffPanelTabAtom)

@@ -1,22 +1,16 @@
 /**
  * AgentHeader — Agent 会话头部
  *
- * 显示会话标题；通过标题下拉菜单进入重命名。
+ * 显示会话标题；通过标题下拉菜单进入重命名。双开对比入口已移除，
+ * 会话并排由右侧工作区（探索/委派 Tab）与 fork 承接。
  */
 
 import * as React from 'react'
 import { useAtom, useAtomValue, useSetAtom } from 'jotai'
-import { Pencil, Check, X, ChevronDown, Columns2, Link2, Link2Off, PanelRight, Split } from 'lucide-react'
+import { Pencil, Check, X, ChevronDown, PanelRight, Split } from 'lucide-react'
 import { agentSessionsAtom, agentSessionStreamingStateAtomFamily, agentSideTemporaryAgentMapAtom, agentDiffPanelTabAtom, currentSessionSidePanelOpenAtom, getExplorationSidePanelTab } from '@/atoms/agent-atoms'
 import { tabsAtom, updateTabTitle } from '@/atoms/tab-atoms'
-import { comparePairsAtom, compareLinkedAtom, getComparePartner, removePairContaining, addPair } from '@/atoms/compare-atoms'
-import { useCompareActions } from '@/hooks/useCompareActions'
-import { ModelSelector } from '@/components/chat/ModelSelector'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
-import type { ModelOption } from '@proma/shared'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { replaceAgentSessionInFreshnessOrder } from '@/lib/agent-session-list'
-import { cn } from '@/lib/utils'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -41,24 +35,6 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
   const [editTitle, setEditTitle] = React.useState('')
   const inputRef = React.useRef<HTMLInputElement>(null)
 
-  // 双开对比控件状态
-  const [comparePairs, setComparePairs] = useAtom(comparePairsAtom)
-  const [compareLinked, setCompareLinked] = useAtom(compareLinkedAtom)
-  const [pickerOpen, setPickerOpen] = React.useState(false)
-  const comparePartnerId = getComparePartner(comparePairs, sessionId)
-  const inComparePair = comparePartnerId !== null
-  const otherSessions = sessions.filter((s) => s.id !== sessionId)
-  const { requestInherit } = useCompareActions()
-  // 源会话是否正在跑：继承上下文时用于决定「立即执行」还是「变待办等这轮结束」
-  const srcStreaming = useAtomValue(agentSessionStreamingStateAtomFamily(sessionId))
-  const sourceRunning = !!srcStreaming?.running
-
-  /** 新建并继承上下文：用户在模型选择器里选定目标模型后触发 */
-  const handleInheritWithModel = React.useCallback(async (option: ModelOption): Promise<void> => {
-    if (!session) return
-    setPickerOpen(false)
-    await requestInherit(session, option.channelId, option.modelId, sourceRunning)
-  }, [session, requestInherit, sourceRunning])
 
   const explorationBranches = React.useMemo(() => sessions
     .filter((item) => item.explorationParentSessionId === sessionId && item.explorationSourceMessageId)
@@ -213,93 +189,6 @@ export function AgentHeader({ sessionId }: AgentHeaderProps): React.ReactElement
         </button>
       )}
 
-        {inComparePair ? (
-          <>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  onClick={() => setCompareLinked((v) => !v)}
-                  className={cn(
-                    'titlebar-no-drag p-1 transition-colors',
-                    compareLinked
-                      ? 'text-primary hover:text-primary'
-                      : 'text-muted-foreground hover:text-foreground',
-                  )}
-                  aria-label={compareLinked ? '联动已开启' : '联动已关闭'}
-                >
-                  {compareLinked ? <Link2 className="size-3.5" /> : <Link2Off className="size-3.5" />}
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>{compareLinked ? '联动开启：一个 prompt 注入两个 session' : '联动关闭：两侧各聊各的'}</TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  onClick={() => setComparePairs((prev) => removePairContaining(prev, sessionId))}
-                  className="titlebar-no-drag p-1 rounded-md text-muted-foreground hover:text-foreground transition-colors"
-                  aria-label="解绑分屏对比"
-                >
-                  <X className="size-3.5" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>解绑分屏对比</TooltipContent>
-            </Tooltip>
-          </>
-        ) : (
-          <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
-            <PopoverTrigger asChild>
-              <button
-                type="button"
-                className="titlebar-no-drag p-1 rounded-md text-muted-foreground hover:text-foreground transition-colors"
-                aria-label="分屏对比"
-                title="分屏对比：选择另一个 session 并排"
-              >
-                <Columns2 className="size-3.5" />
-              </button>
-            </PopoverTrigger>
-            <PopoverContent align="end" className="w-72 p-1">
-              {/* 新建并继承当前上下文：选目标模型 → 同渠道 fork / 跨渠道注入；源会话在跑则变待办 */}
-              <div className="px-2 py-1.5">
-                <div className="mb-1 text-xs text-muted-foreground">
-                  新建并继承上下文{sourceRunning ? '（左侧在跑，将等这轮结束）' : ''}
-                </div>
-                <ModelSelector
-                  externalSelectedModel={
-                    session.channelId && session.modelId
-                      ? { channelId: session.channelId, modelId: session.modelId }
-                      : null
-                  }
-                  onModelSelect={(option) => { void handleInheritWithModel(option) }}
-                  showChannelInTrigger
-                />
-              </div>
-              <div className="my-1 h-px bg-border" />
-              <div className="px-2 py-1.5 text-xs text-muted-foreground">或选择已有 session 并排</div>
-              {otherSessions.length === 0 ? (
-                <div className="px-2 py-2 text-xs text-muted-foreground">暂无其它 session</div>
-              ) : (
-                <div className="max-h-56 overflow-y-auto">
-                  {otherSessions.map((s) => (
-                    <button
-                      key={s.id}
-                      type="button"
-                      onClick={() => {
-                        setComparePairs((prev) => addPair(prev, sessionId, s.id))
-                        setCompareLinked(true)
-                        setPickerOpen(false)
-                      }}
-                      className="w-full text-left px-2 py-1.5 rounded text-sm text-foreground hover:bg-muted transition-colors truncate"
-                    >
-                      {s.title || '未命名 session'}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </PopoverContent>
-          </Popover>
-        )}
     </div>
   )
 }
