@@ -13,7 +13,7 @@ const INTERNAL_TOOL_INPUT_PREFIX = '_'
 function hasMeaningfulToolInput(input: Record<string, unknown>): boolean {
   return Object.entries(input).some(([key, value]) => {
     if (key.startsWith(INTERNAL_TOOL_INPUT_PREFIX)) {
-      return key === '_intent' && typeof value === 'string' && value.trim().length > 0
+      return false
     }
     if (typeof value === 'string') return value.trim().length > 0
     if (typeof value === 'number') return Number.isFinite(value)
@@ -54,24 +54,6 @@ export interface ToolPhrase {
   diffStats?: { additions: number; deletions: number }
 }
 
-/**
- * 优先使用 Agent 为工具调用提供的短意图。
- * `_intent` 是内部展示元数据；Bash 的 `description` 兼容旧的语义化调用格式。
- */
-function getExplicitToolIntent(toolName: string, input: Record<string, unknown>): string | null {
-  const intent = input._intent
-  if (typeof intent === 'string' && intent.trim()) return truncate(intent.trim(), 96)
-
-  if (toolName === 'Bash') {
-    const description = input.description
-    if (typeof description === 'string' && description.trim()) {
-      return truncate(description.trim(), 96)
-    }
-  }
-
-  return null
-}
-
 /** 从路径中提取文件名（同时兼容 POSIX `/` 与 Windows `\` 分隔符） */
 function filename(path: string): string {
   return path.split(/[/\\]/).pop() || path
@@ -100,11 +82,6 @@ function truncate(text: string, max: number): string {
  * 返回的 label 应读起来像一个完整动宾短语，无冗余信息。
  */
 export function getToolPhrase(toolName: string, input: Record<string, unknown>): ToolPhrase {
-  const explicitIntent = getExplicitToolIntent(toolName, input)
-  if (explicitIntent && toolName !== 'Edit' && toolName !== 'Write') {
-    return phrase(explicitIntent)
-  }
-
   switch (toolName) {
     case 'Read': {
       const fp = input.file_path ?? input.filePath
@@ -130,10 +107,7 @@ export function getToolPhrase(toolName: string, input: Record<string, unknown>):
       const fp = input.file_path ?? input.filePath
       const name = typeof fp === 'string' ? filename(fp) : '文件'
       const diff = computeDiffStats('Edit', input)
-      const explicitIntent = getExplicitToolIntent(toolName, input)
-      const basePhrase = explicitIntent
-        ? phrase(explicitIntent)
-        : phrase(`编辑 ${name}`)
+      const basePhrase = phrase(`编辑 ${name}`)
       if (diff && (diff.additions > 0 || diff.deletions > 0)) {
         return { ...basePhrase, diffStats: diff }
       }
@@ -144,10 +118,7 @@ export function getToolPhrase(toolName: string, input: Record<string, unknown>):
       const fp = input.file_path ?? input.filePath
       const name = typeof fp === 'string' ? filename(fp) : '文件'
       const content = input.content
-      const explicitIntent = getExplicitToolIntent(toolName, input)
-      const basePhrase = explicitIntent
-        ? phrase(explicitIntent)
-        : phrase(`写入 ${name}`)
+      const basePhrase = phrase(`写入 ${name}`)
       if (typeof content === 'string' && content.length > 0) {
         const lines = content.split('\n').length
         return { ...basePhrase, diffStats: { additions: lines, deletions: 0 } }
@@ -157,8 +128,6 @@ export function getToolPhrase(toolName: string, input: Record<string, unknown>):
 
     case 'Bash': {
       const cmd = input.command
-      const intent = getExplicitToolIntent(toolName, input)
-      if (intent) return phrase(intent)
       if (typeof cmd === 'string') {
         return phrase(`执行 ${truncate(cmd, 80)}`)
       }

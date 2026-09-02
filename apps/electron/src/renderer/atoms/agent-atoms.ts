@@ -23,7 +23,6 @@ export interface ToolActivity {
   toolUseId: string
   toolName: string
   input: Record<string, unknown>
-  intent?: string
   displayName?: string
   result?: string
   isError?: boolean

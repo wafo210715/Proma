@@ -358,8 +358,6 @@ function payloadToLegacyEvents(payload: AgentStreamPayload): AgentEvent[] {
       for (const block of aMsg.message.content) {
         if (block.type === 'tool_use') {
           const tb = block as SDKContentBlock & { id: string; name: string; input: Record<string, unknown> }
-          const intent = (tb.input._intent as string | undefined)
-            ?? (tb.name === 'Bash' ? (tb.input.description as string | undefined) : undefined)
           const planModeChange = getPlanModeChangeFromToolName(tb.name)
           if (planModeChange) {
             events.push({
@@ -373,7 +371,6 @@ function payloadToLegacyEvents(payload: AgentStreamPayload): AgentEvent[] {
             toolName: tb.name,
             toolUseId: tb.id,
             input: tb.input,
-            intent,
             displayName: tb.input._displayName as string | undefined,
             parentToolUseId: aMsg.parent_tool_use_id ?? undefined,
           })

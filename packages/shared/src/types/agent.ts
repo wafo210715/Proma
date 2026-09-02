@@ -557,15 +557,15 @@ export type AgentEvent =
   | { type: 'text_delta'; text: string; turnId?: string; parentToolUseId?: string }
   | { type: 'text_complete'; text: string; isIntermediate: boolean; turnId?: string; parentToolUseId?: string }
   // 工具执行
-  | { type: 'tool_start'; toolName: string; toolUseId: string; input: Record<string, unknown>; intent?: string; displayName?: string; turnId?: string; parentToolUseId?: string }
+  | { type: 'tool_start'; toolName: string; toolUseId: string; input: Record<string, unknown>; displayName?: string; turnId?: string; parentToolUseId?: string }
   | { type: 'tool_result'; toolUseId: string; toolName?: string; result: string; isError: boolean; input?: Record<string, unknown>; turnId?: string; parentToolUseId?: string; imageAttachments?: AgentToolResultImage[] }
   // 后台任务
-  | { type: 'task_backgrounded'; toolUseId: string; taskId: string; intent?: string; turnId?: string }
+  | { type: 'task_backgrounded'; toolUseId: string; taskId: string; turnId?: string }
   | { type: 'task_started'; taskId: string; toolUseId?: string; description: string; taskType?: string; turnId?: string }
   | { type: 'task_progress'; toolUseId: string; elapsedSeconds?: number; turnId?: string; taskId?: string; description?: string; lastToolName?: string; usage?: TaskUsage }
   | { type: 'task_notification'; taskId: string; toolUseId?: string; status: 'completed' | 'failed' | 'stopped'; summary: string; outputFile?: string; usage?: TaskUsage; turnId?: string }
   | { type: 'thinking_tokens'; estimatedTokens: number; estimatedTokensDelta: number }
-  | { type: 'shell_backgrounded'; toolUseId: string; shellId: string; intent?: string; command?: string; turnId?: string }
+  | { type: 'shell_backgrounded'; toolUseId: string; shellId: string; command?: string; turnId?: string }
   | { type: 'shell_killed'; shellId: string; turnId?: string }
   // 工具使用摘要
   | { type: 'tool_use_summary'; summary: string; precedingToolUseIds: string[] }
