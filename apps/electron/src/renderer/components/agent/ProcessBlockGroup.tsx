@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { ChevronRight } from 'lucide-react'
+import { ChevronRight, Maximize2, Minimize2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { getToolDisplayName, getToolIcon } from './tool-utils'
 import type {
@@ -161,6 +161,17 @@ export function isProgressViewportAtBottom({
   return scrollHeight - scrollTop - clientHeight <= PROCESS_GROUP_FOLLOW_BOTTOM_THRESHOLD
 }
 
+/**
+ * 流式过程视口是否生效：流式期间默认启用固定高度内部滚动；
+ * 用户点「放大」临时解除（viewportExpanded），流式结束（keepProgressViewport=false）后整体失效。
+ */
+export function isProcessViewportActive(options: {
+  keepProgressViewport: boolean
+  viewportExpanded: boolean
+}): boolean {
+  return options.keepProgressViewport && !options.viewportExpanded
+}
+
 function getProcessChildKey(child: React.ReactNode, index: number): string {
   if (React.isValidElement(child) && child.key != null) return String(child.key)
   return `process-child-${index}`
@@ -199,6 +210,8 @@ export function ProcessBlockGroup({ blocks, isStreaming, renderChildren, isMessa
   const [displayMode, setDisplayMode] = React.useState<ProcessGroupDisplayMode>(initialDisplayMode)
   const [shouldRenderContent, setShouldRenderContent] = React.useState(initialDisplayMode !== 'collapsed')
   const [keepProgressViewport, setKeepProgressViewport] = React.useState(!!isStreaming)
+  // 用户点「放大」临时解除流式视口的固定高度；新一轮流式开始时重置
+  const [viewportExpanded, setViewportExpanded] = React.useState(false)
   const [collapseCountdown, setCollapseCountdown] = React.useState<number | null>(null)
   const userToggledRef = React.useRef(false)
   const followLatestRef = React.useRef(true)
@@ -217,6 +230,7 @@ export function ProcessBlockGroup({ blocks, isStreaming, renderChildren, isMessa
 
   const isContentExpanded = displayMode === 'expanded'
   const shouldShowContent = isContentExpanded || shouldRenderContent
+  const viewportActive = isProcessViewportActive({ keepProgressViewport, viewportExpanded })
   const visibleChildren = shouldShowContent ? renderChildren() : null
 
   const clearAutoCollapseTimers = React.useCallback(() => {
@@ -234,6 +248,7 @@ export function ProcessBlockGroup({ blocks, isStreaming, renderChildren, isMessa
         userToggledRef.current = false
         followLatestRef.current = true
         smoothScrollTargetRef.current = null
+        setViewportExpanded(false)
         if (scrollFrameRef.current !== null) {
           cancelAnimationFrame(scrollFrameRef.current)
           scrollFrameRef.current = null
@@ -310,8 +325,13 @@ export function ProcessBlockGroup({ blocks, isStreaming, renderChildren, isMessa
     scrollFrameRef.current = requestAnimationFrame(advanceScroll)
   }, [])
 
+  const toggleViewportExpanded = React.useCallback((): void => {
+    // 仅切换状态：还原成固定视口时滚动跟随由 viewportActive 的 layout effect 重新接管
+    setViewportExpanded((previous) => !previous)
+  }, [])
+
   React.useLayoutEffect(() => {
-    if (!isStreaming || !keepProgressViewport) return
+    if (!isStreaming || !viewportActive) return
     const content = contentInnerRef.current
     if (!content) return
 
@@ -326,11 +346,11 @@ export function ProcessBlockGroup({ blocks, isStreaming, renderChildren, isMessa
       }
       observer.disconnect()
     }
-  }, [isStreaming, keepProgressViewport, scrollToLatest])
+  }, [isStreaming, viewportActive, scrollToLatest])
 
   React.useLayoutEffect(() => {
-    if (isStreaming && keepProgressViewport) scrollToLatest()
-  }, [stableProcessBlocks, isStreaming, keepProgressViewport, scrollToLatest])
+    if (isStreaming && viewportActive) scrollToLatest()
+  }, [stableProcessBlocks, isStreaming, viewportActive, scrollToLatest])
 
   const handleProgressScroll = React.useCallback((event: React.UIEvent<HTMLDivElement>): void => {
     if (!isProgressViewportAtBottom(event.currentTarget)) return
@@ -481,16 +501,16 @@ export function ProcessBlockGroup({ blocks, isStreaming, renderChildren, isMessa
           data-agent-history-selection-excluded={isContentExpanded ? undefined : 'true'}
           className={cn(
             'overflow-hidden focus:outline-none',
-            keepProgressViewport && 'overflow-y-auto overscroll-contain scrollbar-none',
+            viewportActive && 'overflow-y-auto overscroll-contain scrollbar-none',
           )}
-          tabIndex={keepProgressViewport ? 0 : undefined}
-          onScroll={keepProgressViewport ? handleProgressScroll : undefined}
-          onPointerDown={keepProgressViewport ? handleProgressScrollIntent : undefined}
-          onWheel={keepProgressViewport ? handleProgressScrollIntent : undefined}
-          onTouchStart={keepProgressViewport ? handleProgressScrollIntent : undefined}
-          onKeyDown={keepProgressViewport ? handleProgressKeyDown : undefined}
+          tabIndex={viewportActive ? 0 : undefined}
+          onScroll={viewportActive ? handleProgressScroll : undefined}
+          onPointerDown={viewportActive ? handleProgressScrollIntent : undefined}
+          onWheel={viewportActive ? handleProgressScrollIntent : undefined}
+          onTouchStart={viewportActive ? handleProgressScrollIntent : undefined}
+          onKeyDown={viewportActive ? handleProgressKeyDown : undefined}
           style={{
-            maxHeight: keepProgressViewport ? `${PROCESS_GROUP_VIEWPORT_HEIGHT}px` : undefined,
+            maxHeight: viewportActive ? `${PROCESS_GROUP_VIEWPORT_HEIGHT}px` : undefined,
             height: measuredHeight !== undefined ? `${measuredHeight}px` : 'auto',
             opacity: isContentExpanded ? 1 : 0,
             transition: measuredHeight !== undefined
@@ -499,6 +519,21 @@ export function ProcessBlockGroup({ blocks, isStreaming, renderChildren, isMessa
           }}
         >
           <div ref={contentInnerRef} className="space-y-2">
+            {keepProgressViewport && shouldRenderContent && (
+              <div className="pointer-events-none sticky top-0 z-10 flex justify-end">
+                <button
+                  type="button"
+                  onClick={toggleViewportExpanded}
+                  title={viewportExpanded ? '还原固定高度视口' : '放大过程区，解除高度限制'}
+                  aria-label={viewportExpanded ? '还原过程区高度' : '放大过程区'}
+                  className="pointer-events-auto mb-1 flex size-5 items-center justify-center rounded-md bg-background/80 text-muted-foreground/60 shadow-sm ring-1 ring-border/40 backdrop-blur-[2px] transition-colors hover:bg-muted hover:text-muted-foreground"
+                >
+                  {viewportExpanded
+                    ? <Minimize2 className="size-3" aria-hidden />
+                    : <Maximize2 className="size-3" aria-hidden />}
+                </button>
+              </div>
+            )}
             {renderContentChildren()}
           </div>
         </div>
