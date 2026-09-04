@@ -13,7 +13,7 @@
  */
 
 import * as React from 'react'
-import { FileText, FileImage, ChevronUp } from 'lucide-react'
+import { FileText, FileImage, ChevronUp, ChevronDown } from 'lucide-react'
 import { useStickToBottomContext } from 'use-stick-to-bottom'
 import { useAtomValue } from 'jotai'
 import { UserAvatar } from '@/components/chat/UserAvatar'
@@ -29,6 +29,22 @@ const STICKY_REMARK_PLUGINS: RemarkPluginFn[] = [remarkMentions]
 /** 去除 fenced code block，替换为 [code] 占位符 */
 export function stripCodeBlocks(text: string): string {
   return text.replace(/```[\s\S]*?```/g, ' [code] ')
+}
+
+/** 悬浮条正文折叠行数 */
+const STICKY_TEXT_COLLAPSE_LINES = 2
+
+/** 正文折叠行数容差（px），与 UserMessageContent 折叠判定保持一致 */
+const STICKY_TEXT_COLLAPSE_TOLERANCE_PX = 4
+
+/** 判定正文是否超过折叠行数（需要提供展开态全文高度） */
+export function isTextBeyondCollapseLines(options: {
+  scrollHeight: number
+  lineHeight: number
+  maxLines?: number
+}): boolean {
+  const maxLines = options.maxLines ?? STICKY_TEXT_COLLAPSE_LINES
+  return options.scrollHeight > options.lineHeight * maxLines + STICKY_TEXT_COLLAPSE_TOLERANCE_PX
 }
 
 interface StickyAttachment {
@@ -63,6 +79,10 @@ export function StickyUserMessage({
 
   // 当前悬浮展示的消息
   const [stickyMessage, setStickyMessage] = React.useState<UserMessageData | null>(null)
+  // 正文折叠/展开：悬浮卡内由用户手动控制，切换消息时自动收起
+  const [textExpanded, setTextExpanded] = React.useState(false)
+  const [textClampable, setTextClampable] = React.useState(false)
+  const textRef = React.useRef<HTMLDivElement>(null)
   const positionsRef = React.useRef<UserMessagePosition[]>([])
 
   const userMessageSignature = React.useMemo(
@@ -178,6 +198,18 @@ export function StickyUserMessage({
     }
   }, [scrollRef, userMessageSignature, messageMap, layoutSignature, stickyEnabled])
 
+  // 切换悬浮消息时重置展开态，并在折叠态下测量是否超过两行
+  React.useLayoutEffect(() => {
+    setTextExpanded(false)
+    const el = textRef.current
+    if (!el || !stickyMessage?.text) {
+      setTextClampable(false)
+      return
+    }
+    const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 22
+    setTextClampable(isTextBeyondCollapseLines({ scrollHeight: el.scrollHeight, lineHeight }))
+  }, [stickyMessage?.id, stickyMessage?.text])
+
   // 点击回滚到原始消息
   const scrollToOriginal = React.useCallback(() => {
     const el = scrollRef.current
@@ -228,9 +260,15 @@ export function StickyUserMessage({
               <ChevronUp className="size-3 text-muted-foreground ml-auto" />
             </div>
 
-            {/* 文本内容：最多两行，支持 Markdown 渲染 */}
+            {/* 文本内容：默认折叠为两行，可手动展开全文，支持 Markdown 渲染 */}
             {stickyMessage?.text && (
-              <div className="text-sm text-foreground/80 line-clamp-2 leading-relaxed">
+              <div
+                ref={textRef}
+                className={cn(
+                  'text-sm text-foreground/80 leading-relaxed',
+                  !textExpanded && 'line-clamp-2',
+                )}
+              >
                 <MessageResponse
                   className="prose-p:my-0 prose-p:inline prose-headings:my-0 prose-headings:text-sm prose-pre:hidden prose-ul:my-0 prose-ol:my-0 prose-li:my-0"
                   remarkPlugins={STICKY_REMARK_PLUGINS}
@@ -238,6 +276,22 @@ export function StickyUserMessage({
                   {stripCodeBlocks(stickyMessage.text)}
                 </MessageResponse>
               </div>
+            )}
+
+            {/* 展开/收起正文：仅超过两行时显示，点击不触发回跳 */}
+            {textClampable && (
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  setTextExpanded((previous) => !previous)
+                }}
+                className="flex items-center gap-1 text-xs text-foreground/40 transition-colors hover:text-foreground/70"
+              >
+                {textExpanded
+                  ? (<><ChevronUp className="size-3" aria-hidden />收起</>)
+                  : (<><ChevronDown className="size-3" aria-hidden />展开</>)}
+              </button>
             )}
 
             {/* 附件 badges */}
