@@ -351,6 +351,8 @@ export interface AppSettings {
   longTextPasteAsAttachmentEnabled?: boolean
   /** 输入框是否渲染 Markdown 富文本格式（默认 false，关闭后为纯文本模式，仍保留 Mention 引用） */
   richTextRenderingEnabled?: boolean
+  /** 流式过程区是否无限展开：开启后不限制过程区高度，并在顶部悬浮显示最近的用户消息（默认 false） */
+  processViewExpanded?: boolean
   /** Markdown 预览字号档位（默认 'medium'，对应 15px） */
   markdownFontSize?: MarkdownFontSize
   /** 应用图标变体 ID（dock + window icon），'default' 或 logo 变体 id */

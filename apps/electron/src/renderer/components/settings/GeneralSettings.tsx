@@ -41,11 +41,13 @@ import {
   longTextPasteAsAttachmentEnabledAtom,
   richTextRenderingEnabledAtom,
   sessionHoverPreviewEnabledAtom,
+  processViewExpandedAtom,
   productivityToolsAtom,
   updateProductivityTools,
   updateLongTextPasteAsAttachmentEnabled,
   updateRichTextRenderingEnabled,
   updateSessionHoverPreviewEnabled,
+  updateProcessViewExpanded,
 } from '@/atoms/ui-preferences'
 import { cn } from '@/lib/utils'
 import { detectIsMac, detectIsWindows } from '@/lib/platform'
@@ -70,6 +72,7 @@ export function GeneralSettings(): React.ReactElement {
   const [longTextPasteAsAttachmentEnabled, setLongTextPasteAsAttachmentEnabled] = useAtom(longTextPasteAsAttachmentEnabledAtom)
   const [richTextRenderingEnabled, setRichTextRenderingEnabled] = useAtom(richTextRenderingEnabledAtom)
   const [sessionHoverPreviewEnabled, setSessionHoverPreviewEnabled] = useAtom(sessionHoverPreviewEnabledAtom)
+  const [processViewExpanded, setProcessViewExpanded] = useAtom(processViewExpandedAtom)
   const [productivityTools, setProductivityTools] = useAtom(productivityToolsAtom)
   const [isEditingName, setIsEditingName] = React.useState(false)
   const [nameInput, setNameInput] = React.useState(userProfile.userName)
@@ -312,6 +315,15 @@ export function GeneralSettings(): React.ReactElement {
             description="显示 Obsidian 入口，并允许 Agent 使用已配置的 Vault"
             checked={productivityTools.obsidianEnabled}
             onCheckedChange={(checked) => { void handleProductivityToolsChange({ obsidianEnabled: checked }) }}
+          />
+          <SettingsToggle
+            label="过程区无限展开"
+            description="Agent 运行过程不限制高度；同时在顶部悬浮显示最近的用户消息，点击可回跳"
+            checked={processViewExpanded}
+            onCheckedChange={(checked) => {
+              setProcessViewExpanded(checked)
+              updateProcessViewExpanded(checked)
+            }}
           />
           <SettingsToggle
             label="桌面通知"
