@@ -249,7 +249,7 @@ export function StickyUserMessage({
       {/* 复用 ConversationContent(px-8) + Message(px-2.5) 的 padding 链，保证与内容区等宽 */}
       <div className="mx-8 px-2.5 pt-2">
         <div
-          className="sticky-user-banner ml-[46px] rounded-xl bg-[hsl(var(--input-surface))] shadow-sm cursor-pointer hover:bg-accent/50 transition-colors"
+          className="sticky-user-banner ml-[46px] rounded-xl bg-[hsl(var(--input-surface))] shadow-sm cursor-pointer hover:bg-accent transition-colors"
           onClick={scrollToOriginal}
         >
           <div className="px-3.5 py-2.5">
