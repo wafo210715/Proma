@@ -18,6 +18,9 @@ export const richTextRenderingEnabledAtom = atom<boolean>(false)
 /** 左侧会话列表悬浮预览迷你地图（默认关闭，需手动开启） */
 export const sessionHoverPreviewEnabledAtom = atom<boolean>(false)
 
+/** 过程区无限展开：流式过程不再限制为固定高度视口，同时启用用户消息悬浮置顶条（默认关闭） */
+export const processViewExpandedAtom = atom<boolean>(false)
+
 /** 默认全部可见；初始化后由通用设置同步。 */
 export const productivityToolsAtom = atom<ProductivityToolsSettings>(DEFAULT_PRODUCTIVITY_TOOLS_SETTINGS)
 
@@ -30,6 +33,7 @@ export async function initializeUiPreferences(
   setLongTextPasteAsAttachmentEnabled?: (enabled: boolean) => void,
   setRichTextRenderingEnabled?: (enabled: boolean) => void,
   setSessionHoverPreviewEnabled?: (enabled: boolean) => void,
+  setProcessViewExpanded?: (enabled: boolean) => void,
   setProductivityTools?: (settings: ProductivityToolsSettings) => void,
 ): Promise<void> {
   try {
@@ -37,6 +41,7 @@ export async function initializeUiPreferences(
     setLongTextPasteAsAttachmentEnabled?.(settings.longTextPasteAsAttachmentEnabled ?? false)
     setRichTextRenderingEnabled?.(settings.richTextRenderingEnabled ?? false)
     setSessionHoverPreviewEnabled?.(settings.sessionHoverPreviewEnabled ?? false)
+    setProcessViewExpanded?.(settings.processViewExpanded ?? false)
     setProductivityTools?.(settings.productivityTools)
   } catch (error) {
     console.error('[UI偏好] 初始化失败:', error)
@@ -75,6 +80,17 @@ export async function updateSessionHoverPreviewEnabled(enabled: boolean): Promis
     await window.electronAPI.updateSettings({ sessionHoverPreviewEnabled: enabled })
   } catch (error) {
     console.error('[UI偏好] 更新会话悬浮预览设置失败:', error)
+  }
+}
+
+/**
+ * 更新过程区无限展开开关并持久化
+ */
+export async function updateProcessViewExpanded(enabled: boolean): Promise<void> {
+  try {
+    await window.electronAPI.updateSettings({ processViewExpanded: enabled })
+  } catch (error) {
+    console.error('[UI偏好] 更新过程区无限展开设置失败:', error)
   }
 }
 

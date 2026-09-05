@@ -39,7 +39,8 @@ import {
 import { toTranscript } from '@proma/session-core'
 import { Spinner } from '@/components/ui/spinner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { groupIntoTurns, AssistantLogo, MessageGroupRenderer, getGroupId, getGroupPreview, extractUserText, buildTaskProgressDataForTurn, type MessageGroup } from './SDKMessageRenderer'
+import { groupIntoTurns, AssistantLogo, MessageGroupRenderer, getGroupId, getGroupPreview, extractUserText, parseAttachedFiles as sdkParseAttachedFiles, isImageFile as sdkIsImageFile, buildTaskProgressDataForTurn, type MessageGroup } from './SDKMessageRenderer'
+import { StickyUserMessage } from '@/components/ai-elements/sticky-user-message'
 import { buildLiveGroupSet } from './live-group-set'
 import { AgentBrowserLinkProvider } from '@/components/browser/AgentBrowserLinkProvider'
 import { AgentHistorySelectionLayer } from './AgentHistorySelectionLayer'
@@ -1105,6 +1106,27 @@ export const AgentMessages = React.memo(function AgentMessages({
   }
   const structuralGroups = structuralGroupsRef.current
 
+  // 所有用户消息的数据 — 供 StickyUserMessage 使用；只依赖结构快照，
+  // 避免流式期间重复解析已存在用户消息的附件标记。
+  const allUserMessagesData = React.useMemo(() => {
+    return structuralGroups
+      .filter((g): g is MessageGroup & { type: 'user' } => g.type === 'user')
+      .map((g) => {
+        const rawText = extractUserText(g.message) ?? ''
+        const { files, text } = sdkParseAttachedFiles(rawText)
+        return {
+          id: getGroupId(g),
+          text,
+          attachments: files.map((f) => ({ filename: f.filename, isImage: sdkIsImageFile(f.filename) })),
+        }
+      })
+  }, [structuralGroups])
+
+  const stickyLayoutSignature = React.useMemo(() => {
+    const firstGroup = structuralGroups[0]
+    return `${structuralGroups.length}:${firstGroup ? getGroupId(firstGroup) : ''}`
+  }, [structuralGroups])
+
   // 搜索记录与迷你地图一样只依赖结构快照，流式 token 不触发全文重建。
   const localSearchRecordInputs = React.useMemo<LocalSearchRecordInput[]>(
     () => toTranscript(structuralGroups).map((turn, index) => ({
@@ -1248,6 +1270,12 @@ export const AgentMessages = React.memo(function AgentMessages({
           streaming={streaming}
           contextCompaction={contextCompaction}
         />
+        {allUserMessagesData.length > 0 && (
+          <StickyUserMessage
+            userMessages={allUserMessagesData}
+            layoutSignature={stickyLayoutSignature}
+          />
+        )}
           </Conversation>
           <AgentHistorySelectionLayer
             sessionId={sessionId}

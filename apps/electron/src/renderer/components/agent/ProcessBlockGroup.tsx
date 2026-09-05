@@ -1,6 +1,8 @@
 import * as React from 'react'
 import { ChevronRight } from 'lucide-react'
+import { useAtomValue } from 'jotai'
 import { cn } from '@/lib/utils'
+import { processViewExpandedAtom } from '@/atoms/ui-preferences'
 import { getToolDisplayName, getToolIcon } from './tool-utils'
 import type {
   SDKContentBlock,
@@ -161,6 +163,17 @@ export function isProgressViewportAtBottom({
   return scrollHeight - scrollTop - clientHeight <= PROCESS_GROUP_FOLLOW_BOTTOM_THRESHOLD
 }
 
+/**
+ * 流式过程视口是否生效：默认流式期间启用固定高度内部滚动；
+ * 设置「过程区无限展开」（processViewExpanded）开启后不再限制高度，流式结束（keepProgressViewport=false）后整体失效。
+ */
+export function isProcessViewportActive(options: {
+  keepProgressViewport: boolean
+  processViewExpanded: boolean
+}): boolean {
+  return options.keepProgressViewport && !options.processViewExpanded
+}
+
 function getProcessChildKey(child: React.ReactNode, index: number): string {
   if (React.isValidElement(child) && child.key != null) return String(child.key)
   return `process-child-${index}`
@@ -217,6 +230,8 @@ export function ProcessBlockGroup({ blocks, isStreaming, renderChildren, isMessa
 
   const isContentExpanded = displayMode === 'expanded'
   const shouldShowContent = isContentExpanded || shouldRenderContent
+  const processViewExpanded = useAtomValue(processViewExpandedAtom)
+  const viewportActive = isProcessViewportActive({ keepProgressViewport, processViewExpanded })
   const visibleChildren = shouldShowContent ? renderChildren() : null
 
   const clearAutoCollapseTimers = React.useCallback(() => {
@@ -311,7 +326,7 @@ export function ProcessBlockGroup({ blocks, isStreaming, renderChildren, isMessa
   }, [])
 
   React.useLayoutEffect(() => {
-    if (!isStreaming || !keepProgressViewport) return
+    if (!isStreaming || !viewportActive) return
     const content = contentInnerRef.current
     if (!content) return
 
@@ -326,11 +341,11 @@ export function ProcessBlockGroup({ blocks, isStreaming, renderChildren, isMessa
       }
       observer.disconnect()
     }
-  }, [isStreaming, keepProgressViewport, scrollToLatest])
+  }, [isStreaming, viewportActive, scrollToLatest])
 
   React.useLayoutEffect(() => {
-    if (isStreaming && keepProgressViewport) scrollToLatest()
-  }, [stableProcessBlocks, isStreaming, keepProgressViewport, scrollToLatest])
+    if (isStreaming && viewportActive) scrollToLatest()
+  }, [stableProcessBlocks, isStreaming, viewportActive, scrollToLatest])
 
   const handleProgressScroll = React.useCallback((event: React.UIEvent<HTMLDivElement>): void => {
     if (!isProgressViewportAtBottom(event.currentTarget)) return
@@ -481,16 +496,16 @@ export function ProcessBlockGroup({ blocks, isStreaming, renderChildren, isMessa
           data-agent-history-selection-excluded={isContentExpanded ? undefined : 'true'}
           className={cn(
             'overflow-hidden focus:outline-none',
-            keepProgressViewport && 'overflow-y-auto overscroll-contain scrollbar-none',
+            viewportActive && 'overflow-y-auto overscroll-contain scrollbar-none',
           )}
-          tabIndex={keepProgressViewport ? 0 : undefined}
-          onScroll={keepProgressViewport ? handleProgressScroll : undefined}
-          onPointerDown={keepProgressViewport ? handleProgressScrollIntent : undefined}
-          onWheel={keepProgressViewport ? handleProgressScrollIntent : undefined}
-          onTouchStart={keepProgressViewport ? handleProgressScrollIntent : undefined}
-          onKeyDown={keepProgressViewport ? handleProgressKeyDown : undefined}
+          tabIndex={viewportActive ? 0 : undefined}
+          onScroll={viewportActive ? handleProgressScroll : undefined}
+          onPointerDown={viewportActive ? handleProgressScrollIntent : undefined}
+          onWheel={viewportActive ? handleProgressScrollIntent : undefined}
+          onTouchStart={viewportActive ? handleProgressScrollIntent : undefined}
+          onKeyDown={viewportActive ? handleProgressKeyDown : undefined}
           style={{
-            maxHeight: keepProgressViewport ? `${PROCESS_GROUP_VIEWPORT_HEIGHT}px` : undefined,
+            maxHeight: viewportActive ? `${PROCESS_GROUP_VIEWPORT_HEIGHT}px` : undefined,
             height: measuredHeight !== undefined ? `${measuredHeight}px` : 'auto',
             opacity: isContentExpanded ? 1 : 0,
             transition: measuredHeight !== undefined
