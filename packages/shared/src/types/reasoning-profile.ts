@@ -211,11 +211,22 @@ function normalizeGlm52Level(level: AgentThinkingLevel | undefined): AgentThinki
 }
 
 function normalizeGlm53Level(level: AgentThinkingLevel | undefined): AgentThinkingLevel {
-  if (level === 'low' || level === 'high' || level === 'max') return level
-  if (level === 'xhigh') return 'max'
-  if (level === 'medium') return 'high'
-  // off / minimal / undefined：官方不允许关闭思考，归一到最轻的 low 档。
-  return 'low'
+  switch (level) {
+    case 'minimal':
+    case 'low':
+    case 'off':
+      // 官方不允许关闭思考；off/minimal 归一到最轻的 low 档（Coding Plan 兼容）。
+      return 'low'
+    case 'medium':
+    case 'high':
+      return 'high'
+    case 'xhigh':
+    case 'max':
+      return 'max'
+    default:
+      // undefined：用户未选过档位，与官方默认及 defaultLevel(max) 对齐（同上游）。
+      return 'max'
+  }
 }
 
 function normalizeOpenAIStandardLevel(level: AgentThinkingLevel | undefined): AgentThinkingLevel {

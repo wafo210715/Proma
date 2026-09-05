@@ -29,11 +29,11 @@ describe('GLM-5.3 reasoning profile（官方 low/high/max 语义）', () => {
     expect(map.xhigh).toBe('max')
   })
 
-  test('normalize：off/minimal 归一到 low（官方不允许关闭思考）', () => {
+  test('normalize：off/minimal 归一到 low（官方不允许关闭思考），undefined 对齐官方默认 max', () => {
     const profile = resolveReasoningProfile({ modelId: 'glm-5.3', transport: 'openai-completions' })
     expect(profile && normalizeReasoningLevel(profile, 'off')).toBe('low')
     expect(profile && normalizeReasoningLevel(profile, 'minimal')).toBe('low')
-    expect(profile && normalizeReasoningLevel(profile, undefined)).toBe('low')
+    expect(profile && normalizeReasoningLevel(profile, undefined)).toBe('max')
     expect(profile && normalizeReasoningLevel(profile, 'xhigh')).toBe('max')
     expect(profile && normalizeReasoningLevel(profile, 'high')).toBe('high')
   })
