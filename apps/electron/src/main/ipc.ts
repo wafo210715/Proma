@@ -3842,6 +3842,11 @@ export function registerIpcHandlers(): void {
           return { success: false, message: `连接失败: ${msg}` }
         }
       }
+      // GPT Image 生图工具测试（凭据复用渠道）
+      if (toolId === 'gpt-image') {
+        const { testGptImageConnection } = await import('./lib/chat-tools/gpt-image-core')
+        return testGptImageConnection()
+      }
       return { success: false, message: `工具 ${toolId} 不支持测试` }
     }
   )

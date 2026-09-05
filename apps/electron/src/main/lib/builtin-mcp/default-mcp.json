@@ -15,6 +15,20 @@
       "tools": [
         { "name": "generate_image", "description": "生成或编辑图片。" }
       ]
+    },
+    {
+      "id": "gpt-image",
+      "name": "gpt_image",
+      "displayName": "GPT Image 生图",
+      "description": "通过 OpenAI Images 协议为 Agent 提供图片生成和编辑能力，凭据复用模型配置中的渠道。",
+      "category": "media",
+      "kind": "internal",
+      "deletable": false,
+      "defaultEnabled": false,
+      "toggleable": true,
+      "tools": [
+        { "name": "generate_image", "description": "生成或编辑图片。" }
+      ]
     }
   ]
 }

@@ -9,6 +9,7 @@
 
 import type { BuiltinMcpServerSummary } from '@proma/shared'
 import { getToolCredentials, getToolState } from '../chat-tool-config'
+import { isGptImageAvailable } from '../chat-tools/gpt-image-tool'
 import { getBuiltinMcpDefinitions, type BuiltinMcpDefinition } from './baseline'
 import { isBuiltinMcpDefaultDisabled, isBuiltinMcpUserEnabled } from './settings'
 
@@ -56,6 +57,16 @@ function resolveAvailability(
         ? undefined
         : state.enabled ? '需要配置 Gemini API Key' : 'Nano Banana 未启用',
     }
+  }
+
+  if (item.id === 'gpt-image') {
+    const state = getToolState('gpt-image')
+    const available = state.enabled && isGptImageAvailable()
+    let availabilityReason: string | undefined
+    if (!available) {
+      availabilityReason = state.enabled ? '需要选择可用的生图模型渠道' : 'GPT Image 未启用'
+    }
+    return { enabled: true, available, availabilityReason }
   }
 
   return { enabled: true, available: true }

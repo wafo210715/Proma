@@ -42,6 +42,7 @@ import { fetchInstallerManifest, findInstallerSource } from '../installer-manife
 import { shouldOfferWindowsShellInstaller } from './windows-shell-installer'
 import { buildPiCollaborationTools } from '../agent-collaboration-tools'
 import { buildPiNanoBananaTools } from '../chat-tools/nano-banana-mcp'
+import { buildPiGptImageTools } from '../chat-tools/gpt-image-mcp'
 import { getVisionRelayRouteLabel, inspectImageWithVisionRelay, isVisionRelayConfigured, isVisionRelayEligibleForModel } from '../vision-relay-service'
 import {
   listTodos,
@@ -1644,6 +1645,18 @@ export async function buildPiBuiltinTools(
       }))
     } catch (error) {
       console.error('[Pi 桥接] 注入 nano-banana 工具失败:', error)
+    }
+  }
+
+  if (isBuiltinMcpUserEnabled('gpt-image')) {
+    try {
+      tools.push(...buildPiGptImageTools(sdk, {
+        sessionId: ctx.sessionId,
+        agentCwd: ctx.agentCwd,
+        allowedRoots: ctx.allowedRoots,
+      }))
+    } catch (error) {
+      console.error('[Pi 桥接] 注入 gpt-image 工具失败:', error)
     }
   }
 

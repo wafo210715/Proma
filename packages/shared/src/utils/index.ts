@@ -46,6 +46,7 @@ export {
   normalizeThinkingSignatureError,
 } from './thinking-signature-error'
 export { normalizePathForCompare } from './normalize-path'
+export { isLikelyImageModel } from './image-model'
 export {
   MAX_NORMALIZED_SEARCH_QUERY_LENGTH,
   MAX_SEARCH_QUERY_SOURCE_LENGTH,

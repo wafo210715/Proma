@@ -14,6 +14,8 @@ import { isCustomHttpToolCall, executeHttpTool } from './chat-tools/http-tool-ex
 import { isAgentRecommendToolCall, executeAgentRecommendTool } from './chat-tools/agent-recommend-tool'
 import { isNanoBananaToolCall, executeNanoBananaTool } from './chat-tools/nano-banana-tool'
 import type { NanoBananaContext } from './chat-tools/nano-banana-tool'
+import { isGptImageToolCall, executeGptImageTool } from './chat-tools/gpt-image-tool'
+import type { GptImageContext } from './chat-tools/gpt-image-tool'
 import { getChatToolsConfig } from './chat-tool-config'
 
 /** 工具执行上下文 */
@@ -60,6 +62,14 @@ export async function executeToolCalls(
         previousAssistantAttachments: context.previousAssistantAttachments,
       }
       result = await executeNanoBananaTool(tc, nanoBananaContext)
+    } else if (isGptImageToolCall(tc.name)) {
+      const gptImageContext: GptImageContext = {
+        conversationId: context.conversationId,
+        currentAttachments: context.currentAttachments,
+        previousUserAttachments: context.previousUserAttachments,
+        previousAssistantAttachments: context.previousAssistantAttachments,
+      }
+      result = await executeGptImageTool(tc, gptImageContext)
     } else if (isCustomHttpToolCall(tc.name)) {
       const config = getChatToolsConfig()
       const meta = config.customTools.find((t) => t.id === tc.name)
