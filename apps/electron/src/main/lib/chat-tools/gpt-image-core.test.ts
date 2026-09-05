@@ -161,7 +161,7 @@ describe('GPT Image Images API 调用', () => {
       return Promise.resolve(new Response(JSON.stringify({
         data: Array.from({ length: body.n ?? 1 }, () => ({ b64_json: 'aGVsbG8=' })),
       }), { status: 200, headers: { 'content-type': 'application/json' } }))
-    }) as typeof fetch
+    }) as unknown as typeof fetch
   })
   afterEach(() => {
     globalThis.fetch = originalFetch
@@ -186,7 +186,7 @@ describe('GPT Image Images API 调用', () => {
         status: 200,
         headers: { 'content-type': 'image/png' },
       }))
-    }) as typeof fetch
+    }) as unknown as typeof fetch
 
     const artifacts = await generateImages(TARGET, { prompt: 'a dog' })
     expect(artifacts).toHaveLength(1)
@@ -200,7 +200,7 @@ describe('GPT Image Images API 调用', () => {
   test('Given 网关 4xx 错误 When 调用 Then 透传状态与错误信息', async () => {
     globalThis.fetch = mock(() => Promise.resolve(new Response(JSON.stringify({
       error: { message: 'model not found' },
-    }), { status: 404, headers: { 'content-type': 'application/json' } }))) as typeof fetch
+    }), { status: 404, headers: { 'content-type': 'application/json' } }))) as unknown as typeof fetch
 
     await expect(generateImages(TARGET, { prompt: 'x' })).rejects.toThrow('404')
   })
@@ -208,7 +208,7 @@ describe('GPT Image Images API 调用', () => {
   test('Given 响应 data 为空 When 解析 Then 报未返回图片', async () => {
     globalThis.fetch = mock(() => Promise.resolve(new Response(JSON.stringify({ data: [] }), {
       status: 200, headers: { 'content-type': 'application/json' },
-    }))) as typeof fetch
+    }))) as unknown as typeof fetch
 
     await expect(generateImages(TARGET, { prompt: 'x' })).rejects.toThrow('未返回任何图片')
   })
@@ -222,7 +222,7 @@ describe('GPT Image Images API 调用', () => {
       return Promise.resolve(new Response(JSON.stringify({
         data: [{ b64_json: 'aGVsbG8=' }],
       }), { status: 200, headers: { 'content-type': 'application/json' } }))
-    }) as typeof fetch
+    }) as unknown as typeof fetch
 
     await generateImages(TARGET, {
       prompt: 'make it watercolor',
@@ -240,7 +240,7 @@ describe('GPT Image Images API 调用', () => {
       return Promise.resolve(new Response(JSON.stringify({
         data: [{ b64_json: 'aGVsbG8=' }],
       }), { status: 200, headers: { 'content-type': 'application/json' } }))
-    }) as typeof fetch
+    }) as unknown as typeof fetch
 
     await generateImages(TARGET, { prompt: 'x', numberOfImages: 99 })
     expect(JSON.parse(capturedBody).n).toBe(4)
