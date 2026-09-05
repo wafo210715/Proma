@@ -119,6 +119,7 @@ import {
 import { getDelegatedChildSessionStatus, getDelegationStatusIconClass } from '@/lib/agent-session-list'
 import { markSessionCompletionViewed } from '@/lib/agent-completion-presence'
 import { rememberStopGenerationTarget } from '@/lib/stop-generation-target'
+import { buildEmbeddedBrowserTabIndex, type EmbeddedBrowserTabOwner } from '@/lib/embedded-browser-tabs'
 import { TerminalTabContent } from '@/components/tabs/TerminalTabContent'
 import { shouldShowBothFileSources } from './file-panel-layout'
 import {
@@ -1105,33 +1106,61 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
   const setBrowserStateMap = useSetAtom(browserStateMapAtom)
   const setPendingNavigationMap = useSetAtom(browserPendingNavigationMapAtom)
   const browserState = browserStateMap.get(sessionId) ?? null
+  const activeBrowserTabId = getBrowserTabIdFromSidePanelTab(effectiveActiveTab)
+  // 嵌入会话（并排 / 探索分支 / 委派子会话）与主会话共享右侧工作区，但浏览器状态各自独立。
+  // 聚合后它们的浏览器标签才有可见入口；tabId 由主进程以 UUID 生成，跨会话唯一。
+  const embeddedBrowserOwners = React.useMemo<EmbeddedBrowserTabOwner[]>(() => {
+    const owners: EmbeddedBrowserTabOwner[] = []
+    if (browserState) owners.push({ ownerSessionId: sessionId, ownerLabel: '', state: browserState })
+    const embeddedIds = [
+      ...sideSessionIds,
+      ...sideTemporaryAgents.map((branch) => branch.sessionId),
+      ...(sideDelegationSessionId ? [sideDelegationSessionId] : []),
+    ]
+    for (const embeddedId of embeddedIds) {
+      if (embeddedId === sessionId) continue
+      const state = browserStateMap.get(embeddedId)
+      if (!state) continue
+      owners.push({
+        ownerSessionId: embeddedId,
+        ownerLabel: sessions.find((item) => item.id === embeddedId)?.title || '嵌入会话',
+        state,
+      })
+    }
+    return owners
+  }, [browserState, browserStateMap, sessionId, sessions, sideDelegationSessionId, sideSessionIds, sideTemporaryAgents])
+
+  const embeddedBrowserIndex = React.useMemo(
+    () => buildEmbeddedBrowserTabIndex(embeddedBrowserOwners, activeBrowserTabId),
+    [activeBrowserTabId, embeddedBrowserOwners],
+  )
   const openingBrowserSessionRef = React.useRef<string | null>(null)
   // 右侧 Tab 可被快速连续点击。队列必须同时按 Session/epoch 隔离；SidePanel
   // 组件会跨 Session 复用，旧 Session 的异步 IPC 绝不能消费新 Session 的 tabId。
-  const browserSelectionQueueRef = React.useRef({ sessionId, epoch: 0, desiredTabId: null as string | null, running: false })
+  const browserSelectionQueueRef = React.useRef({ sessionId, epoch: 0, desired: null as { tabId: string; ownerSessionId: string } | null, running: false })
   if (browserSelectionQueueRef.current.sessionId !== sessionId) {
     browserSelectionQueueRef.current = {
       sessionId,
       epoch: browserSelectionQueueRef.current.epoch + 1,
-      desiredTabId: null,
+      desired: null,
       running: false,
     }
   }
 
-  const publishBrowserState = React.useCallback((state: NonNullable<typeof browserState>) => {
+  const publishBrowserState = React.useCallback((state: NonNullable<typeof browserState>, targetSessionId: string = sessionId) => {
     setBrowserStateMap((previous) => {
       const next = new Map(previous)
-      next.set(sessionId, state)
+      next.set(targetSessionId, state)
       return next
     })
     setBrowserMinimizedMap((previous) => {
       const next = new Map(previous)
-      next.delete(sessionId)
+      next.delete(targetSessionId)
       return next
     })
     setBrowserOpenMap((previous) => {
       const next = new Map(previous)
-      next.set(sessionId, true)
+      next.set(targetSessionId, true)
       return next
     })
   }, [sessionId, setBrowserMinimizedMap, setBrowserOpenMap, setBrowserStateMap])
@@ -1163,13 +1192,13 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
         while (true) {
           const current = browserSelectionQueueRef.current
           if (current.sessionId !== sessionId || current.epoch !== runEpoch) return
-          const targetTabId = current.desiredTabId
-          if (!targetTabId) return
-          current.desiredTabId = null
-          const state = await window.electronAPI.selectAgentBrowserTab({ sessionId, tabId: targetTabId })
+          const target = current.desired
+          if (!target) return
+          current.desired = null
+          const state = await window.electronAPI.selectAgentBrowserTab({ sessionId: target.ownerSessionId, tabId: target.tabId })
           const latest = browserSelectionQueueRef.current
           if (latest.sessionId !== sessionId || latest.epoch !== runEpoch) return
-          publishBrowserState(state)
+          publishBrowserState(state, target.ownerSessionId)
         }
       } catch (error) {
         console.error('[SidePanel] 切换受管浏览器标签失败:', error)
@@ -1178,7 +1207,7 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
         if (current.sessionId !== sessionId || current.epoch !== runEpoch) return
         current.running = false
         // 请求完成的瞬间可能又点击了其他标签，继续落到最终目标。
-        if (current.desiredTabId) flushBrowserTabSelection()
+        if (current.desired) flushBrowserTabSelection()
       }
     })()
   }, [publishBrowserState, sessionId])
@@ -1229,9 +1258,13 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
     if (!browserTabId) return
     const queue = browserSelectionQueueRef.current
     if (queue.sessionId !== sessionId) return
-    queue.desiredTabId = browserTabId
+    // 嵌入会话的浏览器标签要在属主会话上切换；tabId 全局唯一，无需担心跨会话冲突。
+    queue.desired = {
+      tabId: browserTabId,
+      ownerSessionId: embeddedBrowserIndex.resolveOwner(browserTabId)?.ownerSessionId ?? sessionId,
+    }
     flushBrowserTabSelection()
-  }, [flushBrowserTabSelection, markDelegationSessionViewed, onTabChange, previewFiles, sessionId, setPreviewFileMap, sideChatConversationId, sideDelegationSessionId, sideSessionIds, sideTemporaryAgents, split, updateSplit])
+  }, [embeddedBrowserIndex, flushBrowserTabSelection, markDelegationSessionViewed, onTabChange, previewFiles, sessionId, setPreviewFileMap, sideChatConversationId, sideDelegationSessionId, sideSessionIds, sideTemporaryAgents, split, updateSplit])
 
   // Agent/浏览器等外部事件仍只更新兼容 activeTab；分屏时把新目标落到当前焦点 Pane。
   React.useEffect(() => {
@@ -1271,10 +1304,11 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
   }, [handleOpenTerminal])
 
   const handleCloseBrowserTab = React.useCallback(async (browserTabId: string): Promise<boolean> => {
+    const ownerSessionId = embeddedBrowserIndex.resolveOwner(browserTabId)?.ownerSessionId ?? sessionId
     try {
-      const state = await window.electronAPI.closeAgentBrowserTab({ sessionId, tabId: browserTabId })
+      const state = await window.electronAPI.closeAgentBrowserTab({ sessionId: ownerSessionId, tabId: browserTabId })
       if (state) {
-        publishBrowserState(state)
+        publishBrowserState(state, ownerSessionId)
         if (getBrowserTabIdFromSidePanelTab(activeTab) === browserTabId) {
           handleWorkspaceTabChange(getPreviousTabBeforeClose(getBrowserSidePanelTab(browserTabId)))
         } else {
@@ -1284,22 +1318,22 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
       }
       setBrowserOpenMap((previous) => {
         const next = new Map(previous)
-        next.set(sessionId, false)
+        next.set(ownerSessionId, false)
         return next
       })
       setBrowserMinimizedMap((previous) => {
         const next = new Map(previous)
-        next.delete(sessionId)
+        next.delete(ownerSessionId)
         return next
       })
       setBrowserStateMap((previous) => {
         const next = new Map(previous)
-        next.delete(sessionId)
+        next.delete(ownerSessionId)
         return next
       })
       setPendingNavigationMap((previous) => {
         const next = new Map(previous)
-        next.delete(sessionId)
+        next.delete(ownerSessionId)
         return next
       })
       returnToPreviousTabAfterClose(getBrowserSidePanelTab(browserTabId))
@@ -1308,16 +1342,29 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
       console.error('[SidePanel] 关闭受管浏览器标签失败:', error)
       return false
     }
-  }, [activeTab, getPreviousTabBeforeClose, handleWorkspaceTabChange, publishBrowserState, returnToPreviousTabAfterClose, sessionId, setBrowserMinimizedMap, setBrowserOpenMap, setBrowserStateMap, setPendingNavigationMap])
+  }, [activeTab, embeddedBrowserIndex, getPreviousTabBeforeClose, handleWorkspaceTabChange, publishBrowserState, returnToPreviousTabAfterClose, sessionId, setBrowserMinimizedMap, setBrowserOpenMap, setBrowserStateMap, setPendingNavigationMap])
 
-  const activeBrowserTabId = getBrowserTabIdFromSidePanelTab(effectiveActiveTab)
   React.useEffect(() => {
-    if (activeBrowserTabId && !browserState?.tabs.some((tab) => tab.tabId === activeBrowserTabId)) {
+    if (activeBrowserTabId && !embeddedBrowserIndex.resolveOwner(activeBrowserTabId)) {
       returnToPreviousTabAfterClose(getBrowserSidePanelTab(activeBrowserTabId))
     }
-  }, [activeBrowserTabId, browserState?.tabs, returnToPreviousTabAfterClose])
+  }, [activeBrowserTabId, embeddedBrowserIndex, returnToPreviousTabAfterClose])
 
-  const showBrowserActivity = Boolean(browserState?.activity && browserState.executionSource !== 'user')
+  // 嵌入会话的 Agent 浏览器活动也自动切换右侧工作区标签；语义与 MainArea 对主会话的
+  // 自动激活一致，否则并排/探索/委派会话的浏览器操作成功执行却始终不可见。
+  const handledEmbeddedActivityRef = React.useRef(new Map<string, string>())
+  React.useEffect(() => {
+    for (const owner of embeddedBrowserOwners) {
+      if (owner.ownerSessionId === sessionId) continue
+      const activity = owner.state.activity
+      if (!activity || owner.state.executionSource === 'user') continue
+      if (owner.state.agentTabId !== owner.state.activeTabId || activity.tabId !== owner.state.activeTabId) continue
+      if (handledEmbeddedActivityRef.current.get(owner.ownerSessionId) === activity.id) continue
+      handledEmbeddedActivityRef.current.set(owner.ownerSessionId, activity.id)
+      setIsOpen(true)
+      handleWorkspaceTabChange(getBrowserSidePanelTab(activity.tabId))
+    }
+  }, [embeddedBrowserOwners, handleWorkspaceTabChange, sessionId, setIsOpen])
   // WebContentsView 是原生子视图，会盖住 renderer 的 portal。加号菜单打开时，
   // BrowserPanel 为它保留一个固定避让区，而非 setVisible(false)。
   React.useEffect(() => {
@@ -1377,15 +1424,16 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
       status: selectedDelegationStatus,
       closable: true,
     }] : []),
-    ...(browserState?.tabs.map((tab) => ({
+    ...embeddedBrowserIndex.tabs.map((tab) => ({
       id: getBrowserSidePanelTab(tab.tabId),
-      label: tab.title || '新建标签页',
+      // 主会话标签保持原标题；嵌入会话标签带属主前缀，避免与主会话页面混淆。
+      label: tab.ownerSessionId === sessionId || !tab.ownerLabel ? tab.title : `${tab.ownerLabel} · ${tab.title}`,
       icon: <BrowserTabIcon favicon={tab.favicon} />,
       // 用户可关闭任何浏览器标签；关闭 Agent 工作标签后，后续未指定 tabId 的工具会提示新建或选择工作标签。
       closable: true,
-      activity: showBrowserActivity && activeBrowserTabId !== tab.tabId && browserState.activeTabId === tab.tabId,
-    })) ?? []),
-  ], [activeBrowserTabId, browserState, previewFiles, selectedDelegationSession, selectedDelegationStatus, sessions, showBrowserActivity, sideChatConversationId, sideSessionIds, sideTemporaryAgents, terminalTabs, workspaceComponentTabs])
+      activity: tab.activity,
+    })),
+  ], [embeddedBrowserIndex, previewFiles, selectedDelegationSession, selectedDelegationStatus, sessionId, sessions, sideChatConversationId, sideSessionIds, sideTemporaryAgents, terminalTabs, workspaceComponentTabs])
   workspaceTabsRef.current = workspaceTabs
 
   React.useEffect(() => {
@@ -1606,6 +1654,7 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
     const panePreviewFile = (panePreviewId ? previewFiles.find((file) => getPreviewFileId(file) === panePreviewId) : null)
       ?? previewFileMap.get(sessionId) ?? null
     const paneBrowserTabId = getBrowserTabIdFromSidePanelTab(paneTab)
+    const paneBrowserOwner = paneBrowserTabId ? embeddedBrowserIndex.resolveOwner(paneBrowserTabId) : null
     const paneExplorationSessionId = getExplorationSessionIdFromSidePanelTab(paneTab)
     const paneExplorationBranch = paneExplorationSessionId
       ? sideTemporaryAgents.find((branch) => branch.sessionId === paneExplorationSessionId) ?? null
@@ -1643,15 +1692,15 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
     panePreviewId && panePreviewFile ? (
       <div className="min-h-0 flex-1 overflow-hidden"><PreviewPanel sessionId={sessionId} file={panePreviewFile} onClose={() => handleClosePreviewTab(panePreviewId)} /></div>
     ) : paneBrowserTabId ? (
-      browserState && browserState.tabs.some((tab) => tab.tabId === paneBrowserTabId) ? (
+      paneBrowserOwner ? (
         tabDrag ? (
           <div className="flex flex-1 items-center justify-center bg-muted/15 text-xs text-muted-foreground">释放后恢复浏览器视图</div>
         ) : (
           <div className="min-h-0 flex-1 overflow-hidden">
             <BrowserPanel
-              sessionId={sessionId}
+              sessionId={paneBrowserOwner.ownerSessionId}
               tabId={paneBrowserTabId}
-              state={browserState}
+              state={paneBrowserOwner.state}
               isAddTabMenuOpen={isAddTabMenuOpen}
             />
           </div>
