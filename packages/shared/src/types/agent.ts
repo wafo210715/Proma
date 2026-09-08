@@ -633,6 +633,8 @@ export type PromaEvent =
   | { type: 'external_run_started'; source: AgentExternalRunSource; sessionId: string; title?: string; workspaceId?: string; modelId?: string; startedAt: number; runGeneration?: number; session?: AgentSessionMeta }
   /** 普通桌面会话已开始执行；startedAt 用于展示，runGeneration 是主进程单调递增的可靠代际。 */
   | { type: 'run_started'; startedAt: number; runGeneration?: number }
+  /** 普通桌面会话已结束；供已显式配置的外部通知通道发送摘要。 */
+  | { type: 'run_completed'; source: AgentExternalRunSource | 'desktop'; stoppedByUser: boolean; startedAt?: number; runGeneration?: number }
   | { type: 'run_resumed'; sessionId: string }
   /** 用户主动停止当前执行；startedAt 防止旧运行的终态覆盖新一轮执行。 */
   | { type: 'run_stopped'; startedAt?: number; runGeneration?: number }
@@ -642,7 +644,7 @@ export type PromaEvent =
   | { type: 'automation_graduated' }
 
 /** 外部入口触发 Agent 运行的来源 */
-export type AgentExternalRunSource = 'feishu' | 'dingtalk' | 'wechat' | 'bridge' | 'delegation'
+export type AgentExternalRunSource = 'feishu' | 'dingtalk' | 'wechat' | 'slack' | 'bridge' | 'delegation'
 
 /** Pi AssistantMessageEvent 的可序列化增量；不携带累计 partial，避免跨进程复制整段输出。 */
 export type AgentAssistantDelta =
@@ -1040,6 +1042,10 @@ export interface SaveMcpApiKeyInput {
   serverUrl: string
   headerName: string
   value: string
+  /** stdio MCP 环境变量凭据；远程 HTTP/SSE 凭据留空。 */
+  envName?: string
+  /** stdio MCP 凭据绑定的启动命令；注入前与当前配置比对，防止同名配置被改后泄露密钥。 */
+  stdioBinding?: { command: string; args: string[] }
 }
 
 /** Non-sensitive status for a CLI integration. Secret values are never returned to the renderer. */
@@ -1621,6 +1627,16 @@ export interface ExitPlanAllowedPrompt {
   prompt: string
 }
 
+/** 经主进程校验的计划 Markdown 工件，用于审批时的只读预览。 */
+export interface ExitPlanDocument {
+  /** 计划文件的规范化绝对路径；必须位于当前会话的 plan/ 目录。 */
+  filePath: string
+  /** 供右侧预览 Tab 展示的文件名。 */
+  displayName: string
+  /** 提交审批时的内容哈希；批准前若文件变化则要求重新提交。 */
+  contentHash: string
+}
+
 /** ExitPlanMode 请求（主进程 → 渲染进程） */
 export interface ExitPlanModeRequest {
   /** 请求唯一 ID */
@@ -1631,6 +1647,8 @@ export interface ExitPlanModeRequest {
   toolInput: Record<string, unknown>
   /** 解析后的 allowedPrompts 列表 */
   allowedPrompts: ExitPlanAllowedPrompt[]
+  /** 本次待审批的计划文档；未提供或校验失败时省略。 */
+  planDocument?: ExitPlanDocument
 }
 
 /** ExitPlanMode 用户选择行为 */
@@ -1840,6 +1858,8 @@ export const AGENT_IPC_CHANNELS = {
   GET_MCP_CONFIG: 'agent:get-mcp-config',
   /** 保存工作区 MCP 配置 */
   SAVE_MCP_CONFIG: 'agent:save-mcp-config',
+  /** 原子删除单个 MCP，保留其他条目的当前状态。 */
+  DELETE_MCP: 'agent:delete-mcp',
   /** 刷新并持久化工作区 MCP 真实连接状态 */
   REFRESH_MCP_CONNECTIONS: 'agent:refresh-mcp-connections',
   /** 原子切换 MCP 启用状态，并在启用时条件持久化真实验证结果。 */
@@ -1858,8 +1878,6 @@ export const AGENT_IPC_CHANNELS = {
   SET_CLI_INTEGRATION_ENABLED: 'agent:set-cli-integration-enabled',
   /** 测试 MCP 服务器连接 */
   TEST_MCP_SERVER: 'agent:test-mcp-server',
-  /** 启用或关闭 Proma 内置 MCP */
-  SET_BUILTIN_MCP_ENABLED: 'agent:set-builtin-mcp-enabled',
   /** 获取工作区 Skill 列表 */
   GET_SKILLS: 'agent:get-skills',
   /** 获取工作区 Skills 目录绝对路径 */

@@ -7,13 +7,10 @@
 
 import type { ToolCall, ToolResult } from '@proma/core'
 import type { WebContents } from 'electron'
-import type { FileAttachment } from '@proma/shared'
 import { CHAT_IPC_CHANNELS } from '@proma/shared'
-import { isWebSearchToolCall, executeWebSearchTool } from './chat-tools/web-search-tool'
 import { isCustomHttpToolCall, executeHttpTool } from './chat-tools/http-tool-executor'
+import type { FileAttachment } from '@proma/shared'
 import { isAgentRecommendToolCall, executeAgentRecommendTool } from './chat-tools/agent-recommend-tool'
-import { isNanoBananaToolCall, executeNanoBananaTool } from './chat-tools/nano-banana-tool'
-import type { NanoBananaContext } from './chat-tools/nano-banana-tool'
 import { isGptImageToolCall, executeGptImageTool } from './chat-tools/gpt-image-tool'
 import type { GptImageContext } from './chat-tools/gpt-image-tool'
 import { getChatToolsConfig } from './chat-tool-config'
@@ -24,11 +21,11 @@ export interface ToolExecutionContext {
   webContents: WebContents
   /** 对话 ID */
   conversationId: string
-  /** 当前用户消息的附件列表 */
+  /** 当前消息附件，供生图工具收集参考图 */
   currentAttachments?: FileAttachment[]
-  /** 前一轮用户消息的附件 */
+  /** 上一轮用户消息附件（参考图支持） */
   previousUserAttachments?: FileAttachment[]
-  /** 前一轮助手消息的附件 */
+  /** 上一轮助手消息附件（参考图支持） */
   previousAssistantAttachments?: FileAttachment[]
 }
 
@@ -50,18 +47,8 @@ export async function executeToolCalls(
   for (const tc of toolCalls) {
     let result: ToolResult
 
-    if (isWebSearchToolCall(tc.name)) {
-      result = await executeWebSearchTool(tc)
-    } else if (isAgentRecommendToolCall(tc.name)) {
+    if (isAgentRecommendToolCall(tc.name)) {
       result = await executeAgentRecommendTool(tc)
-    } else if (isNanoBananaToolCall(tc.name)) {
-      const nanoBananaContext: NanoBananaContext = {
-        conversationId: context.conversationId,
-        currentAttachments: context.currentAttachments,
-        previousUserAttachments: context.previousUserAttachments,
-        previousAssistantAttachments: context.previousAssistantAttachments,
-      }
-      result = await executeNanoBananaTool(tc, nanoBananaContext)
     } else if (isGptImageToolCall(tc.name)) {
       const gptImageContext: GptImageContext = {
         conversationId: context.conversationId,

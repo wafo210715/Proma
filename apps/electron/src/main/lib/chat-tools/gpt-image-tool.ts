@@ -114,7 +114,7 @@ export function isGptImageToolCall(toolName: string): boolean {
   return GPT_IMAGE_TOOL_NAMES.has(toolName)
 }
 
-/** Chat 模式工具执行上下文（与 NanoBananaContext 对齐） */
+/** Chat 模式工具执行上下文 */
 export interface GptImageContext {
   /** 对话 ID（用于保存附件） */
   conversationId: string

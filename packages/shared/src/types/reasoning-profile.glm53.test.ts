@@ -38,12 +38,14 @@ describe('GLM-5.3 reasoning profile（官方 low/high/max 语义）', () => {
     expect(profile && normalizeReasoningLevel(profile, 'high')).toBe('high')
   })
 
-  test('capability 不暴露 off，旧会话 off 被 clamp 到 low', () => {
+  test('capability 不暴露 off，旧会话 off 走通用归一到 high（GLM 实际运行走 profile 路径 off→low）', () => {
     const profile = resolveReasoningProfile({ modelId: 'glm-5.3', transport: 'openai-completions' })
     const capability = resolveReasoningCapability({ profile })
     expect(capability?.source).toBe('profile')
     expect(capability?.levels).not.toContain('off')
     expect(capability?.defaultLevel).toBe('max')
-    expect(normalizeReasoningCapabilityLevel(capability, 'off')).toBe('low')
+    // 上游 #1973：always-reason 无 off 档模型的通用 capability 路径将 off 归一到 high；
+    // GLM-5.3 有专属 profile，运行时 off 仍经 normalizeReasoningLevel 归一到 low。
+    expect(normalizeReasoningCapabilityLevel(capability, 'off')).toBe('high')
   })
 })

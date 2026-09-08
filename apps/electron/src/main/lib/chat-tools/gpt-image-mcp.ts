@@ -20,7 +20,7 @@ import { Type } from 'typebox'
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { AgentToolResult } from '@earendil-works/pi-agent-core'
 
-// ===== 参考图读取（授权目录校验，与 nano-banana-mcp 一致） =====
+// ===== 参考图读取（授权目录校验） =====
 
 /** 已知图片扩展名 → MIME 类型映射 */
 const EXT_TO_MIME: Record<string, string> = {
@@ -99,7 +99,7 @@ export interface PiGptImageToolsContext {
  * 1. saveAttachment → 前端附件卡片渲染；
  * 2. 写入 {agentCwd}/generated-images/ → Agent 后续引用与再编辑；
  * 3. 文本摘要列出落盘路径。
- * 与 nano-banana-mcp 相同，Pi tool result 保持纯文本，避免 base64 写入 transcript。
+ * Pi tool result 保持纯文本，避免 base64 写入 transcript。
  */
 async function executeAndBuildText(
   sessionId: string,

@@ -21,6 +21,7 @@ import { CornerDownLeft, Square, Settings, X, Copy, Check, Brain, Sparkles, List
 import { AgentMessages, type AgentHistoryQuoteNavigationRequest } from './AgentMessages'
 import { AgentHeader } from './AgentHeader'
 import { AgentMessageQueue } from './AgentMessageQueue'
+import { SkillMentionNamesProvider } from './SkillMentionNamesProvider'
 import { ContextUsageBadge } from './ContextUsageBadge'
 import { PermissionBanner } from './PermissionBanner'
 import { PermissionModeSelector } from './PermissionModeSelector'
@@ -869,39 +870,42 @@ export function AgentView({ sessionId, embedded = false }: AgentViewProps): Reac
 
   // 获取当前 session 的工作路径（文件浏览器需要）
   React.useEffect(() => {
+    let disposed = false
+
     if (!currentWorkspaceId) {
       setSessionPathMap((prev) => {
+        if (!prev.has(sessionId)) return prev
         const map = new Map(prev)
         map.delete(sessionId)
         return map
       })
-      return
+      return () => { disposed = true }
     }
 
+    // IPC 请求不可取消，用 effect 生命周期阻止旧工作区请求覆盖当前路径。
+    // 不在请求开始时清空已有路径，避免正常挂载时文件面板出现空窗。
     window.electronAPI
       .getAgentSessionPath(currentWorkspaceId, sessionId)
       .then((path) => {
-        if (path) {
-          setSessionPathMap((prev) => {
-            const map = new Map(prev)
-            map.set(sessionId, path)
-            return map
-          })
-        } else {
-          setSessionPathMap((prev) => {
-            const map = new Map(prev)
-            map.delete(sessionId)
-            return map
-          })
-        }
+        if (disposed) return
+        setSessionPathMap((prev) => {
+          const map = new Map(prev)
+          if (path) map.set(sessionId, path)
+          else map.delete(sessionId)
+          return map
+        })
       })
       .catch(() => {
+        if (disposed) return
         setSessionPathMap((prev) => {
+          if (!prev.has(sessionId)) return prev
           const map = new Map(prev)
           map.delete(sessionId)
           return map
         })
       })
+
+    return () => { disposed = true }
   }, [sessionId, currentWorkspaceId, setSessionPathMap])
 
   // 获取工作区共享文件目录路径（@ 引用时需要搜索）
@@ -2624,7 +2628,7 @@ export function AgentView({ sessionId, embedded = false }: AgentViewProps): Reac
         return map
       })
 
-      // 刷新预览面板的 diff（文件已被回退，当前显示的内容已过期）
+      // 对话已截断，刷新基于会话消息展示的 diff；当前回退不修改文件。
       store.set(agentDiffRefreshVersionAtom, (prev) => {
         const m = new Map(prev); m.set(sessionId, (prev.get(sessionId) ?? 0) + 1); return m
       })
@@ -3028,7 +3032,7 @@ export function AgentView({ sessionId, embedded = false }: AgentViewProps): Reac
   )
 
   return (
-    <>
+    <SkillMentionNamesProvider workspaceSlug={workspaceSlug}>
       <div
         className="flex h-full min-h-0 flex-1 min-w-0 flex-col overflow-hidden"
         onFocusCapture={() => {
@@ -3242,7 +3246,7 @@ export function AgentView({ sessionId, embedded = false }: AgentViewProps): Reac
         <AlertDialogHeader>
           <AlertDialogTitle>确认回退</AlertDialogTitle>
           <AlertDialogDescription>
-            回退将截断该消息之后的所有对话，并恢复文件到该时刻的状态。此操作不可撤销，确定要回退吗？
+            回退将截断该消息之后的所有对话。此操作不可撤销，确定要回退吗？
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
@@ -3273,6 +3277,6 @@ export function AgentView({ sessionId, embedded = false }: AgentViewProps): Reac
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
-    </>
+    </SkillMentionNamesProvider>
   )
 }

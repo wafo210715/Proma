@@ -5,7 +5,6 @@
  * - general: 通用设置
  * - channels: 渠道配置
  * - proxy: 代理配置
- * - tools: Chat 工具配置
  * - appearance: 外观设置
  * - about: 关于
  */
@@ -13,8 +12,8 @@
 import { atom } from 'jotai'
 import type { TabType } from './tab-atoms'
 
-export type SettingsTab = 'general' | 'channels' | 'vision-relay' | 'proxy' | 'appearance' | 'about' | 'onboarding' | 'prompts' | 'tools' | 'bots' | 'tutorial' | 'shortcuts' | 'voice-input' | 'migration' | 'storage'
-export type ToolSettingsFocus = 'web-search' | 'nano-banana' | 'gpt-image' | 'custom-tools'
+export type SettingsTab = 'general' | 'channels' | 'vision-relay' | 'proxy' | 'appearance' | 'about' | 'onboarding' | 'prompts' | 'tools' | 'bots' | 'shortcuts' | 'voice-input' | 'migration' | 'storage'
+export type ToolSettingsFocus = 'gpt-image' | 'custom-tools'
 
 /** 当前设置标签页（不持久化，每次打开设置默认显示渠道） */
 export const settingsTabAtom = atom<SettingsTab>('channels')
@@ -39,5 +38,7 @@ export interface SettingsSessionNavigation {
   type: TabType
   sessionId: string
   title: string
+  /** 导航经设置脏表单确认并真正执行后提交的调用方 intent。 */
+  onOpened?: () => void
 }
 export const settingsPendingSessionNavigationAtom = atom<SettingsSessionNavigation | null>(null)

@@ -2,7 +2,7 @@ import * as React from 'react'
 import { useAtom, useAtomValue, useSetAtom } from 'jotai'
 import { BookOpen, ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown, CircleHelp, Folder, FolderOpen, Loader2, Plus, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
-import type { VaultCandidate, VaultFileEntry, VaultFocus, VaultReadResult, VaultSummary } from '@proma/shared'
+import type { VaultCandidate, VaultFileEntry, VaultFocus, VaultReadResult, VaultSummary, VaultTreeEntry } from '@proma/shared'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -10,7 +10,11 @@ import { Input } from '@/components/ui/input'
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { resolveVaultWikiLink } from './vault-wikilinks'
 import { VaultLiveMarkdownEditor } from './VaultLiveMarkdownEditor'
+import { VaultNoteTitle } from './VaultNoteTitle'
+import { focusVaultBody } from './vault-title-focus'
+import { commitVaultTitle } from './vault-title-commit'
 import { useVaultScrollMemory } from './useVaultScrollMemory'
 import { getVaultScrollKey } from './vault-scroll-memory'
 import type { LiveMarkdownEditorHandle, LiveMarkdownTextSelection } from '@/components/markdown/LiveMarkdownEditor'
@@ -64,8 +68,12 @@ function displayDocumentTitle(filename: string): string {
   return filename.replace(/\.md$/i, '')
 }
 
+function isVaultFileNotFoundError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes('Vault 文件不存在:')
+}
+
 function VaultFileList({
-  files,
+  entries,
   selectedPath,
   focusedFolder,
   onSelect,
@@ -76,7 +84,7 @@ function VaultFileList({
   canCreate,
   treeAction,
 }: {
-  files: VaultFileEntry[]
+  entries: VaultTreeEntry[]
   selectedPath: string | null
   focusedFolder: string | null
   onSelect: (relativePath: string) => void
@@ -87,7 +95,7 @@ function VaultFileList({
   canCreate: boolean
   treeAction: { type: 'expand' | 'collapse'; version: number }
 }): React.ReactElement {
-  const tree = React.useMemo(() => buildVaultTree(files), [files])
+  const tree = React.useMemo(() => buildVaultTree(entries), [entries])
   const allFolderPaths = React.useMemo(() => {
     const paths: string[] = []
     const visit = (folder: VaultFolderNode): void => {
@@ -235,10 +243,12 @@ function VaultFileList({
     </>
   )
 
+  const hasEntries = entries.length > 0
+
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3 scrollbar-thin titlebar-no-drag">
-      {files.length === 0
-        ? <p className="px-4 py-6 text-center text-xs leading-relaxed text-muted-foreground">没有可显示的 Markdown 笔记</p>
+      {!hasEntries
+        ? <p className="px-4 py-6 text-center text-xs leading-relaxed text-muted-foreground">没有可显示的 Markdown 笔记或文件夹</p>
         : renderEntries(tree, 0)}
     </div>
   )
@@ -255,6 +265,11 @@ type VaultSaveResult =
   | { ok: false; reason: 'conflict' | 'error'; message?: string }
 
 type VaultEditorFlush = () => Promise<boolean>
+type VaultRename = (name: string, flush: VaultEditorFlush, shouldFocusBody?: () => boolean) => Promise<boolean>
+interface VaultBodyFocusRequest {
+  vaultId: string
+  relativePath: string
+}
 
 function VaultMarkdownEditor({
   readResult,
@@ -264,7 +279,10 @@ function VaultMarkdownEditor({
   onRename,
   onReload,
   onRegisterFlush,
+  bodyFocusRequest,
+  onBodyFocused,
   onOpenTutorial,
+  onOpenWikiLink,
 }: {
   readResult: VaultReadResult
   /** Stable renderer-safe identity of the currently authorized Vault. */
@@ -272,10 +290,13 @@ function VaultMarkdownEditor({
   /** 嵌入 Agent 右侧工作区时，用于接入 Agent 引用与右侧问答。 */
   sessionId?: string
   onSave: (request: VaultSaveRequest, options?: { silent?: boolean }) => Promise<VaultSaveResult>
-  onRename: (name: string) => Promise<void>
+  onRename: VaultRename
   onReload: () => void
   onRegisterFlush?: (flush: VaultEditorFlush | null) => void
+  bodyFocusRequest: VaultBodyFocusRequest | null
+  onBodyFocused: (request: VaultBodyFocusRequest) => void
   onOpenTutorial: () => void
+  onOpenWikiLink: (target: string) => void
 }): React.ReactElement {
   const documentController = React.useMemo(() => getVaultDocumentController(readResult, vaultId), [readResult.relativePath, vaultId])
   const documentSnapshot = React.useSyncExternalStore(
@@ -284,7 +305,6 @@ function VaultMarkdownEditor({
     documentController.getSnapshot,
   )
   const { draft, saving, conflict: saveConflict } = documentSnapshot
-  const [filename, setFilename] = React.useState(displayDocumentTitle(readResult.relativePath.split('/').pop() ?? readResult.relativePath))
   const editorPageRef = React.useRef<HTMLDivElement>(null)
   const [selection, setSelection] = React.useState<VaultTextSelection | null>(null)
   const openSelectionChatPendingRef = React.useRef(false)
@@ -303,10 +323,27 @@ function VaultMarkdownEditor({
   // view, a right-workspace tab, or the open note does not jump back to the top.
   const editorHandleRef = React.useRef<LiveMarkdownEditorHandle | null>(null)
   const getEditorView = React.useCallback(() => editorHandleRef.current?.getView() ?? null, [])
-  const { onEditorReady: handleEditorReady, takeOver: takeOverScrollRestore } = useVaultScrollMemory({
+  const { onEditorReady: restoreEditorScroll, takeOver: takeOverScrollRestore } = useVaultScrollMemory({
     getView: getEditorView,
     storageKey: getVaultScrollKey(vaultId, readResult.relativePath, sessionId),
   })
+
+  const [editorReady, setEditorReady] = React.useState(false)
+  const handleEditorReady = React.useCallback(() => {
+    restoreEditorScroll()
+    setEditorReady(true)
+  }, [restoreEditorScroll])
+
+  React.useEffect(() => {
+    if (!editorReady || !bodyFocusRequest || bodyFocusRequest.vaultId !== vaultId
+      || bodyFocusRequest.relativePath !== readResult.relativePath) return
+    const view = getEditorView()
+    if (!view) return
+    // 显式编辑意图优先于历史阅读位置恢复；只操作实际挂载的实例。
+    takeOverScrollRestore()
+    focusVaultBody(view)
+    onBodyFocused(bodyFocusRequest)
+  }, [bodyFocusRequest, editorReady, getEditorView, onBodyFocused, readResult.relativePath, takeOverScrollRestore, vaultId])
 
   const clearSelection = React.useCallback(() => setSelection(null), [])
   const handleTextSelectionChange = React.useCallback((nextSelection: LiveMarkdownTextSelection | null) => {
@@ -443,15 +480,8 @@ function VaultMarkdownEditor({
     void flushPendingSave()
   }, [flushPendingSave])
 
-  const rename = async (): Promise<void> => {
-    const currentName = displayDocumentTitle(readResult.relativePath.split('/').pop() ?? readResult.relativePath)
-    if (!filename.trim() || filename.trim() === currentName) {
-      setFilename(currentName)
-      return
-    }
-    if (!await flushPendingSave()) return
-    await onRename(filename.trim())
-  }
+  const commitTitle = (name: string, shouldFocusBody?: () => boolean): Promise<boolean> =>
+    onRename(name, flushPendingSave, shouldFocusBody)
 
   const copyLocalDraft = async (): Promise<void> => {
     try {
@@ -471,19 +501,9 @@ function VaultMarkdownEditor({
     >
       <div className="mx-auto flex h-full w-full max-w-5xl flex-col px-5 py-5">
         <div className="vault-note-editor-titlebar mb-5 flex min-w-0 items-center gap-2">
-          <input
-            aria-label="重命名笔记"
-            value={filename}
-            onChange={(event) => setFilename(event.target.value)}
-            onBlur={() => { void rename() }}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') event.currentTarget.blur()
-              if (event.key === 'Escape') {
-                setFilename(displayDocumentTitle(readResult.relativePath.split('/').pop() ?? readResult.relativePath))
-                event.currentTarget.blur()
-              }
-            }}
-            className="h-9 min-w-0 flex-1 bg-transparent px-0 text-2xl font-semibold leading-tight text-foreground outline-none placeholder:text-muted-foreground/50"
+          <VaultNoteTitle
+            title={displayDocumentTitle(readResult.relativePath.split('/').pop() ?? readResult.relativePath)}
+            onCommit={commitTitle}
           />
           {saveConflict && (
             <div className="flex shrink-0 items-center gap-1.5 text-xs text-destructive">
@@ -509,6 +529,7 @@ function VaultMarkdownEditor({
         <div className="min-h-0 flex-1">
           <VaultLiveMarkdownEditor
             ref={editorHandleRef}
+            onOpenWikiLink={onOpenWikiLink}
             relativePath={readResult.relativePath}
             value={draft}
             onChange={updateDraft}
@@ -541,7 +562,10 @@ function VaultMarkdownPane({
   onRename,
   onReload,
   onRegisterFlush,
+  bodyFocusRequest,
+  onBodyFocused,
   onOpenTutorial,
+  onOpenWikiLink,
 }: {
   readResult: VaultReadResult | null
   vaultId?: string
@@ -550,10 +574,13 @@ function VaultMarkdownPane({
   hasVault: boolean
   reopenVersion: number
   onSave: (request: VaultSaveRequest, options?: { silent?: boolean }) => Promise<VaultSaveResult>
-  onRename: (name: string) => Promise<void>
+  onRename: VaultRename
   onReload: () => void
   onRegisterFlush: (flush: VaultEditorFlush | null) => void
+  bodyFocusRequest: VaultBodyFocusRequest | null
+  onBodyFocused: (request: VaultBodyFocusRequest) => void
   onOpenTutorial: () => void
+  onOpenWikiLink: (target: string) => void
 }): React.ReactElement {
   if (loading || !readResult || !vaultId) {
     return (
@@ -584,7 +611,10 @@ function VaultMarkdownPane({
           onRename={onRename}
           onReload={onReload}
           onRegisterFlush={onRegisterFlush}
+          bodyFocusRequest={bodyFocusRequest}
+          onBodyFocused={onBodyFocused}
           onOpenTutorial={onOpenTutorial}
+          onOpenWikiLink={onOpenWikiLink}
         />
       </VaultContentErrorBoundary>
     </section>
@@ -595,10 +625,36 @@ export function VaultView({ embedded = false, sessionId }: { embedded?: boolean;
   const vaultSidebarContentId = React.useId()
   const vaultSessionScope = getVaultSessionScope(sessionId)
   const [config, setConfig] = React.useState<VaultSummary | null>(null)
+  const mountedRef = React.useRef(true)
+  React.useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+  const vaultIdRef = React.useRef(config?.vaultId)
+  vaultIdRef.current = config?.vaultId
+  const [bodyFocusRequest, setBodyFocusRequest] = React.useState<VaultBodyFocusRequest | null>(null)
+  const consumeBodyFocus = React.useCallback((request: VaultBodyFocusRequest) => {
+    setBodyFocusRequest((current) => current === request ? null : current)
+  }, [])
+  React.useEffect(() => {
+    if (!bodyFocusRequest) return
+    if (bodyFocusRequest.vaultId !== config?.vaultId) {
+      consumeBodyFocus(bodyFocusRequest)
+      return
+    }
+    // 新编辑器异步挂载期间用户已经转向其他控件，就不再抢回焦点。
+    const cancel = (): void => consumeBodyFocus(bodyFocusRequest)
+    window.addEventListener('pointerdown', cancel, true)
+    window.addEventListener('keydown', cancel, true)
+    return () => {
+      window.removeEventListener('pointerdown', cancel, true)
+      window.removeEventListener('keydown', cancel, true)
+    }
+  }, [bodyFocusRequest, config?.vaultId, consumeBodyFocus])
   const [candidates, setCandidates] = React.useState<VaultCandidate[]>([])
   const [vaultSwitcherOpen, setVaultSwitcherOpen] = React.useState(false)
   const [candidatesLoading, setCandidatesLoading] = React.useState(false)
-  const [files, setFiles] = React.useState<VaultFileEntry[]>([])
+  const [entries, setEntries] = React.useState<VaultTreeEntry[]>([])
   const [loading, setLoading] = React.useState(true)
   const [fileLoading, setFileLoading] = React.useState(false)
   const [editorReopenVersion, setEditorReopenVersion] = React.useState(0)
@@ -627,6 +683,7 @@ export function VaultView({ embedded = false, sessionId }: { embedded?: boolean;
   // "opened note cannot be refreshed" error.
   const selectFile = React.useCallback((relativePath: string | null): void => {
     selectedFileRef.current = relativePath
+    setBodyFocusRequest(null)
     setSelectedFile(relativePath)
   }, [setSelectedFile])
   // Start from wall-clock time so a remounted workspace tab still supersedes an older IPC snapshot.
@@ -708,14 +765,14 @@ export function VaultView({ embedded = false, sessionId }: { embedded?: boolean;
     try {
       const nextConfig = await window.electronAPI.getVaultConfig()
       setConfig(nextConfig)
-      const nextFiles = nextConfig ? await window.electronAPI.listVaultFiles() : []
-      setFiles((current) => hasSameVaultTreeEntries(current, nextFiles) ? current : nextFiles)
+      const nextEntries = nextConfig ? await window.electronAPI.listVaultFiles() : []
+      setEntries((current) => hasSameVaultTreeEntries(current, nextEntries) ? current : nextEntries)
       if (!nextConfig) {
         selectFile(null)
         setReadResult(null)
       } else if (selectedFileRef.current) {
         const relativePath = selectedFileRef.current
-        if (!nextFiles.some((file) => file.relativePath === relativePath)) {
+        if (!nextEntries.some((entry) => entry.kind === 'file' && entry.relativePath === relativePath)) {
           selectFile(null)
           setReadResult(null)
           toast.message('已打开的笔记不存在')
@@ -729,6 +786,9 @@ export function VaultView({ embedded = false, sessionId }: { embedded?: boolean;
           if (requestId === readRequestRef.current) {
             toast.error(error instanceof Error ? error.message : '无法刷新已打开的笔记')
           }
+        } finally {
+          // 刷新可能接管尚未完成的导航读取，也负责结束该请求的加载态。
+          if (requestId === readRequestRef.current) setFileLoading(false)
         }
       }
     } catch (error) {
@@ -807,13 +867,26 @@ export function VaultView({ embedded = false, sessionId }: { embedded?: boolean;
       }
     } catch (error) {
       if (requestId === readRequestRef.current) {
+        // The tree can be stale when a note is deleted or renamed outside this
+        // renderer. Refresh it once so the unavailable note is removed.
+        if (isVaultFileNotFoundError(error)) void refresh()
         toast.error(error instanceof Error ? error.message : '无法打开笔记')
         setReadResult(null)
       }
     } finally {
       if (requestId === readRequestRef.current) setFileLoading(false)
     }
-  }, [flushCurrentEditor, selectFile, setReadResult])
+  }, [flushCurrentEditor, refresh, selectFile, setReadResult])
+
+  const openWikiLink = React.useCallback((target: string): void => {
+    if (!readResult) return
+    const path = resolveVaultWikiLink(target, readResult.relativePath, entries.filter((entry) => entry.kind === 'file').map((entry) => entry.relativePath))
+    if (!path) {
+      toast.error(`无法定位笔记“${target}”，请检查名称或使用完整的 Vault 内路径`)
+      return
+    }
+    void openFile(path)
+  }, [entries, readResult, openFile])
 
   const selectVaultManually = async (): Promise<void> => {
     if (!await flushCurrentEditor()) return
@@ -898,6 +971,10 @@ export function VaultView({ embedded = false, sessionId }: { embedded?: boolean;
       const relativePath = newFolderParentPath ? `${newFolderParentPath}/${name}` : name
       await window.electronAPI.createVaultFolder(relativePath)
       setNewFolderParentPath(null)
+      // Reveal the new folder even when its parent was collapsed. The same
+      // focus is sent to the Agent so the sidebar and session context agree.
+      setFocusedFolder(relativePath)
+      updateAgentFocus({ kind: 'folder', relativePath })
       setRefreshToken((value) => value + 1)
       toast.success(`已创建文件夹 ${name}`)
     } catch (error) {
@@ -920,8 +997,8 @@ export function VaultView({ embedded = false, sessionId }: { embedded?: boolean;
         sha256: result.sha256,
         modifiedAt: result.modifiedAt,
       } : previous)
-      const nextFiles = await window.electronAPI.listVaultFiles()
-      setFiles((current) => hasSameVaultTreeEntries(current, nextFiles) ? current : nextFiles)
+      const nextEntries = await window.electronAPI.listVaultFiles()
+      setEntries((current) => hasSameVaultTreeEntries(current, nextEntries) ? current : nextEntries)
       if (!silent) toast.success(`已保存到 ${VAULT_NAME}`)
       return result
     } catch (error) {
@@ -929,23 +1006,35 @@ export function VaultView({ embedded = false, sessionId }: { embedded?: boolean;
     }
   }, [setReadResult])
 
-  const rename = async (name: string): Promise<void> => {
-    if (!readResult) return
+  const rename: VaultRename = async (name, flush, shouldFocusBody) => {
+    if (!readResult || !config) return false
+    const vaultId = config.vaultId
+    const relativePath = readResult.relativePath
+    const isVaultCurrent = (): boolean => mountedRef.current && vaultIdRef.current === vaultId
     try {
-      // Re-read after the editor flushes so rename validates the revision that
-      // is actually on disk rather than a stale render snapshot.
-      const current = await window.electronAPI.readVaultFile(readResult.relativePath)
-      const renamed = await window.electronAPI.renameVaultFile({
-        relativePath: current.relativePath,
-        name,
-        expectedSha256: current.sha256,
+      const result = await commitVaultTitle({
+        name, title: displayDocumentTitle(relativePath.split('/').pop() ?? relativePath), relativePath, flush,
+        isVaultCurrent,
+        isNoteCurrent: () => selectedFileRef.current === relativePath,
+        read: (path) => window.electronAPI.readVaultFile(path),
+        rename: (input) => window.electronAPI.renameVaultFile(input),
       })
-      selectFile(renamed.relativePath)
-      setReadResult(renamed)
-      setRefreshToken((value) => value + 1)
-      toast.success('已重命名笔记')
+      if (!result || !isVaultCurrent()) return false
+      if (result.isNoteCurrent && selectedFileRef.current === relativePath) {
+        if (result.renamed) {
+          selectFile(result.renamed.relativePath)
+          setReadResult(result.renamed)
+        }
+        if (shouldFocusBody?.()) setBodyFocusRequest({ vaultId, relativePath: result.renamed?.relativePath ?? relativePath })
+      }
+      if (result.renamed) {
+        setRefreshToken((value) => value + 1)
+        toast.success('已重命名笔记')
+      }
+      return true
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '无法重命名笔记')
+      if (isVaultCurrent()) toast.error(error instanceof Error ? error.message : '无法重命名笔记')
+      return false
     }
   }
 
@@ -1077,7 +1166,7 @@ export function VaultView({ embedded = false, sessionId }: { embedded?: boolean;
                 </div>
               </header>
               <VaultFileList
-                files={files}
+                entries={entries}
                 selectedPath={selectedFile}
                 focusedFolder={focusedFolder}
                 onSelect={(path) => { setFocusedFolder(null); void openFile(path) }}
@@ -1169,7 +1258,10 @@ export function VaultView({ embedded = false, sessionId }: { embedded?: boolean;
             onRename={rename}
             onReload={() => { if (readResult) void openFile(readResult.relativePath, { discardLocalDraft: true, forceReopen: true }) }}
             onRegisterFlush={registerEditorFlush}
+            bodyFocusRequest={bodyFocusRequest}
+            onBodyFocused={consumeBodyFocus}
             onOpenTutorial={() => setVaultHelpOpen(true)}
+            onOpenWikiLink={openWikiLink}
           />
         </div>
       </main>
