@@ -12,7 +12,7 @@
  */
 
 import * as React from 'react'
-import { Bot, Loader2, AlertTriangle, FileText, FileImage, Download, Split, Undo2, RotateCw, Plus, Minimize2, Wrench, Settings, Cpu, ExternalLink, Quote, Clock, FolderInput, FolderPlus, ListTodo } from 'lucide-react'
+import { Bot, Loader2, AlertTriangle, FileText, FileImage, Download, Split, Undo2, RotateCw, Plus, Minimize2, Wrench, Settings, Cpu, ExternalLink, Quote, Clock, FolderInput, FolderPlus, ListTodo, Eye, EyeOff } from 'lucide-react'
 import { useAtomValue, useSetAtom } from 'jotai'
 import { cn } from '@/lib/utils'
 import { ImageLightbox, type LightboxImage } from '@/components/ui/image-lightbox'
@@ -873,8 +873,23 @@ function AttachedFileChip({ file }: { file: AttachedFileRef }): React.ReactEleme
 
 
 /** 引用文件 Chip（显示在用户消息中，表示该消息引用了某个文件的选中内容） */
-function QuoteChip({ quote }: { quote: QuotedFileRef }): React.ReactElement {
+function QuoteChip({ quote, expanded }: { quote: QuotedFileRef; expanded?: boolean }): React.ReactElement {
   const label = quote.label ?? quote.filename
+  // 展开态：显示引用全文（预览/Vault 选区的原文），超长内部滚动。
+  if (expanded && quote.text) {
+    const charCount = Array.from(quote.text).length
+    return (
+      <div className="w-full rounded-md bg-primary/8 border border-primary/20 px-2.5 py-1.5 text-[13px]">
+        <div className="mb-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <Quote className="size-3.5 shrink-0 text-primary/60" />
+          <span className="truncate">{label} · {charCount} 字</span>
+        </div>
+        <div className="max-h-[160px] overflow-y-auto scrollbar-thin whitespace-pre-wrap break-words text-[13px] font-medium leading-relaxed text-foreground/80 [overflow-wrap:anywhere]">
+          {quote.text}
+        </div>
+      </div>
+    )
+  }
   return (
     <div className="inline-flex items-center gap-1.5 rounded-md bg-primary/8 border border-primary/20 px-2.5 py-1 text-[12px] text-muted-foreground">
       <Quote className="size-3.5 shrink-0 text-primary/60" />
@@ -970,6 +985,9 @@ function UserInputMessage({ message, onAgentHistoryQuoteClick }: {
   // 共享大图预览状态（多图可左右翻页）
   const [lightboxOpen, setLightboxOpen] = React.useState(false)
   const [lightboxIndex, setLightboxIndex] = React.useState(0)
+  // 引用展开态：默认短摘要，复制按钮旁的"眼睛"开关切换为全文
+  const [quotesExpanded, setQuotesExpanded] = React.useState(false)
+  const hasQuoteRefs = quotes.length > 0 || text.includes('&quote:')
   // 各图加载好的 src（key = file.path）——缩略图渲染时已加载，翻页复用不再触发 IO
   const [loadedSrcs, setLoadedSrcs] = React.useState<Record<string, string>>({})
 
@@ -1018,7 +1036,7 @@ function UserInputMessage({ message, onAgentHistoryQuoteClick }: {
             {quotes
               .filter((quote) => quote.sourceType !== 'agent-history')
               .map((q, i) => (
-                <QuoteChip key={`${q.path}:${i}`} quote={q} />
+                <QuoteChip key={`${q.path}:${i}`} quote={q} expanded={quotesExpanded} />
               ))}
           </div>
         )}
@@ -1045,7 +1063,10 @@ function UserInputMessage({ message, onAgentHistoryQuoteClick }: {
           </div>
         )}
         {text && (
-          <UserMessageContent onAgentHistoryQuoteClick={onAgentHistoryQuoteClick}>
+          <UserMessageContent
+            onAgentHistoryQuoteClick={onAgentHistoryQuoteClick}
+            agentHistoryQuotesExpanded={quotesExpanded}
+          >
             {text}
           </UserMessageContent>
         )}
@@ -1063,6 +1084,15 @@ function UserInputMessage({ message, onAgentHistoryQuoteClick }: {
       {text && (
         <MessageActions className="pl-[46px] mt-0.5">
           <CopyButton content={replaceAgentHistoryQuoteMentionsWithLabels(text)} />
+          {hasQuoteRefs && (
+            <MessageAction
+              tooltip={quotesExpanded ? '收起引用' : '展开引用全文'}
+              label={quotesExpanded ? '收起引用' : '展开引用全文'}
+              onClick={() => setQuotesExpanded((prev) => !prev)}
+            >
+              {quotesExpanded ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+            </MessageAction>
+          )}
         </MessageActions>
       )}
     </Message>

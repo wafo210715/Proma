@@ -40,7 +40,7 @@ import { LoadingIndicator } from '@/components/ui/loading-indicator'
 import { CodeBlock, MermaidBlock } from '@proma/ui'
 import { detectLanguage } from '@proma/core'
 import { FilePathChip, isAbsoluteFilePath, isImageFilePath, isLocalFileReference, isRelativeFilePath } from './file-path-chip'
-import { buildAgentHistoryQuoteLabel, parseAgentHistoryQuoteMention } from '@/lib/quoted-selection'
+import { buildAgentHistoryQuoteLabel, buildQuotedSelectionChipMeta, parseAgentHistoryQuoteMention } from '@/lib/quoted-selection'
 import { createMentionPattern } from '@/lib/mention-patterns'
 import { resolveSkillMentionName } from '@/lib/skill-mention-name'
 import { useSkillMentionNames } from '@/components/agent/SkillMentionNamesProvider'
@@ -292,6 +292,8 @@ interface MessagePathResolutionContext {
 
 const BasePathsContext = React.createContext<MessagePathResolutionContext | undefined>(undefined)
 const AgentHistoryQuoteClickContext = React.createContext<((quote: QuotedSelection) => void) | undefined>(undefined)
+/** 已发送消息内引用 chip 的展开态：默认短摘要，由消息级"眼睛"开关切换。 */
+const AgentHistoryQuoteExpandedContext = React.createContext<boolean>(false)
 
 /** 提供会话与附加目录候选给所有内嵌的 MessageResponse。 */
 export function BasePathsProvider({ basePaths, sessionId, children }: MessagePathResolutionContext & { children: React.ReactNode }): React.ReactElement {
@@ -359,6 +361,7 @@ function MentionChip({ type, value }: { type: MentionType; value: string }): Rea
   const pathResolutionContext = React.useContext(BasePathsContext)
   const contextBasePaths = pathResolutionContext?.basePaths
   const onAgentHistoryQuoteClick = React.useContext(AgentHistoryQuoteClickContext)
+  const agentHistoryQuotesExpanded = React.useContext(AgentHistoryQuoteExpandedContext)
 
   if (type === 'quote') {
     const quote = parseAgentHistoryQuoteMention(`&quote:${value}`)
@@ -372,6 +375,29 @@ function MentionChip({ type, value }: { type: MentionType; value: string }): Rea
         && quote.selectionEnd != null
         && quote.selectionEnd > quote.selectionStart,
     )
+    // 展开态：直接显示引用全文（来源 · 字数 meta + 正文，超长内部滚动），
+    // 与输入框 chip 同套视觉；点击仍可跳转高亮。
+    if (agentHistoryQuotesExpanded) {
+      return (
+        <button
+          type="button"
+          onClick={canNavigate ? () => onAgentHistoryQuoteClick?.(quote) : undefined}
+          className={cn(
+            'my-1 flex w-full max-w-full flex-col items-start rounded-md bg-primary/[0.08] px-2 py-1.5 text-left',
+            canNavigate ? 'cursor-pointer hover:bg-primary/[0.14]' : 'cursor-default',
+          )}
+          title={canNavigate ? '点击跳转到原消息并高亮引用内容' : undefined}
+        >
+          <span className="mb-1 inline-flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+            <Icon className="size-3 shrink-0" />
+            {buildQuotedSelectionChipMeta(quote)}
+          </span>
+          <span className="max-h-[160px] w-full overflow-y-auto scrollbar-thin whitespace-pre-wrap break-words text-[13px] font-medium leading-relaxed text-foreground/80 [overflow-wrap:anywhere]">
+            {quote.text}
+          </span>
+        </button>
+      )
+    }
     return (
       <button
         type="button"
@@ -382,7 +408,7 @@ function MentionChip({ type, value }: { type: MentionType; value: string }): Rea
           style.className,
           canNavigate ? 'cursor-pointer hover:bg-primary/[0.16]' : 'cursor-default',
         )}
-        title={canNavigate ? '点击跳转到原消息并高亮引用内容' : buildAgentHistoryQuoteLabel(quote)}
+        title={canNavigate ? `点击跳转到原消息并高亮引用内容 · ${buildQuotedSelectionChipMeta(quote)}` : buildAgentHistoryQuoteLabel(quote)}
       >
         <Icon className="size-3 inline shrink-0" />
         {buildAgentHistoryQuoteLabel(quote)}
@@ -823,6 +849,8 @@ const USER_REMARK_PLUGINS: RemarkPluginFn[] = [remarkMentions, remarkPreserveBre
 interface UserMessageContentProps extends HTMLAttributes<HTMLDivElement> {
   children: string
   onAgentHistoryQuoteClick?: (quote: QuotedSelection) => void
+  /** 展开消息内的引用 chip 为全文（由消息操作区的"眼睛"开关控制）。 */
+  agentHistoryQuotesExpanded?: boolean
 }
 
 /**
@@ -831,7 +859,7 @@ interface UserMessageContentProps extends HTMLAttributes<HTMLDivElement> {
  * - 点击展开/收起，底部使用低对比度文字提示
  */
 export const UserMessageContent = React.memo(
-  function UserMessageContent({ children, onAgentHistoryQuoteClick, className, ...props }: UserMessageContentProps): React.ReactElement {
+  function UserMessageContent({ children, onAgentHistoryQuoteClick, agentHistoryQuotesExpanded = false, className, ...props }: UserMessageContentProps): React.ReactElement {
     const [isExpanded, setIsExpanded] = React.useState(false)
     const [shouldCollapse, setShouldCollapse] = React.useState(false)
     const contentRef = React.useRef<HTMLDivElement>(null)
@@ -869,7 +897,9 @@ export const UserMessageContent = React.memo(
           )}
         >
           <AgentHistoryQuoteClickContext.Provider value={onAgentHistoryQuoteClick}>
-            <MessageResponse className="prose-p:my-0.5 prose-headings:my-1.5" remarkPlugins={USER_REMARK_PLUGINS}>{children}</MessageResponse>
+            <AgentHistoryQuoteExpandedContext.Provider value={agentHistoryQuotesExpanded}>
+              <MessageResponse className="prose-p:my-0.5 prose-headings:my-1.5" remarkPlugins={USER_REMARK_PLUGINS}>{children}</MessageResponse>
+            </AgentHistoryQuoteExpandedContext.Provider>
           </AgentHistoryQuoteClickContext.Provider>
         </div>
         {shouldCollapse && (

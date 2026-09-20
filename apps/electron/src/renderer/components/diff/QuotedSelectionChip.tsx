@@ -1,8 +1,9 @@
 /**
  * QuotedSelectionChip — 引用选中文本的 Chip 标签
  *
- * 显示在 Agent 输入框上方，展示预览面板中选中的文本片段及来源文件。
- * 点击 X 按钮可移除引用。
+ * 显示在 Chat 输入框上方，展示预览面板 / Vault 中选中的文本及来源。
+ * 正文全量展示（保留换行），超长时在 chip 内部滚动；来源行带字符数，
+ * 让用户能确认引用内容完整（字数为码点口径，与发送内容一致）。
  */
 
 import * as React from 'react'
@@ -10,7 +11,7 @@ import { X, Quote } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 interface QuotedSelectionChipProps {
-  /** 选中的文本（截断显示） */
+  /** 选中的文本（完整内容） */
   text: string
   /** 来源文件路径（截断显示） */
   filePath: string
@@ -19,13 +20,6 @@ interface QuotedSelectionChipProps {
   /** 移除回调 */
   onRemove: () => void
   className?: string
-}
-
-function truncateText(text: string, maxLen: number = 80): string {
-  const singleLine = text.replace(/\s+/g, ' ').trim()
-  return singleLine.length > maxLen
-    ? singleLine.slice(0, maxLen - 3) + '...'
-    : singleLine
 }
 
 function truncatePath(filePath: string, maxLen: number = 40): string {
@@ -46,6 +40,9 @@ export function QuotedSelectionChip({
     onRemove()
   }, [onRemove])
 
+  // 码点口径与 lib/quoted-selection 的 label 保持一致（emoji 计 1）。
+  const charCount = React.useMemo(() => Array.from(text).length, [text])
+
   return (
     <div
       className={cn(
@@ -58,11 +55,11 @@ export function QuotedSelectionChip({
     >
       <Quote className="size-4 shrink-0 mt-0.5 text-primary/60" />
       <div className="flex flex-col min-w-0">
-        <span className="text-foreground/80 line-clamp-2 leading-snug break-words [overflow-wrap:anywhere]">
-          {truncateText(text)}
+        <span className="whitespace-pre-wrap break-words leading-snug [overflow-wrap:anywhere] max-h-[160px] overflow-y-auto scrollbar-thin text-foreground/80">
+          {text}
         </span>
         <span className="text-[11px] text-muted-foreground/60 mt-0.5 break-words [overflow-wrap:anywhere]">
-          {sourceLabel ?? truncatePath(filePath)}
+          {(sourceLabel ?? truncatePath(filePath)) + ` · ${charCount} 字`}
         </span>
       </div>
       <button

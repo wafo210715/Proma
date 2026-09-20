@@ -5,6 +5,8 @@ export interface ParsedQuotedSelectionRef {
   filename: string
   sourceType: QuotedSelectionSourceType
   label?: string
+  /** 引用块内的完整正文，供展开全量时使用（旧格式解析失败时可能缺失）。 */
+  text?: string
   /** 可恢复定位的 Agent 历史引用元数据。 */
   quote?: QuotedSelection
 }
@@ -143,11 +145,27 @@ function parseAgentHistoryQuotePayload(payload: string): QuotedSelection | null 
   }
 }
 
+/** 短摘要预览的码点数；超出部分用省略号提示还有更多。 */
+const LABEL_PREVIEW_CODE_POINTS = 20
+const ELLIPSIS = '…'
+
+/** 按码点计数（汉字/英文字母/emoji 均为 1），与用户对"字数"的直觉一致。 */
+function countCodePoints(value: string): number {
+  return Array.from(value).length
+}
+
+function buildPreviewWithCount(prefix: string, text: string): string {
+  const characters = Array.from(text.replace(/\s+/g, ' ').trim())
+  const total = countCodePoints(text)
+  const preview = characters.slice(0, LABEL_PREVIEW_CODE_POINTS).join('')
+  const ellipsis = characters.length > LABEL_PREVIEW_CODE_POINTS ? ELLIPSIS : ''
+  return `${prefix} · ${total} 字 · ${preview}${ellipsis}`
+}
+
 /** 构建内联 Agent 历史引用 chip 的固定展示文案。 */
 export function buildAgentHistoryQuoteLabel(quote: Pick<QuotedSelection, 'text' | 'turn'>): string {
-  const preview = Array.from(quote.text.replace(/\s+/g, ' ').trim()).slice(0, 25).join('')
   const prefix = isPositiveInteger(quote.turn) ? `第${quote.turn}轮` : '历史引用'
-  return `${prefix}：${preview}`
+  return buildPreviewWithCount(prefix, quote.text)
 }
 
 /** 将可定位的 Agent 历史选区编码为 TipTap 草稿和队列使用的内联 marker。 */
@@ -189,8 +207,18 @@ export function serializeQuotedSelectionMention(quote: QuotedSelection): string 
 export function buildQuotedSelectionLabel(quote: QuotedSelection): string {
   if (quote.sourceType === 'agent-history') return buildAgentHistoryQuoteLabel(quote)
   const filename = (quote.sourceLabel ?? quote.filePath).split(/[\\/]/).pop() || quote.filePath
-  const preview = Array.from(quote.text.replace(/\s+/g, ' ').trim()).slice(0, 25).join('')
-  return `${filename}：${preview}`
+  return buildPreviewWithCount(filename, quote.text)
+}
+
+/** 全量展示 chip 的 meta 行：来源 · 字数（码点口径，与 label 一致）。 */
+export function buildQuotedSelectionChipMeta(quote: QuotedSelection): string {
+  const count = countCodePoints(quote.text)
+  if (quote.sourceType === 'agent-history') {
+    const prefix = isPositiveInteger(quote.turn) ? `第${quote.turn}轮` : '历史引用'
+    return `${prefix} · ${count} 字`
+  }
+  const filename = (quote.sourceLabel ?? quote.filePath).split(/[\\/]/).pop() || quote.filePath
+  return `${filename} · ${count} 字`
 }
 
 /** 为已发送消息生成展示用历史引用 marker，允许缺少旧版本的定位字段。 */
@@ -315,10 +343,13 @@ export function parseQuotedSelectionRefs(
     const pathMatch = quoteMatch[0].match(/path="([^"]*)"/)
     if (!pathMatch) continue
     const filePath = decodeXmlAttribute(pathMatch[1]!)
+    // 正文提取：供已发送消息"展开引用全文"使用；旧消息格式失败时保持仅文件名展示。
+    const bodyMatch = quoteMatch[0].match(/\n([\s\S]*?)\n<\/quoted_file>/)
     quotes.push({
       path: filePath,
       filename: filePath.split('/').pop() ?? filePath,
       sourceType: 'file',
+      ...(bodyMatch?.[1] && { text: bodyMatch[1] }),
     })
   }
 
@@ -365,6 +396,7 @@ export function parseQuotedSelectionRefs(
       filename: label,
       sourceType,
       label,
+      ...(quoteBodyMatch?.[1] && { text: quoteBodyMatch[1] }),
       ...(quote && { quote }),
     })
   }

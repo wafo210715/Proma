@@ -38,6 +38,7 @@ import {
 import type { QuotedSelection } from '@/atoms/preview-atoms'
 import {
   buildAgentHistoryQuoteLabel,
+  buildQuotedSelectionChipMeta,
   buildQuotedSelectionLabel,
   parseAgentHistoryQuoteMention,
   parseQuotedSelectionMention,
@@ -641,6 +642,34 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
             else if (char === '/') chipClass = 'skill-mention-chip'
             else if (char === '#') chipClass = 'mcp-mention-chip'
             else if (char === '&') chipClass = 'session-mention-chip'
+            // 引用 chip 直接展示完整引用文本（meta = 来源 · 字数），单 span 内联，
+            // 像高亮文本一样随输入流自然折行（box-decoration-break: clone 保证每行背景完整）。
+            // 发送序列化只读 data-mention-quote 属性（markdown-rich-text.ts），
+            // 这里的可见文本不影响发送内容；renderText 仍返回短 label。
+            if (quotePayload && quotedSelection) {
+              return [
+                'span',
+                {
+                  'data-type': 'mention',
+                  'data-id': node.attrs.id,
+                  'data-label': node.attrs.label,
+                  'data-mention-suggestion-char': char,
+                  ...(quotePayload ? { 'data-mention-quote': quotePayload } : {}),
+                  ...(isNavigableHistoryQuote
+                    ? {
+                        title: '跳转到引用位置并高亮',
+                        role: 'button',
+                        tabindex: '0',
+                        'aria-label': `跳转到${label}的引用位置并高亮`,
+                      }
+                    : {}),
+                  ...(node.attrs.commandMenuMention ? { 'data-command-menu-mention': 'true' } : {}),
+                  class: chipClass,
+                },
+                ['span', { class: 'agent-history-quote-chip-meta' }, buildQuotedSelectionChipMeta(quotedSelection)],
+                ['span', { class: 'agent-history-quote-chip-text' }, quotedSelection.text],
+              ]
+            }
             return [
               'span',
               {
@@ -1491,12 +1520,22 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
           padding: 1px 4px 1px 2px;
           font-size: 13px;
           font-weight: 500;
-          white-space: nowrap;
-          display: inline-flex;
-          align-items: center;
-          gap: 2px;
+          display: inline;
+          max-width: 100%;
           vertical-align: baseline;
           cursor: pointer;
+          /* 折行时每行都画出完整内边距与圆角，像高亮文本一样连续 */
+          -webkit-box-decoration-break: clone;
+          box-decoration-break: clone;
+        }
+        .agent-history-quote-chip-meta {
+          opacity: 0.7;
+          margin-right: 4px;
+        }
+        /* 引用全文：保留内部换行、顶到边框自然折行、长 token 不撑破容器；字重与整颗 chip 一致 */
+        .agent-history-quote-chip-text {
+          white-space: pre-wrap;
+          overflow-wrap: anywhere;
         }
         .agent-history-quote-chip:hover {
           background-color: hsl(var(--primary) / 0.2);
@@ -1510,11 +1549,12 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
           display: inline-block;
           width: 12px;
           height: 12px;
+          margin-right: 3px;
+          vertical-align: -1px;
           background-color: currentColor;
           mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 21c3 0 7-1 7-8V5H3v8h4c0 1.1-.9 2-2 2H3z'/%3E%3Cpath d='M14 21c3 0 7-1 7-8V5h-7v8h4c0 1.1-.9 2-2 2h-2z'/%3E%3C/svg%3E");
           mask-size: contain;
           mask-repeat: no-repeat;
-          flex-shrink: 0;
         }
       `}</style>
     </div>
