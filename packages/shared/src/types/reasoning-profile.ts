@@ -52,7 +52,7 @@ export interface ReasoningEncoding {
 }
 
 export interface ReasoningProfile {
-  id: 'deepseek-v4-flash' | 'deepseek-v4-pro' | 'kimi-k3' | 'glm-5.2' | 'glm-5.3' | 'openai-reasoning-standard' | 'openai-reasoning-max' | 'openai-reasoning-astra'
+  id: 'deepseek-v4-flash' | 'deepseek-v4-pro' | 'kimi-k3' | 'glm-5.2' | 'glm-5.3' | 'claude-opus-5-5' | 'openai-reasoning-standard' | 'openai-reasoning-max' | 'openai-reasoning-astra'
   levels: readonly AgentThinkingLevel[]
   defaultLevel: AgentThinkingLevel
   normalize(level: AgentThinkingLevel | undefined): AgentThinkingLevel
@@ -229,6 +229,42 @@ function normalizeGlm53Level(level: AgentThinkingLevel | undefined): AgentThinki
   }
 }
 
+/**
+ * Claude Opus 5.5 官方语义（platform.claude.com，2026-09-22 发布）：adaptive 思考常开，
+ * `thinking:{type:'disabled'}` 与旧版 `{type:'enabled',budget_tokens}` 均返回 400；
+ * 深度仅由 `output_config.effort` 控制，五档（low/medium/high/xhigh/max）全支持，
+ * 官方默认 medium（其余 Claude 默认 high）。因此不暴露 off 档，off/minimal 归一到
+ * 最轻的 low 档（对齐 GLM-5.3「官方不允许关闭 → 归一最轻档」的先例，官方迁移指引
+ * 也是「以前关思考的地方改用低 effort」）。
+ */
+const CLAUDE_OPUS_55_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const satisfies readonly AgentThinkingLevel[]
+const CLAUDE_OPUS_55_EFFORT_MAP: ReasoningEffortMap = {
+  minimal: 'low',
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+  xhigh: 'xhigh',
+  max: 'max',
+}
+
+function normalizeClaudeOpus55Level(level: AgentThinkingLevel | undefined): AgentThinkingLevel {
+  switch (level) {
+    case 'off':
+    case 'minimal':
+      // 思考无法关闭；off/minimal 归一到最轻的 low 档。
+      return 'low'
+    case 'low':
+    case 'medium':
+    case 'high':
+    case 'xhigh':
+    case 'max':
+      return level
+    default:
+      // undefined：用户未选过档位，与官方默认及 defaultLevel(medium) 对齐（同 GLM-5.3）。
+      return 'medium'
+  }
+}
+
 function normalizeOpenAIStandardLevel(level: AgentThinkingLevel | undefined): AgentThinkingLevel {
   if (level === 'off') return 'off'
   if (level === 'minimal') return 'low'
@@ -295,6 +331,17 @@ const GLM_52_PROFILE: ReasoningProfile = {
   },
 }
 
+const CLAUDE_OPUS_55_PROFILE: ReasoningProfile = {
+  id: 'claude-opus-5-5',
+  levels: CLAUDE_OPUS_55_LEVELS,
+  // 官方 API 不传 effort 时默认 medium；Proma 初始档与官方对齐。
+  defaultLevel: 'medium',
+  normalize: normalizeClaudeOpus55Level,
+  encodings: {
+    'anthropic-messages': { kind: 'adaptive-effort', effortMap: CLAUDE_OPUS_55_EFFORT_MAP },
+  },
+}
+
 const OPENAI_STANDARD_PROFILE: ReasoningProfile = {
   id: 'openai-reasoning-standard',
   levels: OPENAI_STANDARD_LEVELS,
@@ -334,6 +381,7 @@ export const REASONING_PROFILES: readonly ReasoningProfile[] = [
   K3_PROFILE,
   GLM_52_PROFILE,
   GLM_53_PROFILE,
+  CLAUDE_OPUS_55_PROFILE,
   OPENAI_STANDARD_PROFILE,
   OPENAI_MAX_PROFILE,
   OPENAI_ASTRA_PROFILE,
@@ -356,13 +404,15 @@ export function resolveReasoningProfile(input: ResolveReasoningProfileInput): Re
       ? DEEPSEEK_V4_PRO_PROFILE
       : /^(?:k3(?:-256k)?|kimi-k3)$/.test(modelId)
         ? K3_PROFILE
-        : modelId === 'glm-5.3' || modelId === 'glm-5.3-flash'
-          ? GLM_53_PROFILE
-          : modelId === 'glm-5.2'
-            ? GLM_52_PROFILE
-            : isOpenAITransport && isOpenAIReasoningModel
-              ? /^gpt-5\.6(?:-|$)/.test(modelId) ? OPENAI_MAX_PROFILE : OPENAI_STANDARD_PROFILE
-              : undefined
+        : /^claude-opus-5-5(?:-|$)/.test(modelId)
+          ? CLAUDE_OPUS_55_PROFILE
+          : modelId === 'glm-5.3' || modelId === 'glm-5.3-flash'
+            ? GLM_53_PROFILE
+            : modelId === 'glm-5.2'
+              ? GLM_52_PROFILE
+              : isOpenAITransport && isOpenAIReasoningModel
+                ? /^gpt-5\.6(?:-|$)/.test(modelId) ? OPENAI_MAX_PROFILE : OPENAI_STANDARD_PROFILE
+                : undefined
 
   return profile?.encodings[input.transport] ? profile : undefined
 }

@@ -59,6 +59,10 @@ const DEFAULT_MAX_TOKENS = 64_000
 const VOLCENGINE_GLM_MAX_TOKENS = 128_000
 /** GLM-5.3 与 GLM-5.3-Flash 均支持 128K 最大输出。 */
 const GLM_53_FAMILY_MAX_TOKENS = 131_072
+/** Claude Opus 5.5 官方最大输出 128K（2026-09-22 model page）。 */
+const CLAUDE_OPUS_55_FAMILY_MAX_TOKENS = 128_000
+/** Claude Opus 5.5 官方价格（USD / MTok）：输入 $4、输出 $20、缓存读 $0.2、5m 缓存写 $5。 */
+const CLAUDE_OPUS_55_MODEL_COST: PiModelCost = { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 }
 const CODEX_BASE_URL = 'https://chatgpt.com/backend-api'
 const CODEX_MAX_TOKENS = 128_000
 // GPT-6 Astra 与 GPT-5.6 系列统一按 372K 上下文注册。
@@ -695,11 +699,16 @@ async function resolvePiModelDefaults(input: PiAgentQueryOptions): Promise<PiMod
   const codexAlignedCapabilities = getCodexAlignedGPT5Capabilities(input.model)
   const api = resolvePiApi(input.provider, catalogModel?.api)
   const providerSpecificCapabilities = compilePiReasoningCapabilities(api, input.model)
-  const glmModelId = input.model?.toLowerCase()
+  const normalizedModelId = input.model?.toLowerCase()
   const isVolcengineGlm5x = (input.provider === 'doubao' || input.provider === 'doubao-api' || input.provider === 'ark-coding-plan')
-    && (glmModelId === 'glm-5.2' || glmModelId === 'glm-5.3')
+    && (normalizedModelId === 'glm-5.2' || normalizedModelId === 'glm-5.3')
   const isCatalogMissingGlm53Family = !catalogModel
-    && (glmModelId === 'glm-5.3' || glmModelId === 'glm-5.3-flash')
+    && (normalizedModelId === 'glm-5.3' || normalizedModelId === 'glm-5.3-flash')
+  // Opus 5.5（2026-09-22 发布）尚未进入 Pi catalog。思考协议已由 shared reasoning
+  // profile 编译为 forceAdaptiveThinking + 五档 effort map；这里仅补齐 catalog 缺失时
+  // 官方已验证的输出上限与价格，避免按默认 64K / $0 注册。
+  const isCatalogMissingOpus55Family = !catalogModel
+    && /^claude-opus-5-5(?:-|$)/.test(normalizedModelId ?? '')
   const catalogContextWindow = catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
   const inferredContextWindow = inferContextWindow(input.model) ?? DEFAULT_CONTEXT_WINDOW
   const shouldForceAdaptiveThinking = shouldForcePiAdaptiveThinking(api, catalogModel, input.model)
@@ -712,13 +721,17 @@ async function resolvePiModelDefaults(input: PiAgentQueryOptions): Promise<PiMod
       ? { ...providerSpecificCapabilities?.compat, forceAdaptiveThinking: true }
       : providerSpecificCapabilities?.compat,
     input: catalogModel ? [...catalogModel.input] : ['text', 'image'],
-    cost: catalogModel ? { ...catalogModel.cost } : { ...ZERO_MODEL_COST },
+    cost: catalogModel
+      ? { ...catalogModel.cost }
+      : (isCatalogMissingOpus55Family ? { ...CLAUDE_OPUS_55_MODEL_COST } : { ...ZERO_MODEL_COST }),
     // Codex 对齐策略优先；其他模型仍保留 catalog 与 shared inference 中更大的已验证能力。
     contextWindow: codexAlignedCapabilities?.contextWindow ?? Math.max(catalogContextWindow, inferredContextWindow),
-    // Pi catalog 缺少时，GLM-5.3 系列仍按官方 128K 输出上限注册。
+    // Pi catalog 缺少时，GLM-5.3 / Opus 5.5 系列仍按官方输出上限注册。
     maxTokens: isVolcengineGlm5x
       ? VOLCENGINE_GLM_MAX_TOKENS
-      : (catalogModel?.maxTokens ?? (isCatalogMissingGlm53Family ? GLM_53_FAMILY_MAX_TOKENS : DEFAULT_MAX_TOKENS)),
+      : (catalogModel?.maxTokens ?? (isCatalogMissingGlm53Family
+        ? GLM_53_FAMILY_MAX_TOKENS
+        : isCatalogMissingOpus55Family ? CLAUDE_OPUS_55_FAMILY_MAX_TOKENS : DEFAULT_MAX_TOKENS)),
   }
 }
 

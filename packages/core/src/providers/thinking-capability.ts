@@ -2,6 +2,7 @@
  * Claude 思考模式能力检测
  *
  * Anthropic 在 Claude 4.6+ 引入了 adaptive thinking，协议与旧版 extended thinking 不兼容：
+ * - Opus 5.5 / Fable 5 家族：adaptive 常开且不可关闭，disabled 与旧版 budget 均会 400
  * - Opus 4.7 / Mythos Preview：只支持 adaptive，发送旧版 `{type: 'enabled', budget_tokens}` 会 400
  * - Opus 4.6 / Sonnet 5：两种都支持，adaptive 为推荐
  * - 更老的 Claude 系列（Sonnet 4.5 / Opus 4.5 / 3.x 等）：只支持 manual
@@ -38,6 +39,11 @@ export interface ThinkingCapability {
   disableStrategy: ThinkingDisableStrategy
   /** adaptive effort 模型的默认强度；仅在支持 output_config.effort 时设置。 */
   effort?: string
+  /**
+   * 思考常开模型生成标题等轻量请求时使用的最低 effort 档。
+   * 仅在官方已确认支持 low 档的模型上设置，避免思考吃满小 max_tokens 预算。
+   */
+  titleEffort?: 'low'
 }
 
 /**
@@ -64,10 +70,20 @@ export function detectThinkingCapability(
   providerType: ProviderType,
   modelId: string,
 ): ThinkingCapability {
-  const profile = resolveReasoningProfile({
-    modelId,
-    transport: 'anthropic-messages',
-  })
+  // Claude Opus 5.5（2026-09-22 发布）与 Fable 5 家族：adaptive 思考常开，
+  // `thinking:{type:'disabled'}` 与旧版 `{type:'enabled',budget_tokens}` 均返回 400；
+  // 深度由 output_config.effort 控制（两族官方均确认五档全支持）。
+  // 先在这里排除，避免下方通用 reasoning profile 分支把它们错判为
+  // explicit-disabled（对思考常开模型是 400）；真正的协议分支在供应商兼容分支之后。
+  const isAlwaysOnAdaptiveClaude = startsWith(modelId, 'claude-opus-5-5')
+    || startsWith(modelId, 'claude-fable-5')
+
+  const profile = isAlwaysOnAdaptiveClaude
+    ? undefined
+    : resolveReasoningProfile({
+      modelId,
+      transport: 'anthropic-messages',
+    })
   const encoding = profile?.encodings['anthropic-messages']
   if (encoding?.kind === 'adaptive-effort') {
     const effort = profile && encoding.effortMap[profile.defaultLevel]
@@ -109,6 +125,12 @@ export function detectThinkingCapability(
   // 其它非 Anthropic 供应商：不发 thinking
   if (providerType !== 'anthropic' && providerType !== 'anthropic-compatible') {
     return { mode: 'manual-only', disableStrategy: 'explicit-disabled' }
+  }
+
+  // Claude Opus 5.5 / Fable 5 家族：adaptive 常开且不可关闭（disabled 与旧版 budget 均 400）。
+  // 官方迁移指引：以前关思考的地方改用低 effort，因此标题等轻量请求发 effort low。
+  if (isAlwaysOnAdaptiveClaude) {
+    return { mode: 'adaptive-only', disableStrategy: 'omit-field', titleEffort: 'low' }
   }
 
   // Claude Mythos Preview：adaptive 是默认且唯一，不接受 disabled

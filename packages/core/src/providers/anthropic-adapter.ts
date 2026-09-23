@@ -10,6 +10,8 @@
  * - 同时适配 Anthropic 原生 API、DeepSeek、Kimi API、Kimi Coding Plan、MiniMax
  *
  * 思考模式按模型能力分支（见 thinking-capability.ts）：
+ * - Opus 5.5 / Fable 5 家族：adaptive 常开且不可关闭（disabled 与旧版 budget 均 400），
+ *   只能省略 thinking 字段或发 `{type:'adaptive'}`，深度由 output_config.effort 控制
  * - Opus 4.7 / Mythos Preview：adaptive 唯一模式（发 `{type: 'adaptive'}`）
  * - Opus 4.6 / Sonnet 5：推荐 adaptive
  * - DeepSeek v4 系列：`{type: 'enabled'}` + `output_config.effort = 'max'`
@@ -310,11 +312,13 @@ export class AnthropicAdapter implements ProviderAdapter {
 
     // manual 模式：budget_tokens 必须 < max_tokens，所以开启时放大上限
     // adaptive / effort-based 模式：max_tokens 作为「思考+回答」的总硬上限，给充足空间
+    // adaptive-only（Opus 5.5 / Fable 5 / Mythos Preview）：思考服务端常开、无法关闭，
+    // 即使本地开关关闭也不缩减上限，避免思考吃满小预算导致回答被截断
     const manualThinkingBudget = 16384
     let maxTokens: number
     if (this.providerType === 'minimax') {
       maxTokens = 2048
-    } else if (!input.thinkingEnabled) {
+    } else if (!input.thinkingEnabled && capability.mode !== 'adaptive-only') {
       maxTokens = 8192
     } else if (capability.mode === 'manual-only') {
       maxTokens = manualThinkingBudget + 16384
@@ -459,10 +463,13 @@ export class AnthropicAdapter implements ProviderAdapter {
     }
 
     // 标题生成不需要思考：按模型能力选择禁用方式
-    // - Mythos Preview 不接受 disabled，省略字段即可
+    // - 思考常开模型（Opus 5.5 / Fable 5 / Mythos Preview）不接受 disabled，省略字段即可；
+    //   其中官方确认支持 low effort 的模型再叠加 effort low，避免思考吃满 50 token 预算
     // - 其它 Claude 显式 disabled（对 manual / adaptive 模型都有效）
     if (capability.disableStrategy === 'explicit-disabled') {
       body.thinking = { type: 'disabled' }
+    } else if (capability.titleEffort) {
+      body.output_config = { effort: capability.titleEffort }
     }
 
     return {
